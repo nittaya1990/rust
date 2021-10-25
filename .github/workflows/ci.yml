@@ -634,6 +634,8 @@ jobs:
           AWS_SECRET_ACCESS_KEY: "${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', env.ARTIFACTS_AWS_ACCESS_KEY_ID)] }}"
         if: "success() && !env.SKIP_JOB && (github.event_name == 'push' || env.DEPLOY == '1' || env.DEPLOY_ALT == '1')"
   master:
+    permissions:
+      contents: read
     name: master
     runs-on: ubuntu-latest
     env:
@@ -658,6 +660,8 @@ jobs:
           TOOLSTATE_REPO_ACCESS_TOKEN: "${{ secrets.TOOLSTATE_REPO_ACCESS_TOKEN }}"
         if: success() && !env.SKIP_JOB
   try-success:
+    permissions:
+      contents: none
     needs:
       - try
     if: "success() && github.event_name == 'push' && (github.ref == 'refs/heads/try' || github.ref == 'refs/heads/try-perf') && github.repository == 'rust-lang-ci/rust'"
@@ -668,6 +672,8 @@ jobs:
     name: bors build finished
     runs-on: ubuntu-latest
   try-failure:
+    permissions:
+      contents: none
     needs:
       - try
     if: "!success() && github.event_name == 'push' && (github.ref == 'refs/heads/try' || github.ref == 'refs/heads/try-perf') && github.repository == 'rust-lang-ci/rust'"
@@ -678,6 +684,8 @@ jobs:
     name: bors build finished
     runs-on: ubuntu-latest
   auto-success:
+    permissions:
+      contents: none
     needs:
       - auto
     if: "success() && github.event_name == 'push' && github.ref == 'refs/heads/auto' && github.repository == 'rust-lang-ci/rust'"
@@ -688,6 +696,8 @@ jobs:
     name: bors build finished
     runs-on: ubuntu-latest
   auto-failure:
+    permissions:
+      contents: none
     needs:
       - auto
     if: "!success() && github.event_name == 'push' && github.ref == 'refs/heads/auto' && github.repository == 'rust-lang-ci/rust'"
