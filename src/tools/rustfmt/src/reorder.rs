@@ -6,16 +6,16 @@
 
 // FIXME(#2455): Reorder trait items.
 
-use std::cmp::{Ord, Ordering};
+use std::cmp::Ordering;
 
-use rustc_ast::ast;
-use rustc_span::{symbol::sym, Span};
+use rustc_ast::{ast, attr};
+use rustc_span::{Span, symbol::sym};
 
-use crate::config::{Config, GroupImportsTactic, ImportGranularity};
-use crate::imports::{flatten_use_trees, merge_use_trees, SharedPrefix, UseSegment, UseTree};
+use crate::config::{Config, GroupImportsTactic};
+use crate::imports::{UseSegmentKind, UseTree, normalize_use_trees_with_granularity};
 use crate::items::{is_mod_decl, rewrite_extern_crate, rewrite_mod};
-use crate::lists::{itemize_list, write_list, ListFormatting, ListItem};
-use crate::rewrite::RewriteContext;
+use crate::lists::{ListFormatting, ListItem, itemize_list, write_list};
+use crate::rewrite::{RewriteContext, RewriteErrorExt};
 use crate::shape::Shape;
 use crate::source_map::LineRangeUtils;
 use crate::spanned::Spanned;
@@ -59,7 +59,7 @@ fn wrap_reorderable_items(
     let fmt = ListFormatting::new(shape, context.config)
         .separator("")
         .align_comments(false);
-    write_list(list_items, &fmt)
+    write_list(list_items, &fmt).ok()
 }
 
 fn rewrite_reorderable_item(
@@ -99,7 +99,7 @@ fn rewrite_reorderable_or_regroupable_items(
                 ";",
                 |item| item.span().lo(),
                 |item| item.span().hi(),
-                |_item| Some("".to_owned()),
+                |_item| Ok("".to_owned()),
                 span.lo(),
                 span.hi(),
                 false,
@@ -107,15 +107,10 @@ fn rewrite_reorderable_or_regroupable_items(
             for (item, list_item) in normalized_items.iter_mut().zip(list_items) {
                 item.list_item = Some(list_item.clone());
             }
-            normalized_items = match context.config.imports_granularity() {
-                ImportGranularity::Crate => merge_use_trees(normalized_items, SharedPrefix::Crate),
-                ImportGranularity::Module => {
-                    merge_use_trees(normalized_items, SharedPrefix::Module)
-                }
-                ImportGranularity::Item => flatten_use_trees(normalized_items),
-                ImportGranularity::One => merge_use_trees(normalized_items, SharedPrefix::One),
-                ImportGranularity::Preserve => normalized_items,
-            };
+            normalized_items = normalize_use_trees_with_granularity(
+                normalized_items,
+                context.config.imports_granularity(),
+            );
 
             let mut regrouped_items = match context.config.group_imports() {
                 GroupImportsTactic::Preserve | GroupImportsTactic::One => {
@@ -136,9 +131,16 @@ fn rewrite_reorderable_or_regroupable_items(
                 .map(|use_group| {
                     let item_vec: Vec<_> = use_group
                         .into_iter()
-                        .map(|use_tree| ListItem {
-                            item: use_tree.rewrite_top_level(context, nested_shape),
-                            ..use_tree.list_item.unwrap_or_else(ListItem::empty)
+                        .map(|use_tree| {
+                            let item = use_tree.rewrite_top_level(context, nested_shape);
+                            if let Some(list_item) = use_tree.list_item {
+                                ListItem {
+                                    item: item,
+                                    ..list_item
+                                }
+                            } else {
+                                ListItem::from_item(item)
+                            }
                         })
                         .collect();
                     wrap_reorderable_items(context, &item_vec, nested_shape)
@@ -156,7 +158,7 @@ fn rewrite_reorderable_or_regroupable_items(
                 ";",
                 |item| item.span().lo(),
                 |item| item.span().hi(),
-                |item| rewrite_reorderable_item(context, item, shape),
+                |item| rewrite_reorderable_item(context, item, shape).unknown_error(),
                 span.lo(),
                 span.hi(),
                 false,
@@ -172,7 +174,7 @@ fn rewrite_reorderable_or_regroupable_items(
 }
 
 fn contains_macro_use_attr(item: &ast::Item) -> bool {
-    crate::attr::contains_name(&item.attrs, sym::macro_use)
+    attr::contains_name(&item.attrs, sym::macro_use)
 }
 
 /// Divides imports into three groups, corresponding to standard, external
@@ -187,16 +189,16 @@ fn group_imports(uts: Vec<UseTree>) -> Vec<Vec<UseTree>> {
             external_imports.push(ut);
             continue;
         }
-        match &ut.path[0] {
-            UseSegment::Ident(id, _) => match id.as_ref() {
+        match &ut.path[0].kind {
+            UseSegmentKind::Ident(id, _) => match id.as_ref() {
                 "std" | "alloc" | "core" => std_imports.push(ut),
                 _ => external_imports.push(ut),
             },
-            UseSegment::Slf(_) | UseSegment::Super(_) | UseSegment::Crate(_) => {
+            UseSegmentKind::Slf(_) | UseSegmentKind::Super(_) | UseSegmentKind::Crate(_) => {
                 local_imports.push(ut)
             }
             // These are probably illegal here
-            UseSegment::Glob | UseSegment::List(_) => external_imports.push(ut),
+            UseSegmentKind::Glob | UseSegmentKind::List(_) => external_imports.push(ut),
         }
     }
 
@@ -268,13 +270,13 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         item_kind: ReorderableItemKind,
         in_group: bool,
     ) -> usize {
-        let mut last = self.parse_sess.lookup_line_range(items[0].span());
+        let mut last = self.psess.lookup_line_range(items[0].span());
         let item_length = items
             .iter()
             .take_while(|ppi| {
                 item_kind.is_same_item_kind(&***ppi)
                     && (!in_group || {
-                        let current = self.parse_sess.lookup_line_range(ppi.span());
+                        let current = self.psess.lookup_line_range(ppi.span());
                         let in_same_group = current.lo < last.hi + 2;
                         last = current;
                         in_same_group

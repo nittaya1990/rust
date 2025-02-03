@@ -1,7 +1,11 @@
 #![deny(clippy::borrowed_box)]
-#![allow(clippy::blacklisted_name)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
+#![allow(dead_code, unused_variables)]
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::disallowed_names,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_lifetimes
+)]
 
 use std::fmt::Display;
 
@@ -19,20 +23,17 @@ pub fn test1(foo: &mut Box<bool>) {
 
 pub fn test2() {
     let foo: &Box<bool>;
+    //~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 }
 
 struct Test3<'a> {
     foo: &'a Box<bool>,
+    //~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 }
 
 trait Test4 {
     fn test4(a: &Box<bool>);
-}
-
-impl<'a> Test4 for Test3<'a> {
-    fn test4(a: &Box<bool>) {
-        unimplemented!();
-    }
+    //~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 }
 
 use std::any::Any;
@@ -93,17 +94,34 @@ pub fn test13(boxed_slice: &mut Box<[i32]>) {
 
 // The suggestion should include proper parentheses to avoid a syntax error.
 pub fn test14(_display: &Box<dyn Display>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 pub fn test15(_display: &Box<dyn Display + Send>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 pub fn test16<'a>(_display: &'a Box<dyn Display + 'a>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 
 pub fn test17(_display: &Box<impl Display>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 pub fn test18(_display: &Box<impl Display + Send>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 pub fn test19<'a>(_display: &'a Box<impl Display + 'a>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
 
 // This exists only to check what happens when parentheses are already present.
 // Even though the current implementation doesn't put extra parentheses,
 // it's fine that unnecessary parentheses appear in the future for some reason.
 pub fn test20(_display: &Box<(dyn Display + Send)>) {}
+//~^ ERROR: you seem to be trying to use `&Box<T>`. Consider using just `&T`
+
+#[allow(clippy::borrowed_box)]
+trait Trait {
+    fn f(b: &Box<bool>);
+}
+
+// Trait impls are not linted
+impl Trait for () {
+    fn f(_: &Box<bool>) {}
+}
 
 fn main() {
     test1(&mut Box::new(false));

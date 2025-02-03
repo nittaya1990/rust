@@ -2,6 +2,7 @@
 
 #![feature(arbitrary_self_types, unsize, coerce_unsized, dispatch_from_dyn)]
 #![feature(rustc_attrs)]
+#![allow(internal_features)]
 
 use std::{
     ops::{Deref, CoerceUnsized, DispatchFromDyn},
@@ -37,7 +38,7 @@ impl<T: DispatchFromDyn<U>, U> DispatchFromDyn<Wrapper<U>> for Wrapper<T> {}
 
 trait Trait {
     // This method isn't object-safe yet. Unsized by-value `self` is object-safe (but not callable
-    // without unsized_locals), but wrappers arond `Self` currently are not.
+    // without unsized_locals), but wrappers around `Self` currently are not.
     // FIXME (mikeyhew) uncomment this when unsized rvalues object-safety is implemented
     // fn wrapper(self: Wrapper<Self>) -> i32;
     fn ptr_wrapper(self: Ptr<Wrapper<Self>>) -> i32;

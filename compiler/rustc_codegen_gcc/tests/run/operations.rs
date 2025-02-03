@@ -5,11 +5,12 @@
 //     39
 //     10
 
-#![allow(unused_attributes)]
-#![feature(auto_traits, lang_items, no_core, start, intrinsics, arbitrary_self_types)]
+#![allow(internal_features, unused_attributes)]
+#![feature(auto_traits, lang_items, no_core, intrinsics, arbitrary_self_types, rustc_attrs)]
 
 #![no_std]
 #![no_core]
+#![no_main]
 
 /*
  * Core
@@ -38,8 +39,8 @@ pub trait Deref {
     fn deref(&self) -> &Self::Target;
 }
 
-#[lang = "receiver"]
-trait Receiver {
+#[lang = "legacy_receiver"]
+trait LegacyReceiver {
 }
 
 #[lang = "freeze"]
@@ -59,23 +60,26 @@ mod libc {
         pub fn puts(s: *const u8) -> i32;
         pub fn fflush(stream: *mut i32) -> i32;
 
-        pub static STDOUT: *mut i32;
+        pub static stdout: *mut i32;
     }
 }
 
 mod intrinsics {
-    extern "rust-intrinsic" {
-        pub fn abort() -> !;
+    #[rustc_nounwind]
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn abort() -> ! {
+        loop {}
     }
 }
 
 #[lang = "panic"]
 #[track_caller]
 #[no_mangle]
-pub fn panic(_msg: &str) -> ! {
+pub fn panic(_msg: &'static str) -> ! {
     unsafe {
         libc::puts("Panicking\0" as *const str as *const u8);
-        libc::fflush(libc::STDOUT);
+        libc::fflush(libc::stdout);
         intrinsics::abort();
     }
 }
@@ -206,12 +210,30 @@ impl Mul for isize {
     }
 }
 
+#[track_caller]
+#[lang = "panic_const_add_overflow"]
+pub fn panic_const_add_overflow() -> ! {
+    panic("attempt to add with overflow");
+}
+
+#[track_caller]
+#[lang = "panic_const_sub_overflow"]
+pub fn panic_const_sub_overflow() -> ! {
+    panic("attempt to subtract with overflow");
+}
+
+#[track_caller]
+#[lang = "panic_const_mul_overflow"]
+pub fn panic_const_mul_overflow() -> ! {
+    panic("attempt to multiply with overflow");
+}
+
 /*
  * Code
  */
 
-#[start]
-fn main(mut argc: isize, _argv: *const *const u8) -> isize {
+#[no_mangle]
+extern "C" fn main(argc: i32, _argv: *const *const u8) -> i32 {
     unsafe {
         libc::printf(b"%ld\n\0" as *const u8 as *const i8, 40 + argc);
         libc::printf(b"%ld\n\0" as *const u8 as *const i8, 40 - argc);

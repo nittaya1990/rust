@@ -1,5 +1,3 @@
-// run-rustfix
-
 #[warn(clippy::cmp_owned)]
 #[allow(clippy::unnecessary_operation, clippy::no_effect, unused_must_use, clippy::eq_op)]
 fn main() {
@@ -45,7 +43,7 @@ impl ToOwned for Foo {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 struct Bar;
 
 impl PartialEq<Foo> for Bar {
@@ -61,7 +59,7 @@ impl std::borrow::Borrow<Foo> for Bar {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 struct Baz;
 
 impl ToOwned for Baz {

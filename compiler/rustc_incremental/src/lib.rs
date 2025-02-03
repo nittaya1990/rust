@@ -1,31 +1,30 @@
 //! Support for serializing the dep-graph and reloading it.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![deny(missing_docs)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(let_else)]
-#![feature(nll)]
-#![recursion_limit = "256"]
-#![allow(rustc::potential_query_instability)]
-
-#[macro_use]
-extern crate rustc_middle;
-#[macro_use]
-extern crate tracing;
+#![doc(rust_logo)]
+#![feature(file_buffered)]
+#![feature(rustdoc_internals)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 mod assert_dep_graph;
-pub mod assert_module_sources;
+mod errors;
 mod persist;
 
-use assert_dep_graph::assert_dep_graph;
-pub use persist::copy_cgu_workproduct_to_incr_comp_cache_dir;
-pub use persist::delete_workproduct_files;
-pub use persist::finalize_session_directory;
-pub use persist::garbage_collect_session_directories;
-pub use persist::in_incr_comp_dir;
-pub use persist::in_incr_comp_dir_sess;
-pub use persist::load_query_result_cache;
-pub use persist::prepare_session_directory;
-pub use persist::save_dep_graph;
-pub use persist::save_work_product_index;
-pub use persist::LoadResult;
-pub use persist::{build_dep_graph, load_dep_graph, DepGraphFuture};
+pub use persist::{
+    LoadResult, copy_cgu_workproduct_to_incr_comp_cache_dir, finalize_session_directory,
+    in_incr_comp_dir, in_incr_comp_dir_sess, load_query_result_cache, save_work_product_index,
+    setup_dep_graph,
+};
+use rustc_middle::util::Providers;
+
+#[allow(missing_docs)]
+pub fn provide(providers: &mut Providers) {
+    providers.hooks.save_dep_graph =
+        |tcx| tcx.sess.time("serialize_dep_graph", || persist::save_dep_graph(tcx.tcx));
+}
+
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

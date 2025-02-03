@@ -1,16 +1,16 @@
 //! Defines the `IntoIter` owned iterator for arrays.
 
-use crate::{
-    cmp, fmt,
-    iter::{self, ExactSizeIterator, FusedIterator, TrustedLen},
-    mem::{self, MaybeUninit},
-    ops::Range,
-    ptr,
-};
+use crate::intrinsics::transmute_unchecked;
+use crate::iter::{self, FusedIterator, TrustedLen, TrustedRandomAccessNoCoerce};
+use crate::mem::MaybeUninit;
+use crate::num::NonZero;
+use crate::ops::{IndexRange, Range};
+use crate::{fmt, ptr};
 
 /// A by-value [array] iterator.
 #[stable(feature = "array_value_iter", since = "1.51.0")]
 #[rustc_insignificant_dtor]
+#[rustc_diagnostic_item = "ArrayIntoIter"]
 pub struct IntoIter<T, const N: usize> {
     /// This is the array we are iterating over.
     ///
@@ -29,12 +29,13 @@ pub struct IntoIter<T, const N: usize> {
     /// The elements in `data` that have not been yielded yet.
     ///
     /// Invariants:
-    /// - `alive.start <= alive.end`
     /// - `alive.end <= N`
-    alive: Range<usize>,
+    ///
+    /// (And the `IndexRange` type requires `alive.start <= alive.end`.)
+    alive: IndexRange,
 }
 
-// Note: the `#[rustc_skip_array_during_method_dispatch]` on `trait IntoIterator`
+// Note: the `#[rustc_skip_during_method_dispatch(array)]` on `trait IntoIterator`
 // hides this implementation from explicit `.into_iter()` calls on editions < 2021,
 // so those calls will still resolve to the slice implementation, by reference.
 #[stable(feature = "array_into_iter_impl", since = "1.53.0")]
@@ -43,8 +44,10 @@ impl<T, const N: usize> IntoIterator for [T; N] {
     type IntoIter = IntoIter<T, N>;
 
     /// Creates a consuming iterator, that is, one that moves each value out of
-    /// the array (from start to end). The array cannot be used after calling
-    /// this unless `T` implements `Copy`, so the whole array is copied.
+    /// the array (from start to end).
+    ///
+    /// The array cannot be used after calling this unless `T` implements
+    /// `Copy`, so the whole array is copied.
     ///
     /// Arrays have special behavior when calling `.into_iter()` prior to the
     /// 2021 edition -- see the [array] Editions section for more information.
@@ -61,25 +64,18 @@ impl<T, const N: usize> IntoIterator for [T; N] {
         // an array of `T`.
         //
         // With that, this initialization satisfies the invariants.
-
-        // FIXME(LukasKalbertodt): actually use `mem::transmute` here, once it
-        // works with const generics:
-        //     `mem::transmute::<[T; N], [MaybeUninit<T>; N]>(array)`
         //
-        // Until then, we can use `mem::transmute_copy` to create a bitwise copy
-        // as a different type, then forget `array` so that it is not dropped.
-        unsafe {
-            let iter = IntoIter { data: mem::transmute_copy(&self), alive: 0..N };
-            mem::forget(self);
-            iter
-        }
+        // FIXME: If normal `transmute` ever gets smart enough to allow this
+        // directly, use it instead of `transmute_unchecked`.
+        let data: [MaybeUninit<T>; N] = unsafe { transmute_unchecked(self) };
+        IntoIter { data, alive: IndexRange::zero_to(N) }
     }
 }
 
 impl<T, const N: usize> IntoIter<T, N> {
     /// Creates a new iterator over the given `array`.
     #[stable(feature = "array_value_iter", since = "1.51.0")]
-    #[rustc_deprecated(since = "1.59.0", reason = "use `IntoIterator::into_iter` instead")]
+    #[deprecated(since = "1.59.0", note = "use `IntoIterator::into_iter` instead")]
     pub fn new(array: [T; N]) -> Self {
         IntoIterator::into_iter(array)
     }
@@ -103,19 +99,17 @@ impl<T, const N: usize> IntoIter<T, N> {
     ///
     /// ```
     /// #![feature(array_into_iter_constructors)]
-    ///
-    /// #![feature(maybe_uninit_array_assume_init)]
-    /// #![feature(maybe_uninit_uninit_array)]
+    /// #![feature(maybe_uninit_uninit_array_transpose)]
     /// use std::array::IntoIter;
     /// use std::mem::MaybeUninit;
     ///
-    /// # // Hi!  Thanks for reading the code.  This is restricted to `Copy` because
-    /// # // otherwise it could leak.  A fully-general version this would need a drop
+    /// # // Hi!  Thanks for reading the code. This is restricted to `Copy` because
+    /// # // otherwise it could leak. A fully-general version this would need a drop
     /// # // guard to handle panics from the iterator, but this works for an example.
     /// fn next_chunk<T: Copy, const N: usize>(
     ///     it: &mut impl Iterator<Item = T>,
     /// ) -> Result<[T; N], IntoIter<T, N>> {
-    ///     let mut buffer = MaybeUninit::uninit_array();
+    ///     let mut buffer = [const { MaybeUninit::uninit() }; N];
     ///     let mut i = 0;
     ///     while i < N {
     ///         match it.next() {
@@ -133,7 +127,7 @@ impl<T, const N: usize> IntoIter<T, N> {
     ///     }
     ///
     ///     // SAFETY: We've initialized all N items
-    ///     unsafe { Ok(MaybeUninit::array_assume_init(buffer)) }
+    ///     unsafe { Ok(buffer.transpose().assume_init()) }
     /// }
     ///
     /// let r: [_; 4] = next_chunk(&mut (10..16)).unwrap();
@@ -142,12 +136,13 @@ impl<T, const N: usize> IntoIter<T, N> {
     /// assert_eq!(r.collect::<Vec<_>>(), vec![10, 11, 12, 13, 14, 15]);
     /// ```
     #[unstable(feature = "array_into_iter_constructors", issue = "91583")]
-    #[rustc_const_unstable(feature = "const_array_into_iter_constructors", issue = "91583")]
     pub const unsafe fn new_unchecked(
         buffer: [MaybeUninit<T>; N],
         initialized: Range<usize>,
     ) -> Self {
-        Self { data: buffer, alive: initialized }
+        // SAFETY: one of our safety conditions is that the range is canonical.
+        let alive = unsafe { IndexRange::new_unchecked(initialized.start, initialized.end) };
+        Self { data: buffer, alive }
     }
 
     /// Creates an iterator over `T` which returns no elements.
@@ -203,13 +198,12 @@ impl<T, const N: usize> IntoIter<T, N> {
     /// assert_eq!(get_bytes(false).collect::<Vec<_>>(), vec![]);
     /// ```
     #[unstable(feature = "array_into_iter_constructors", issue = "91583")]
-    #[rustc_const_unstable(feature = "const_array_into_iter_constructors", issue = "91583")]
     pub const fn empty() -> Self {
-        let buffer = MaybeUninit::uninit_array();
+        let buffer = [const { MaybeUninit::uninit() }; N];
         let initialized = 0..0;
 
         // SAFETY: We're telling it that none of the elements are initialized,
-        // which is trivially true.  And ∀N: usize, 0 <= N.
+        // which is trivially true. And ∀N: usize, 0 <= N.
         unsafe { Self::new_unchecked(buffer, initialized) }
     }
 
@@ -220,7 +214,7 @@ impl<T, const N: usize> IntoIter<T, N> {
         // SAFETY: We know that all elements within `alive` are properly initialized.
         unsafe {
             let slice = self.data.get_unchecked(self.alive.clone());
-            MaybeUninit::slice_assume_init_ref(slice)
+            slice.assume_init_ref()
         }
     }
 
@@ -230,7 +224,7 @@ impl<T, const N: usize> IntoIter<T, N> {
         // SAFETY: We know that all elements within `alive` are properly initialized.
         unsafe {
             let slice = self.data.get_unchecked_mut(self.alive.clone());
-            MaybeUninit::slice_assume_init_mut(slice)
+            slice.assume_init_mut()
         }
     }
 }
@@ -266,7 +260,7 @@ impl<T, const N: usize> Iterator for IntoIter<T, N> {
         Fold: FnMut(Acc, Self::Item) -> Acc,
     {
         let data = &mut self.data;
-        self.alive.by_ref().fold(init, |acc, idx| {
+        iter::ByRefSized(&mut self.alive).fold(init, |acc, idx| {
             // SAFETY: idx is obtained by folding over the `alive` range, which implies the
             // value is currently considered alive but as the range is being consumed each value
             // we read here will only be read once and then considered dead.
@@ -282,25 +276,25 @@ impl<T, const N: usize> Iterator for IntoIter<T, N> {
         self.next_back()
     }
 
-    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
-        let len = self.len();
-
-        // The number of elements to drop.  Always in-bounds by construction.
-        let delta = cmp::min(n, len);
-
-        let range_to_drop = self.alive.start..(self.alive.start + delta);
-
-        // Moving the start marks them as conceptually "dropped", so if anything
-        // goes bad then our drop impl won't double-free them.
-        self.alive.start += delta;
+    fn advance_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
+        // This also moves the start, which marks them as conceptually "dropped",
+        // so if anything goes bad then our drop impl won't double-free them.
+        let range_to_drop = self.alive.take_prefix(n);
+        let remaining = n - range_to_drop.len();
 
         // SAFETY: These elements are currently initialized, so it's fine to drop them.
         unsafe {
             let slice = self.data.get_unchecked_mut(range_to_drop);
-            ptr::drop_in_place(MaybeUninit::slice_assume_init_mut(slice));
+            slice.assume_init_drop();
         }
 
-        if n > len { Err(len) } else { Ok(()) }
+        NonZero::new(remaining).map_or(Ok(()), Err)
+    }
+
+    #[inline]
+    unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
+        // SAFETY: The caller must provide an idx that is in bound of the remainder.
+        unsafe { self.data.as_ptr().add(self.alive.start()).add(idx).cast::<T>().read() }
     }
 }
 
@@ -323,25 +317,33 @@ impl<T, const N: usize> DoubleEndedIterator for IntoIter<T, N> {
         })
     }
 
-    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
-        let len = self.len();
+    #[inline]
+    fn rfold<Acc, Fold>(mut self, init: Acc, mut rfold: Fold) -> Acc
+    where
+        Fold: FnMut(Acc, Self::Item) -> Acc,
+    {
+        let data = &mut self.data;
+        iter::ByRefSized(&mut self.alive).rfold(init, |acc, idx| {
+            // SAFETY: idx is obtained by folding over the `alive` range, which implies the
+            // value is currently considered alive but as the range is being consumed each value
+            // we read here will only be read once and then considered dead.
+            rfold(acc, unsafe { data.get_unchecked(idx).assume_init_read() })
+        })
+    }
 
-        // The number of elements to drop.  Always in-bounds by construction.
-        let delta = cmp::min(n, len);
-
-        let range_to_drop = (self.alive.end - delta)..self.alive.end;
-
-        // Moving the end marks them as conceptually "dropped", so if anything
-        // goes bad then our drop impl won't double-free them.
-        self.alive.end -= delta;
+    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
+        // This also moves the end, which marks them as conceptually "dropped",
+        // so if anything goes bad then our drop impl won't double-free them.
+        let range_to_drop = self.alive.take_suffix(n);
+        let remaining = n - range_to_drop.len();
 
         // SAFETY: These elements are currently initialized, so it's fine to drop them.
         unsafe {
             let slice = self.data.get_unchecked_mut(range_to_drop);
-            ptr::drop_in_place(MaybeUninit::slice_assume_init_mut(slice));
+            slice.assume_init_drop();
         }
 
-        if n > len { Err(len) } else { Ok(()) }
+        NonZero::new(remaining).map_or(Ok(()), Err)
     }
 }
 
@@ -358,9 +360,7 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
 #[stable(feature = "array_value_iter_impls", since = "1.40.0")]
 impl<T, const N: usize> ExactSizeIterator for IntoIter<T, N> {
     fn len(&self) -> usize {
-        // Will never underflow due to the invariant `alive.start <=
-        // alive.end`.
-        self.alive.end - self.alive.start
+        self.alive.len()
     }
     fn is_empty(&self) -> bool {
         self.alive.is_empty()
@@ -377,19 +377,40 @@ impl<T, const N: usize> FusedIterator for IntoIter<T, N> {}
 #[stable(feature = "array_value_iter_impls", since = "1.40.0")]
 unsafe impl<T, const N: usize> TrustedLen for IntoIter<T, N> {}
 
+#[doc(hidden)]
+#[unstable(issue = "none", feature = "std_internals")]
+#[rustc_unsafe_specialization_marker]
+pub trait NonDrop {}
+
+// T: Copy as approximation for !Drop since get_unchecked does not advance self.alive
+// and thus we can't implement drop-handling
+#[unstable(issue = "none", feature = "std_internals")]
+impl<T: Copy> NonDrop for T {}
+
+#[doc(hidden)]
+#[unstable(issue = "none", feature = "std_internals")]
+unsafe impl<T, const N: usize> TrustedRandomAccessNoCoerce for IntoIter<T, N>
+where
+    T: NonDrop,
+{
+    const MAY_HAVE_SIDE_EFFECT: bool = false;
+}
+
 #[stable(feature = "array_value_iter_impls", since = "1.40.0")]
 impl<T: Clone, const N: usize> Clone for IntoIter<T, N> {
     fn clone(&self) -> Self {
         // Note, we don't really need to match the exact same alive range, so
         // we can just clone into offset 0 regardless of where `self` is.
-        let mut new = Self { data: MaybeUninit::uninit_array(), alive: 0..0 };
+        let mut new =
+            Self { data: [const { MaybeUninit::uninit() }; N], alive: IndexRange::zero_to(0) };
 
         // Clone all alive elements.
         for (src, dst) in iter::zip(self.as_slice(), &mut new.data) {
             // Write a clone into the new array, then update its alive range.
             // If cloning panics, we'll correctly drop the previous items.
             dst.write(src.clone());
-            new.alive.end += 1;
+            // This addition cannot overflow as we're iterating a slice
+            new.alive = IndexRange::zero_to(new.alive.end() + 1);
         }
 
         new

@@ -1,30 +1,33 @@
 <div class="main-heading">
-    <h1 class="fqn"> {#- -#}
-        <span class="in-band"> {#- -#}
-            {{-typ-}}
-            {#- The breadcrumbs of the item path, like std::string -#}
-            {%- for component in path_components -%}
-            <a href="{{component.path|safe}}index.html">{{component.name}}</a>::<wbr>
-            {%- endfor -%}
-            <a class="{{item_type}}" href="#">{{name}}</a> {#- -#}
-            <button id="copy-path" onclick="copy_path(this)" title="Copy item path to clipboard"> {#- -#}
-                <img src="{{static_root_path|safe}}clipboard{{page.resource_suffix}}.svg" {# -#}
-                    width="19" height="18" {# -#}
-                    alt="Copy item path"> {#- -#}
-            </button> {#- -#}
-        </span> {#- -#}
-    </h1> {#- -#}
-    <span class="out-of-band"> {#- -#}
+    {% if !path_components.is_empty() %}
+    <div class="rustdoc-breadcrumbs">
+        {% for (i, component) in path_components.iter().enumerate() %}
+            {% if i != 0 %}
+                ::<wbr>
+            {% endif %}
+            <a href="{{component.path|safe}}index.html">{{component.name}}</a>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <h1>
+        {{typ}}
+        <span{% if item_type != "mod" +%} class="{{item_type}}"{% endif %}>
+        {{name}}
+        </span> {# #}
+        <button id="copy-path" title="Copy item path to clipboard"> {# #}
+            Copy item path {# #}
+        </button> {# #}
+    </h1> {# #}
+    <rustdoc-toolbar></rustdoc-toolbar> {# #}
+    <span class="sub-heading">
         {% if !stability_since_raw.is_empty() %}
-        {{- stability_since_raw|safe }} · {# -#}
+        {{ stability_since_raw|safe +}}
         {% endif %}
-        {%- match src_href -%}
-            {%- when Some with (href) -%}
-                <a class="srclink" href="{{href|safe}}">source</a> · {# -#}
-            {%- else -%}
-        {%- endmatch -%}
-        <a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs"> {#- -#}
-            [<span class="inner">&#x2212;</span>] {#- -#}
-        </a> {#- -#}
-    </span> {#- -#}
-</div>
+        {% match src_href %}
+            {% when Some with (href) %}
+                {% if !stability_since_raw.is_empty() +%} · {%+ endif %}
+                <a class="src" href="{{href|safe}}">Source</a> {#+ #}
+            {% else %}
+        {% endmatch %}
+    </span> {# #}
+</div> {# #}

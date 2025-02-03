@@ -1,34 +1,16 @@
 use super::*;
-
 use crate::{
-    bench::Bencher,
     console::OutputLocation,
     formatters::PrettyFormatter,
-    options::OutputFormat,
     test::{
-        filter_tests,
-        parse_opts,
-        run_test,
-        DynTestFn,
-        DynTestName,
         MetricMap,
-        RunIgnored,
-        RunStrategy,
-        ShouldPanic,
-        StaticTestName,
-        TestDesc,
-        TestDescAndFn,
-        TestOpts,
-        TrIgnored,
-        TrOk,
         // FIXME (introduced by #65251)
         // ShouldPanic, StaticTestName, TestDesc, TestDescAndFn, TestOpts, TestTimeOptions,
         // TestType, TrFailedMsg, TrIgnored, TrOk,
+        parse_opts,
     },
     time::{TestTimeOptions, TimeThreshold},
 };
-use std::sync::mpsc::channel;
-use std::time::Duration;
 
 impl TestOpts {
     fn new() -> TestOpts {
@@ -51,6 +33,7 @@ impl TestOpts {
             skip: vec![],
             time_options: None,
             options: Options::new(),
+            fail_fast: false,
         }
     }
 }
@@ -61,42 +44,54 @@ fn one_ignored_one_unignored_test() -> Vec<TestDescAndFn> {
             desc: TestDesc {
                 name: StaticTestName("1"),
                 ignore: true,
-                #[cfg(not(bootstrap))]
                 ignore_message: None,
+                source_file: "",
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
                 should_panic: ShouldPanic::No,
                 compile_fail: false,
                 no_run: false,
                 test_type: TestType::Unknown,
             },
-            testfn: DynTestFn(Box::new(move || {})),
+            testfn: DynTestFn(Box::new(move || Ok(()))),
         },
         TestDescAndFn {
             desc: TestDesc {
                 name: StaticTestName("2"),
                 ignore: false,
-                #[cfg(not(bootstrap))]
                 ignore_message: None,
+                source_file: "",
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
                 should_panic: ShouldPanic::No,
                 compile_fail: false,
                 no_run: false,
                 test_type: TestType::Unknown,
             },
-            testfn: DynTestFn(Box::new(move || {})),
+            testfn: DynTestFn(Box::new(move || Ok(()))),
         },
     ]
 }
 
 #[test]
-pub fn do_not_run_ignored_tests() {
-    fn f() {
+fn do_not_run_ignored_tests() {
+    fn f() -> Result<(), String> {
         panic!();
     }
     let desc = TestDescAndFn {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: true,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::No,
             compile_fail: false,
             no_run: false,
@@ -105,20 +100,26 @@ pub fn do_not_run_ignored_tests() {
         testfn: DynTestFn(Box::new(f)),
     };
     let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
     assert_ne!(result, TrOk);
 }
 
 #[test]
-pub fn ignored_tests_result_in_ignored() {
-    fn f() {}
+fn ignored_tests_result_in_ignored() {
+    fn f() -> Result<(), String> {
+        Ok(())
+    }
     let desc = TestDescAndFn {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: true,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::No,
             compile_fail: false,
             no_run: false,
@@ -127,24 +128,27 @@ pub fn ignored_tests_result_in_ignored() {
         testfn: DynTestFn(Box::new(f)),
     };
     let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
     assert_eq!(result, TrIgnored);
 }
 
-// FIXME: Re-enable emscripten once it can catch panics again (introduced by #65251)
 #[test]
-#[cfg(not(target_os = "emscripten"))]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_should_panic() {
-    fn f() {
+    fn f() -> Result<(), String> {
         panic!();
     }
     let desc = TestDescAndFn {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::Yes,
             compile_fail: false,
             no_run: false,
@@ -153,24 +157,27 @@ fn test_should_panic() {
         testfn: DynTestFn(Box::new(f)),
     };
     let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
     assert_eq!(result, TrOk);
 }
 
-// FIXME: Re-enable emscripten once it can catch panics again (introduced by #65251)
 #[test]
-#[cfg(not(target_os = "emscripten"))]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_should_panic_good_message() {
-    fn f() {
+    fn f() -> Result<(), String> {
         panic!("an error message");
     }
     let desc = TestDescAndFn {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::YesWithMessage("error message"),
             compile_fail: false,
             no_run: false,
@@ -179,17 +186,16 @@ fn test_should_panic_good_message() {
         testfn: DynTestFn(Box::new(f)),
     };
     let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
     assert_eq!(result, TrOk);
 }
 
-// FIXME: Re-enable emscripten once it can catch panics again (introduced by #65251)
 #[test]
-#[cfg(not(target_os = "emscripten"))]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_should_panic_bad_message() {
     use crate::tests::TrFailedMsg;
-    fn f() {
+    fn f() -> Result<(), String> {
         panic!("an error message");
     }
     let expected = "foobar";
@@ -200,8 +206,12 @@ fn test_should_panic_bad_message() {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::YesWithMessage(expected),
             compile_fail: false,
             no_run: false,
@@ -210,18 +220,18 @@ fn test_should_panic_bad_message() {
         testfn: DynTestFn(Box::new(f)),
     };
     let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
     assert_eq!(result, TrFailedMsg(failed_msg.to_string()));
 }
 
-// FIXME: Re-enable emscripten once it can catch panics again (introduced by #65251)
 #[test]
-#[cfg(not(target_os = "emscripten"))]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_should_panic_non_string_message_type() {
-    use crate::tests::TrFailedMsg;
     use std::any::TypeId;
-    fn f() {
+
+    use crate::tests::TrFailedMsg;
+    fn f() -> Result<(), String> {
         std::panic::panic_any(1i32);
     }
     let expected = "foobar";
@@ -235,8 +245,12 @@ fn test_should_panic_non_string_message_type() {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::YesWithMessage(expected),
             compile_fail: false,
             no_run: false,
@@ -245,25 +259,30 @@ fn test_should_panic_non_string_message_type() {
         testfn: DynTestFn(Box::new(f)),
     };
     let (tx, rx) = channel();
-    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
     assert_eq!(result, TrFailedMsg(failed_msg));
 }
 
-// FIXME: Re-enable emscripten once it can catch panics again (introduced by #65251)
 #[test]
-#[cfg(not(target_os = "emscripten"))]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_should_panic_but_succeeds() {
     let should_panic_variants = [ShouldPanic::Yes, ShouldPanic::YesWithMessage("error message")];
 
     for &should_panic in should_panic_variants.iter() {
-        fn f() {}
+        fn f() -> Result<(), String> {
+            Ok(())
+        }
         let desc = TestDescAndFn {
             desc: TestDesc {
                 name: StaticTestName("whatever"),
                 ignore: false,
-                #[cfg(not(bootstrap))]
                 ignore_message: None,
+                source_file: "",
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
                 should_panic,
                 compile_fail: false,
                 no_run: false,
@@ -272,15 +291,7 @@ fn test_should_panic_but_succeeds() {
             testfn: DynTestFn(Box::new(f)),
         };
         let (tx, rx) = channel();
-        run_test(
-            &TestOpts::new(),
-            false,
-            TestId(0),
-            desc,
-            RunStrategy::InProcess,
-            tx,
-            Concurrent::No,
-        );
+        run_test(&TestOpts::new(), false, TestId(0), desc, RunStrategy::InProcess, tx);
         let result = rx.recv().unwrap().result;
         assert_eq!(
             result,
@@ -292,13 +303,19 @@ fn test_should_panic_but_succeeds() {
 }
 
 fn report_time_test_template(report_time: bool) -> Option<TestExecTime> {
-    fn f() {}
+    fn f() -> Result<(), String> {
+        Ok(())
+    }
     let desc = TestDescAndFn {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::No,
             compile_fail: false,
             no_run: false,
@@ -310,7 +327,7 @@ fn report_time_test_template(report_time: bool) -> Option<TestExecTime> {
 
     let test_opts = TestOpts { time_options, ..TestOpts::new() };
     let (tx, rx) = channel();
-    run_test(&test_opts, false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&test_opts, false, TestId(0), desc, RunStrategy::InProcess, tx);
     let exec_time = rx.recv().unwrap().exec_time;
     exec_time
 }
@@ -328,13 +345,19 @@ fn test_should_report_time() {
 }
 
 fn time_test_failure_template(test_type: TestType) -> TestResult {
-    fn f() {}
+    fn f() -> Result<(), String> {
+        Ok(())
+    }
     let desc = TestDescAndFn {
         desc: TestDesc {
             name: StaticTestName("whatever"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::No,
             compile_fail: false,
             no_run: false,
@@ -348,7 +371,7 @@ fn time_test_failure_template(test_type: TestType) -> TestResult {
 
     let test_opts = TestOpts { time_options: Some(time_options), ..TestOpts::new() };
     let (tx, rx) = channel();
-    run_test(&test_opts, false, TestId(0), desc, RunStrategy::InProcess, tx, Concurrent::No);
+    run_test(&test_opts, false, TestId(0), desc, RunStrategy::InProcess, tx);
     let result = rx.recv().unwrap().result;
 
     result
@@ -373,8 +396,12 @@ fn typed_test_desc(test_type: TestType) -> TestDesc {
     TestDesc {
         name: StaticTestName("whatever"),
         ignore: false,
-        #[cfg(not(bootstrap))]
         ignore_message: None,
+        source_file: "",
+        start_line: 0,
+        start_col: 0,
+        end_line: 0,
+        end_col: 0,
         should_panic: ShouldPanic::No,
         compile_fail: false,
         no_run: false,
@@ -442,7 +469,7 @@ fn parse_include_ignored_flag() {
 }
 
 #[test]
-pub fn filter_for_ignored_option() {
+fn filter_for_ignored_option() {
     // When we run ignored tests the test filter should filter out all the
     // unignored tests and flip the ignore flag on the rest to false
 
@@ -459,7 +486,7 @@ pub fn filter_for_ignored_option() {
 }
 
 #[test]
-pub fn run_include_ignored_option() {
+fn run_include_ignored_option() {
     // When we "--include-ignored" tests, the ignore flag should be set to false on
     // all tests and no test filtered out
 
@@ -476,7 +503,7 @@ pub fn run_include_ignored_option() {
 }
 
 #[test]
-pub fn exclude_should_panic_option() {
+fn exclude_should_panic_option() {
     let mut opts = TestOpts::new();
     opts.run_tests = true;
     opts.exclude_should_panic = true;
@@ -486,14 +513,18 @@ pub fn exclude_should_panic_option() {
         desc: TestDesc {
             name: StaticTestName("3"),
             ignore: false,
-            #[cfg(not(bootstrap))]
             ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
             should_panic: ShouldPanic::Yes,
             compile_fail: false,
             no_run: false,
             test_type: TestType::Unknown,
         },
-        testfn: DynTestFn(Box::new(move || {})),
+        testfn: DynTestFn(Box::new(move || Ok(()))),
     });
 
     let filtered = filter_tests(&opts, tests);
@@ -503,7 +534,7 @@ pub fn exclude_should_panic_option() {
 }
 
 #[test]
-pub fn exact_filter_match() {
+fn exact_filter_match() {
     fn tests() -> Vec<TestDescAndFn> {
         ["base", "base::test", "base::test1", "base::test2"]
             .into_iter()
@@ -511,14 +542,18 @@ pub fn exact_filter_match() {
                 desc: TestDesc {
                     name: StaticTestName(name),
                     ignore: false,
-                    #[cfg(not(bootstrap))]
                     ignore_message: None,
+                    source_file: "",
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 0,
                     should_panic: ShouldPanic::No,
                     compile_fail: false,
                     no_run: false,
                     test_type: TestType::Unknown,
                 },
-                testfn: DynTestFn(Box::new(move || {})),
+                testfn: DynTestFn(Box::new(move || Ok(()))),
             })
             .collect()
     }
@@ -594,15 +629,21 @@ fn sample_tests() -> Vec<TestDescAndFn> {
         "test::run_include_ignored_option".to_string(),
         "test::sort_tests".to_string(),
     ];
-    fn testfn() {}
+    fn testfn() -> Result<(), String> {
+        Ok(())
+    }
     let mut tests = Vec::new();
     for name in &names {
         let test = TestDescAndFn {
             desc: TestDesc {
                 name: DynTestName((*name).clone()),
                 ignore: false,
-                #[cfg(not(bootstrap))]
                 ignore_message: None,
+                source_file: "",
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
                 should_panic: ShouldPanic::No,
                 compile_fail: false,
                 no_run: false,
@@ -616,34 +657,7 @@ fn sample_tests() -> Vec<TestDescAndFn> {
 }
 
 #[test]
-pub fn sort_tests() {
-    let mut opts = TestOpts::new();
-    opts.run_tests = true;
-
-    let tests = sample_tests();
-    let filtered = filter_tests(&opts, tests);
-
-    let expected = vec![
-        "isize::test_pow".to_string(),
-        "isize::test_to_str".to_string(),
-        "sha1::test".to_string(),
-        "test::do_not_run_ignored_tests".to_string(),
-        "test::filter_for_ignored_option".to_string(),
-        "test::first_free_arg_should_be_a_filter".to_string(),
-        "test::ignored_tests_result_in_ignored".to_string(),
-        "test::parse_ignored_flag".to_string(),
-        "test::parse_include_ignored_flag".to_string(),
-        "test::run_include_ignored_option".to_string(),
-        "test::sort_tests".to_string(),
-    ];
-
-    for (a, b) in expected.iter().zip(filtered) {
-        assert_eq!(*a, b.desc.name.to_string());
-    }
-}
-
-#[test]
-pub fn shuffle_tests() {
+fn shuffle_tests() {
     let mut opts = TestOpts::new();
     opts.shuffle = true;
 
@@ -662,7 +676,7 @@ pub fn shuffle_tests() {
 }
 
 #[test]
-pub fn shuffle_tests_with_seed() {
+fn shuffle_tests_with_seed() {
     let mut opts = TestOpts::new();
     opts.shuffle = true;
 
@@ -680,7 +694,7 @@ pub fn shuffle_tests_with_seed() {
 }
 
 #[test]
-pub fn order_depends_on_more_than_seed() {
+fn order_depends_on_more_than_seed() {
     let mut opts = TestOpts::new();
     opts.shuffle = true;
 
@@ -708,7 +722,7 @@ pub fn order_depends_on_more_than_seed() {
 }
 
 #[test]
-pub fn test_metricmap_compare() {
+fn test_metricmap_compare() {
     let mut m1 = MetricMap::new();
     let mut m2 = MetricMap::new();
     m1.insert_metric("in-both-noise", 1000.0, 200.0);
@@ -731,30 +745,39 @@ pub fn test_metricmap_compare() {
 }
 
 #[test]
-pub fn test_bench_once_no_iter() {
-    fn f(_: &mut Bencher) {}
-    bench::run_once(f);
-}
-
-#[test]
-pub fn test_bench_once_iter() {
-    fn f(b: &mut Bencher) {
-        b.iter(|| {})
+fn test_bench_once_no_iter() {
+    fn f(_: &mut Bencher) -> Result<(), String> {
+        Ok(())
     }
-    bench::run_once(f);
+    bench::run_once(f).unwrap();
 }
 
 #[test]
-pub fn test_bench_no_iter() {
-    fn f(_: &mut Bencher) {}
+fn test_bench_once_iter() {
+    fn f(b: &mut Bencher) -> Result<(), String> {
+        b.iter(|| {});
+        Ok(())
+    }
+    bench::run_once(f).unwrap();
+}
+
+#[test]
+fn test_bench_no_iter() {
+    fn f(_: &mut Bencher) -> Result<(), String> {
+        Ok(())
+    }
 
     let (tx, rx) = channel();
 
     let desc = TestDesc {
         name: StaticTestName("f"),
         ignore: false,
-        #[cfg(not(bootstrap))]
         ignore_message: None,
+        source_file: "",
+        start_line: 0,
+        start_col: 0,
+        end_line: 0,
+        end_col: 0,
         should_panic: ShouldPanic::No,
         compile_fail: false,
         no_run: false,
@@ -766,9 +789,10 @@ pub fn test_bench_no_iter() {
 }
 
 #[test]
-pub fn test_bench_iter() {
-    fn f(b: &mut Bencher) {
-        b.iter(|| {})
+fn test_bench_iter() {
+    fn f(b: &mut Bencher) -> Result<(), String> {
+        b.iter(|| {});
+        Ok(())
     }
 
     let (tx, rx) = channel();
@@ -776,8 +800,12 @@ pub fn test_bench_iter() {
     let desc = TestDesc {
         name: StaticTestName("f"),
         ignore: false,
-        #[cfg(not(bootstrap))]
         ignore_message: None,
+        source_file: "",
+        start_line: 0,
+        start_col: 0,
+        end_line: 0,
+        end_col: 0,
         should_panic: ShouldPanic::No,
         compile_fail: false,
         no_run: false,
@@ -793,8 +821,12 @@ fn should_sort_failures_before_printing_them() {
     let test_a = TestDesc {
         name: StaticTestName("a"),
         ignore: false,
-        #[cfg(not(bootstrap))]
         ignore_message: None,
+        source_file: "",
+        start_line: 0,
+        start_col: 0,
+        end_line: 0,
+        end_col: 0,
         should_panic: ShouldPanic::No,
         compile_fail: false,
         no_run: false,
@@ -804,8 +836,12 @@ fn should_sort_failures_before_printing_them() {
     let test_b = TestDesc {
         name: StaticTestName("b"),
         ignore: false,
-        #[cfg(not(bootstrap))]
         ignore_message: None,
+        source_file: "",
+        start_line: 0,
+        start_col: 0,
+        end_line: 0,
+        end_col: 0,
         should_panic: ShouldPanic::No,
         compile_fail: false,
         no_run: false,
@@ -827,6 +863,7 @@ fn should_sort_failures_before_printing_them() {
         failures: vec![(test_b, Vec::new()), (test_a, Vec::new())],
         options: Options::new(),
         not_failures: Vec::new(),
+        ignores: Vec::new(),
         time_failures: Vec::new(),
     };
 
@@ -839,4 +876,39 @@ fn should_sort_failures_before_printing_them() {
     let apos = s.find("a").unwrap();
     let bpos = s.find("b").unwrap();
     assert!(apos < bpos);
+}
+
+#[test]
+#[cfg(not(target_os = "emscripten"))]
+fn test_dyn_bench_returning_err_fails_when_run_as_test() {
+    fn f(_: &mut Bencher) -> Result<(), String> {
+        Result::Err("An error".into())
+    }
+    let desc = TestDescAndFn {
+        desc: TestDesc {
+            name: StaticTestName("whatever"),
+            ignore: false,
+            ignore_message: None,
+            source_file: "",
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
+            should_panic: ShouldPanic::No,
+            compile_fail: false,
+            no_run: false,
+            test_type: TestType::Unknown,
+        },
+        testfn: DynBenchFn(Box::new(f)),
+    };
+    let (tx, rx) = channel();
+    let notify = move |event: TestEvent| {
+        if let TestEvent::TeResult(result) = event {
+            tx.send(result).unwrap();
+        }
+        Ok(())
+    };
+    run_tests(&TestOpts { run_tests: true, ..TestOpts::new() }, vec![desc], notify).unwrap();
+    let result = rx.recv().unwrap().result;
+    assert_eq!(result, TrFailed);
 }

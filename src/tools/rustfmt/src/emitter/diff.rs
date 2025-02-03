@@ -28,11 +28,11 @@ impl Emitter for DiffEmitter {
 
         if has_diff {
             if self.config.print_misformatted_file_names() {
-                writeln!(output, "{}", ensure_real_path(filename).display())?;
+                writeln!(output, "{filename}")?;
             } else {
                 print_diff(
                     mismatch,
-                    |line_num| format!("Diff in {} at line {}:", filename, line_num),
+                    |line_num| format!("Diff in {}:{}:", filename, line_num),
                     &self.config,
                 );
             }
@@ -40,8 +40,7 @@ impl Emitter for DiffEmitter {
             // This occurs when the only difference between the original and formatted values
             // is the newline style. This happens because The make_diff function compares the
             // original and formatted values line by line, independent of line endings.
-            let file_path = ensure_real_path(filename);
-            writeln!(output, "Incorrect newline style in {}", file_path.display())?;
+            writeln!(output, "Incorrect newline style in {filename}")?;
             return Ok(EmitterResult { has_diff: true });
         }
 
@@ -52,8 +51,6 @@ impl Emitter for DiffEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::FileName;
     use std::path::PathBuf;
 
     #[test]
@@ -111,7 +108,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(writer).unwrap(),
-            format!("{}\n{}\n", bin_file, lib_file),
+            format!("{bin_file}\n{lib_file}\n"),
         )
     }
 

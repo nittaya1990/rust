@@ -1,4 +1,4 @@
-# Command-line arguments
+# Command-line Arguments
 
 Here's a list of command-line arguments to `rustc` and what they do.
 
@@ -18,6 +18,22 @@ The value can either be a single identifier or two identifiers separated by `=`.
 For examples, `--cfg 'verbose'` or `--cfg 'feature="serde"'`. These correspond
 to `#[cfg(verbose)]` and `#[cfg(feature = "serde")]` respectively.
 
+<a id="option-check-cfg"></a>
+## `--check-cfg`: configure compile-time checking of conditional compilation
+
+This flag enables checking conditional configurations of the crate at compile-time,
+specifically it helps configure the set of expected cfg names and values, in order
+to check that every _reachable_ `#[cfg]` matches the expected config names and values.
+
+This is different from the `--cfg` flag above which activates some config but do
+not expect them. This is useful to prevent stalled conditions, typos, ...
+
+Refer to the [Checking conditional configurations](check-cfg.md) of this book
+for further details and explanation.
+
+For examples, `--check-cfg 'cfg(verbose)'` or `--check-cfg 'cfg(feature, values("serde"))'`.
+These correspond to `#[cfg(verbose)]` and `#[cfg(feature = "serde")]` respectively.
+
 <a id="option-l-search-path"></a>
 ## `-L`: add a directory to the library search path
 
@@ -31,11 +47,13 @@ KIND=PATH` where `KIND` may be one of:
   directory.
 - `native` — Only search for native libraries in this directory.
 - `framework` — Only search for macOS frameworks in this directory.
-- `all` — Search for all library kinds in this directory. This is the default
+- `all` — Search for all library kinds in this directory, except frameworks. This is the default
   if `KIND` is not specified.
 
 <a id="option-l-link-lib"></a>
 ## `-l`: link the generated crate to a native library
+
+Syntax: `-l [KIND[:MODIFIERS]=]NAME[:RENAME]`.
 
 This flag allows you to specify linking to a specific native library when building
 a crate.
@@ -47,10 +65,17 @@ where `KIND` may be one of:
 - `static` — A native static library (such as a `.a` archive).
 - `framework` — A macOS framework.
 
-The kind of library can be specified in a [`#[link]`
+If the kind is specified, then linking modifiers can be attached to it.
+Modifiers are specified as a comma-delimited string with each modifier prefixed with
+either a `+` or `-` to indicate that the modifier is enabled or disabled, respectively.
+Specifying multiple `modifiers` arguments in a single `link` attribute,
+or multiple identical modifiers in the same `modifiers` argument is not currently supported. \
+Example: `-l static:+whole-archive=mylib`.
+
+The kind of library and the modifiers can also be specified in a [`#[link]`
 attribute][link-attribute]. If the kind is not specified in the `link`
-attribute or on the command-line, it will link a dynamic library if available,
-otherwise it will use a static library. If the kind is specified on the
+attribute or on the command-line, it will link a dynamic library by default,
+except when building a static executable. If the kind is specified on the
 command-line, it will override the kind specified in a `link` attribute.
 
 The name used in a `link` attribute may be overridden using the form `-l
@@ -58,6 +83,67 @@ ATTR_NAME:LINK_NAME` where `ATTR_NAME` is the name in the `link` attribute,
 and `LINK_NAME` is the name of the actual library that will be linked.
 
 [link-attribute]: ../reference/items/external-blocks.html#the-link-attribute
+
+### Linking modifiers: `whole-archive`
+
+This modifier is only compatible with the `static` linking kind.
+Using any other kind will result in a compiler error.
+
+`+whole-archive` means that the static library is linked as a whole archive
+without throwing any object files away.
+
+This modifier translates to `--whole-archive` for `ld`-like linkers,
+to `/WHOLEARCHIVE` for `link.exe`, and to `-force_load` for `ld64`.
+The modifier does nothing for linkers that don't support it.
+
+The default for this modifier is `-whole-archive`.
+
+### Linking modifiers: `bundle`
+
+This modifier is only compatible with the `static` linking kind.
+Using any other kind will result in a compiler error.
+
+When building a rlib or staticlib `+bundle` means that the native static library
+will be packed into the rlib or staticlib archive, and then retrieved from there
+during linking of the final binary.
+
+When building a rlib `-bundle` means that the native static library is registered as a dependency
+of that rlib "by name", and object files from it are included only during linking of the final
+binary, the file search by that name is also performed during final linking. \
+When building a staticlib `-bundle` means that the native static library is simply not included
+into the archive and some higher level build system will need to add it later during linking of
+the final binary.
+
+This modifier has no effect when building other targets like executables or dynamic libraries.
+
+The default for this modifier is `+bundle`.
+
+### Linking modifiers: `verbatim`
+
+This modifier is compatible with all linking kinds.
+
+`+verbatim` means that rustc itself won't add any target-specified library prefixes or suffixes
+(like `lib` or `.a`) to the library name, and will try its best to ask for the same thing from the
+linker.
+
+For `ld`-like linkers supporting GNU extensions rustc will use the `-l:filename` syntax (note the
+colon) when passing the library, so the linker won't add any prefixes or suffixes to it.
+See [`-l namespec`](https://sourceware.org/binutils/docs/ld/Options.html) in ld documentation for
+more details. \
+For linkers not supporting any verbatim modifiers (e.g. `link.exe` or `ld64`) the library name will
+be passed as is. So the most reliable cross-platform use scenarios for this option are when no
+linker is involved, for example bundling native libraries into rlibs.
+
+`-verbatim` means that rustc will either add a target-specific prefix and suffix to the library
+name before passing it to linker, or won't prevent linker from implicitly adding it. \
+In case of `raw-dylib` kind in particular `.dll` will be added to the library name on Windows.
+
+The default for this modifier is `-verbatim`.
+
+NOTE: Even with `+verbatim` and `-l:filename` syntax `ld`-like linkers do not typically support
+passing absolute paths to libraries. Usually such paths need to be passed as input files without
+using any options like `-l`, e.g. `ld /my/absolute/path`. \
+`-Clink-arg=/my/absolute/path` can be used for doing this from stable `rustc`.
 
 <a id="option-crate-type"></a>
 ## `--crate-type`: a list of types of crates for the compiler to emit
@@ -93,7 +179,7 @@ This informs `rustc` of the name of your crate.
 <a id="option-edition"></a>
 ## `--edition`: specify the edition to use
 
-This flag takes a value of `2015`, `2018` or `2021`. The default is `2015`. More
+This flag takes a value of `2015`, `2018`,`2021`, or `2024`. The default is `2015`. More
 information about editions may be found in the [edition guide].
 
 [edition guide]: ../edition-guide/introduction.html
@@ -118,21 +204,45 @@ The valid emit kinds are:
 - `llvm-ir` — Generates a file containing [LLVM IR]. The default output
   filename is `CRATE_NAME.ll`.
 - `metadata` — Generates a file containing metadata about the crate. The
-  default output filename is `CRATE_NAME.rmeta`.
+  default output filename is `libCRATE_NAME.rmeta`.
 - `mir` — Generates a file containing rustc's mid-level intermediate
   representation. The default output filename is `CRATE_NAME.mir`.
 - `obj` — Generates a native object file. The default output filename is
   `CRATE_NAME.o`.
 
 The output filename can be set with the [`-o` flag](#option-o-output). A
-suffix may be added to the filename with the [`-C extra-filename`
-flag](codegen-options/index.md#extra-filename). The files are written to the
-current directory unless the [`--out-dir` flag](#option-out-dir) is used. Each
-emission type may also specify the output filename with the form `KIND=PATH`,
-which takes precedence over the `-o` flag.
+suffix may be added to the filename with the
+[`-C extra-filename` flag](codegen-options/index.md#extra-filename).
+
+Output files are written to the current directory unless the
+[`--out-dir` flag](#option-out-dir) is used.
 
 [LLVM bitcode]: https://llvm.org/docs/BitCodeFormat.html
 [LLVM IR]: https://llvm.org/docs/LangRef.html
+
+### Custom paths for individual emit kinds
+
+Each emit type can optionally be followed by `=` to specify an explicit output
+path that only applies to the output of that type. For example:
+
+- `--emit=link,dep-info=/path/to/dep-info.d`
+  - Emit the crate itself as normal,
+    and also emit dependency info to the specified path.
+- `--emit=llvm-ir=-,mir`
+  - Emit MIR to the default filename (based on crate name),
+    and emit LLVM IR to stdout.
+
+### Emitting to stdout
+
+When using `--emit` or [`-o`](#option-o-output), output can be sent to stdout
+by specifying `-` as the path (e.g. `-o -`).
+
+Binary output types can only be written to stdout if it is not a tty.
+Text output types (`asm`, `dep-info`, `llvm-ir` and `mir`) can be written to
+stdout regardless of whether it is a tty or not.
+
+Only one type of output can be written to stdout. Attempting to write multiple
+types to stdout at the same time will result in an error.
 
 <a id="option-print"></a>
 ## `--print`: print compiler information
@@ -146,7 +256,8 @@ The valid types of print values are:
 - `crate-name` — The name of the crate.
 - `file-names` — The names of the files created by the `link` emit kind.
 - `sysroot` — Path to the sysroot.
-- `target-libdir` - Path to the target libdir.
+- `target-libdir` — Path to the target libdir.
+- `host-tuple` — The target-tuple string of the host compiler (e.g. `x86_64-unknown-linux-gnu`)
 - `cfg` — List of cfg values. See [conditional compilation] for more
   information about cfg values.
 - `target-list` — List of known targets. The target may be selected with the
@@ -176,8 +287,18 @@ The valid types of print values are:
   exact format of this debugging output is not a stable guarantee, other than
   that it will include the linker executable and the text of each command-line
   argument passed to the linker.
+- `deployment-target` — The currently selected [deployment target] (or minimum OS version)
+  for the selected Apple platform target. This value can be used or passed along to other
+  components alongside a Rust build that need this information, such as C compilers.
+  This returns rustc's minimum supported deployment target if no `*_DEPLOYMENT_TARGET` variable
+  is present in the environment, or otherwise returns the variable's parsed value.
+
+A filepath may optionally be specified for each requested information kind, in
+the format `--print KIND=PATH`, just like for `--emit`. When a path is
+specified, information will be written there instead of to stdout.
 
 [conditional compilation]: ../reference/conditional-compilation.html
+[deployment target]: https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/cross_development/Configuring/configuring.html
 
 <a id="option-g-debug"></a>
 ## `-g`: include debug information
@@ -225,6 +346,11 @@ This flag will set which lints should be set to the [warn level](lints/levels.md
 
 _Note:_ The order of these lint level arguments is taken into account, see [lint level via compiler flag](lints/levels.md#via-compiler-flag) for more information.
 
+<a id="option-force-warn"></a>
+## `--force-warn`: force a lint to warn
+
+This flag sets the given lint to the [forced warn level](lints/levels.md#force-warn) and the level cannot be overridden, even ignoring the [lint caps](lints/levels.md#capping-lints).
+
 <a id="option-a-allow"></a>
 ## `-A`: set lint allowed
 
@@ -250,9 +376,9 @@ _Note:_ The order of these lint level arguments is taken into account, see [lint
 ## `-Z`: set unstable options
 
 This flag will allow you to set unstable options of rustc. In order to set multiple options,
-the -Z flag can be used multiple times. For example: `rustc -Z verbose -Z time`.
+the -Z flag can be used multiple times. For example: `rustc -Z verbose-internals -Z time-passes`.
 Specifying options with -Z is only available on nightly. To view all available options
-run: `rustc -Z help`.
+run: `rustc -Z help`, or see [The Unstable Book](../unstable-book/index.html).
 
 <a id="option-cap-lints"></a>
 ## `--cap-lints`: set the most restrictive lint level
@@ -336,6 +462,12 @@ are:
 - `always` — Always use colors.
 - `never` — Never colorize output.
 
+<a id="option-diagnostic-width"></a>
+## `--diagnostic-width`: specify the terminal width for diagnostics
+
+This flag takes a number that specifies the width of the terminal in characters.
+Formatting of diagnostics will take the width into consideration to make them better fit on the screen.
+
 <a id="option-remap-path-prefix"></a>
 ## `--remap-path-prefix`: remap source names in output
 
@@ -350,6 +482,9 @@ current directory out of pathnames emitted into the object files. The
 replacement is purely textual, with no consideration of the current system's
 pathname syntax. For example `--remap-path-prefix foo=bar` will match
 `foo/lib.rs` but not `./foo/lib.rs`.
+
+When multiple remappings are given and several of them match, the **last**
+matching one is applied.
 
 <a id="option-json"></a>
 ## `--json`: configure json messages printed by the compiler
@@ -383,6 +518,9 @@ to customize the output:
   is emitted. An artifact corresponds to a request from the [`--emit` CLI
   argument](#option-emit), and as soon as the artifact is available on the
   filesystem a notification will be emitted.
+
+- `future-incompat` - includes a JSON message that contains a report if the
+  crate contains any code that may fail to compile in the future.
 
 Note that it is invalid to combine the `--json` argument with the
 [`--color`](#option-color) argument, and it is required to combine `--json`

@@ -1,6 +1,6 @@
 //! The AST pointer.
 //!
-//! Provides `P<T>`, a frozen owned smart pointer.
+//! Provides [`P<T>`][struct@P], an owned smart pointer.
 //!
 //! # Motivations and benefits
 //!
@@ -8,28 +8,24 @@
 //!   passes (e.g., one may be able to bypass the borrow checker with a shared
 //!   `ExprKind::AddrOf` node taking a mutable borrow).
 //!
-//! * **Immutability**: `P<T>` disallows mutating its inner `T`, unlike `Box<T>`
-//!   (unless it contains an `Unsafe` interior, but that may be denied later).
-//!   This mainly prevents mistakes, but can also enforces a kind of "purity".
-//!
 //! * **Efficiency**: folding can reuse allocation space for `P<T>` and `Vec<T>`,
 //!   the latter even when the input and output types differ (as it would be the
 //!   case with arenas or a GADT AST using type parameters to toggle features).
 //!
-//! * **Maintainability**: `P<T>` provides a fixed interface - `Deref`,
-//!   `and_then` and `map` - which can remain fully functional even if the
-//!   implementation changes (using a special thread-local heap, for example).
-//!   Moreover, a switch to, e.g., `P<'a, T>` would be easy and mostly automated.
+//! * **Maintainability**: `P<T>` provides an interface, which can remain fully
+//!   functional even if the implementation changes (using a special thread-local
+//!   heap, for example). Moreover, a switch to, e.g., `P<'a, T>` would be easy
+//!   and mostly automated.
 
 use std::fmt::{self, Debug, Display};
-use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut};
 use std::{slice, vec};
 
-use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
-
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 /// An owned smart pointer.
+///
+/// See the [module level documentation][crate::ptr] for details.
 pub struct P<T: ?Sized> {
     ptr: Box<T>,
 }
@@ -121,21 +117,15 @@ impl<D: Decoder, T: 'static + Decodable<D>> Decodable<D> for P<T> {
 }
 
 impl<S: Encoder, T: Encodable<S>> Encodable<S> for P<T> {
-    fn encode(&self, s: &mut S) -> Result<(), S::Error> {
-        (**self).encode(s)
+    fn encode(&self, s: &mut S) {
+        (**self).encode(s);
     }
 }
 
 impl<T> P<[T]> {
-    pub const fn new() -> P<[T]> {
-        // HACK(eddyb) bypass the lack of a `const fn` to create an empty `Box<[T]>`
-        // (as trait methods, `default` in this case, can't be `const fn` yet).
-        P {
-            ptr: unsafe {
-                use std::ptr::NonNull;
-                std::mem::transmute(NonNull::<[T; 0]>::dangling() as NonNull<[T]>)
-            },
-        }
+    // FIXME(const-hack) make this const again
+    pub fn new() -> P<[T]> {
+        P { ptr: Box::default() }
     }
 
     #[inline(never)]
@@ -168,9 +158,9 @@ impl<T> From<Vec<T>> for P<[T]> {
     }
 }
 
-impl<T> Into<Vec<T>> for P<[T]> {
-    fn into(self) -> Vec<T> {
-        self.into_vec()
+impl<T> From<P<[T]>> for Vec<T> {
+    fn from(val: P<[T]>) -> Self {
+        val.into_vec()
     }
 }
 
@@ -193,13 +183,13 @@ impl<'a, T> IntoIterator for &'a P<[T]> {
     type Item = &'a T;
     type IntoIter = slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.ptr.into_iter()
+        self.ptr.iter()
     }
 }
 
 impl<S: Encoder, T: Encodable<S>> Encodable<S> for P<[T]> {
-    fn encode(&self, s: &mut S) -> Result<(), S::Error> {
-        Encodable::encode(&**self, s)
+    fn encode(&self, s: &mut S) {
+        Encodable::encode(&**self, s);
     }
 }
 

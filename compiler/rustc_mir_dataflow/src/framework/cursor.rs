@@ -1,34 +1,66 @@
 //! Random access inspection of the results of a dataflow analysis.
 
-use crate::framework::BitSetExt;
-
-use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::ops::{Deref, DerefMut};
 
 #[cfg(debug_assertions)]
-use rustc_index::bit_set::BitSet;
+use rustc_index::bit_set::DenseBitSet;
 use rustc_middle::mir::{self, BasicBlock, Location};
 
 use super::{Analysis, Direction, Effect, EffectIndex, Results};
 
-/// A `ResultsCursor` that borrows the underlying `Results`.
-pub type ResultsRefCursor<'a, 'mir, 'tcx, A> = ResultsCursor<'mir, 'tcx, A, &'a Results<'tcx, A>>;
+/// Some `ResultsCursor`s want to own a `Results`, and some want to borrow a `Results`, either
+/// mutable or immutably. This type allows all of the above. It's similar to `Cow`.
+pub enum ResultsHandle<'a, 'tcx, A>
+where
+    A: Analysis<'tcx>,
+{
+    BorrowedMut(&'a mut Results<'tcx, A>),
+    Owned(Results<'tcx, A>),
+}
 
-/// Allows random access inspection of the results of a dataflow analysis.
+impl<'tcx, A> Deref for ResultsHandle<'_, 'tcx, A>
+where
+    A: Analysis<'tcx>,
+{
+    type Target = Results<'tcx, A>;
+
+    fn deref(&self) -> &Results<'tcx, A> {
+        match self {
+            ResultsHandle::BorrowedMut(borrowed) => borrowed,
+            ResultsHandle::Owned(owned) => owned,
+        }
+    }
+}
+
+impl<'tcx, A> DerefMut for ResultsHandle<'_, 'tcx, A>
+where
+    A: Analysis<'tcx>,
+{
+    fn deref_mut(&mut self) -> &mut Results<'tcx, A> {
+        match self {
+            ResultsHandle::BorrowedMut(borrowed) => borrowed,
+            ResultsHandle::Owned(owned) => owned,
+        }
+    }
+}
+
+/// Allows random access inspection of the results of a dataflow analysis. Use this when you want
+/// to inspect domain values only in certain locations; use `ResultsVisitor` if you want to inspect
+/// domain values in many or all locations.
 ///
-/// This cursor only has linear performance within a basic block when its statements are visited in
-/// the same order as the `DIRECTION` of the analysis. In the worst case—when statements are
-/// visited in *reverse* order—performance will be quadratic in the number of statements in the
-/// block. The order in which basic blocks are inspected has no impact on performance.
-///
-/// A `ResultsCursor` can either own (the default) or borrow the dataflow results it inspects. The
-/// type of ownership is determined by `R` (see `ResultsRefCursor` above).
-pub struct ResultsCursor<'mir, 'tcx, A, R = Results<'tcx, A>>
+/// Because `Results` only has domain values for the entry of each basic block, these inspections
+/// involve some amount of domain value recomputations. This cursor only has linear performance
+/// within a basic block when its statements are visited in the same order as the `DIRECTION` of
+/// the analysis. In the worst case—when statements are visited in *reverse* order—performance will
+/// be quadratic in the number of statements in the block. The order in which basic blocks are
+/// inspected has no impact on performance.
+pub struct ResultsCursor<'mir, 'tcx, A>
 where
     A: Analysis<'tcx>,
 {
     body: &'mir mir::Body<'tcx>,
-    results: R,
+    results: ResultsHandle<'mir, 'tcx, A>,
     state: A::Domain,
 
     pos: CursorPosition,
@@ -39,17 +71,26 @@ where
     state_needs_reset: bool,
 
     #[cfg(debug_assertions)]
-    reachable_blocks: BitSet<BasicBlock>,
+    reachable_blocks: DenseBitSet<BasicBlock>,
 }
 
-impl<'mir, 'tcx, A, R> ResultsCursor<'mir, 'tcx, A, R>
+impl<'mir, 'tcx, A> ResultsCursor<'mir, 'tcx, A>
 where
     A: Analysis<'tcx>,
-    R: Borrow<Results<'tcx, A>>,
 {
+    /// Returns the dataflow state at the current location.
+    pub fn get(&self) -> &A::Domain {
+        &self.state
+    }
+
+    /// Returns the body this analysis was run on.
+    pub fn body(&self) -> &'mir mir::Body<'tcx> {
+        self.body
+    }
+
     /// Returns a new cursor that can inspect `results`.
-    pub fn new(body: &'mir mir::Body<'tcx>, results: R) -> Self {
-        let bottom_value = results.borrow().analysis.bottom_value(body);
+    pub fn new(body: &'mir mir::Body<'tcx>, results: ResultsHandle<'mir, 'tcx, A>) -> Self {
+        let bottom_value = results.analysis.bottom_value(body);
         ResultsCursor {
             body,
             results,
@@ -75,17 +116,22 @@ where
 
     /// Returns the underlying `Results`.
     pub fn results(&self) -> &Results<'tcx, A> {
-        &self.results.borrow()
+        &self.results
+    }
+
+    /// Returns the underlying `Results`.
+    pub fn mut_results(&mut self) -> &mut Results<'tcx, A> {
+        &mut self.results
     }
 
     /// Returns the `Analysis` used to generate the underlying `Results`.
     pub fn analysis(&self) -> &A {
-        &self.results.borrow().analysis
+        &self.results.analysis
     }
 
-    /// Returns the dataflow state at the current location.
-    pub fn get(&self) -> &A::Domain {
-        &self.state
+    /// Returns the `Analysis` used to generate the underlying `Results`.
+    pub fn mut_analysis(&mut self) -> &mut A {
+        &mut self.results.analysis
     }
 
     /// Resets the cursor to hold the entry set for the given basic block.
@@ -97,7 +143,7 @@ where
         #[cfg(debug_assertions)]
         assert!(self.reachable_blocks.contains(block));
 
-        self.state.clone_from(&self.results.borrow().entry_set_for_block(block));
+        self.state.clone_from(self.results.entry_set_for_block(block));
         self.pos = CursorPosition::block_entry(block);
         self.state_needs_reset = false;
     }
@@ -109,7 +155,7 @@ where
     /// For backward analyses, this is the state that will be propagated to its
     /// predecessors (ignoring edge-specific effects).
     pub fn seek_to_block_start(&mut self, block: BasicBlock) {
-        if A::Direction::is_forward() {
+        if A::Direction::IS_FORWARD {
             self.seek_to_block_entry(block)
         } else {
             self.seek_after(Location { block, statement_index: 0 }, Effect::Primary)
@@ -123,7 +169,7 @@ where
     /// For forward analyses, this is the state that will be propagated to its
     /// successors (ignoring edge-specific effects).
     pub fn seek_to_block_end(&mut self, block: BasicBlock) {
-        if A::Direction::is_backward() {
+        if A::Direction::IS_BACKWARD {
             self.seek_to_block_entry(block)
         } else {
             self.seek_after(self.body.terminator_loc(block), Effect::Primary)
@@ -133,15 +179,15 @@ where
     /// Advances the cursor to hold the dataflow state at `target` before its "primary" effect is
     /// applied.
     ///
-    /// The "before" effect at the target location *will be* applied.
+    /// The "early" effect at the target location *will be* applied.
     pub fn seek_before_primary_effect(&mut self, target: Location) {
-        self.seek_after(target, Effect::Before)
+        self.seek_after(target, Effect::Early)
     }
 
     /// Advances the cursor to hold the dataflow state at `target` after its "primary" effect is
     /// applied.
     ///
-    /// The "before" effect at the target location will be applied as well.
+    /// The "early" effect at the target location will be applied as well.
     pub fn seek_after_primary_effect(&mut self, target: Location) {
         self.seek_after(target, Effect::Primary)
     }
@@ -157,7 +203,7 @@ where
             self.seek_to_block_entry(target.block);
         } else if let Some(curr_effect) = self.pos.curr_effect_index {
             let mut ord = curr_effect.statement_index.cmp(&target.statement_index);
-            if A::Direction::is_backward() {
+            if A::Direction::IS_BACKWARD {
                 ord = ord.reverse()
             }
 
@@ -173,24 +219,23 @@ where
         debug_assert_eq!(target.block, self.pos.block);
 
         let block_data = &self.body[target.block];
-        let next_effect = if A::Direction::is_forward() {
-            #[rustfmt::skip]
+        #[rustfmt::skip]
+        let next_effect = if A::Direction::IS_FORWARD {
             self.pos.curr_effect_index.map_or_else(
-                || Effect::Before.at_index(0),
+                || Effect::Early.at_index(0),
                 EffectIndex::next_in_forward_order,
             )
         } else {
             self.pos.curr_effect_index.map_or_else(
-                || Effect::Before.at_index(block_data.statements.len()),
+                || Effect::Early.at_index(block_data.statements.len()),
                 EffectIndex::next_in_backward_order,
             )
         };
 
-        let analysis = &self.results.borrow().analysis;
         let target_effect_index = effect.at_index(target.statement_index);
 
         A::Direction::apply_effects_in_range(
-            analysis,
+            &mut self.results.analysis,
             &mut self.state,
             target.block,
             block_data,
@@ -205,20 +250,9 @@ where
     ///
     /// This can be used, e.g., to apply the call return effect directly to the cursor without
     /// creating an extra copy of the dataflow state.
-    pub fn apply_custom_effect(&mut self, f: impl FnOnce(&A, &mut A::Domain)) {
-        f(&self.results.borrow().analysis, &mut self.state);
+    pub fn apply_custom_effect(&mut self, f: impl FnOnce(&mut A, &mut A::Domain)) {
+        f(&mut self.results.analysis, &mut self.state);
         self.state_needs_reset = true;
-    }
-}
-
-impl<'mir, 'tcx, A, R> ResultsCursor<'mir, 'tcx, A, R>
-where
-    A: crate::GenKillAnalysis<'tcx>,
-    A::Domain: BitSetExt<A::Idx>,
-    R: Borrow<Results<'tcx, A>>,
-{
-    pub fn contains(&self, elem: A::Idx) -> bool {
-        self.get().contains(elem)
     }
 }
 

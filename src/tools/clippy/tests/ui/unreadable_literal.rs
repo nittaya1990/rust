@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::unreadable_literal)]
 
 struct Foo(u64);

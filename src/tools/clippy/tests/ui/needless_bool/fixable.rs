@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::needless_bool)]
 #![allow(
     unused,
@@ -7,8 +5,10 @@
     clippy::no_effect,
     clippy::if_same_then_else,
     clippy::equatable_if_let,
+    clippy::needless_if,
     clippy::needless_return,
-    clippy::self_named_constructors
+    clippy::self_named_constructors,
+    clippy::struct_field_names
 )]
 
 use std::cell::Cell;
@@ -99,6 +99,13 @@ fn main() {
     needless_bool2(x);
     needless_bool3(x);
     needless_bool_condition();
+
+    if a == b {
+        true
+    } else {
+        // Do not lint as this comment might be important
+        false
+    };
 }
 
 fn bool_ret3(x: bool) -> bool {
@@ -183,4 +190,16 @@ fn needless_bool_condition() -> bool {
     }
 
     foo()
+}
+
+fn issue12846() {
+    let a = true;
+    let b = false;
+
+    // parentheses are needed here
+    let _x = if a && b { true } else { false }.then(|| todo!());
+    let _x = if a && b { true } else { false } as u8;
+
+    // parentheses are not needed here
+    let _x = if a { true } else { false }.then(|| todo!());
 }

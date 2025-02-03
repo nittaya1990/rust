@@ -1,26 +1,26 @@
 use crate::ffi::OsStr;
+#[cfg(any(doc, target_os = "android", target_os = "linux"))]
+use crate::os::net::linux_ext;
 use crate::os::unix::ffi::OsStrExt;
 use crate::path::Path;
+use crate::sealed::Sealed;
 use crate::sys::cvt;
-use crate::{ascii, fmt, io, mem, ptr};
+use crate::{fmt, io, mem, ptr};
 
 // FIXME(#43348): Make libc adapt #[doc(cfg(...))] so we don't need these fake definitions here?
 #[cfg(not(unix))]
 #[allow(non_camel_case_types)]
 mod libc {
-    pub use libc::c_int;
+    pub use core::ffi::c_int;
     pub type socklen_t = u32;
     pub struct sockaddr;
     #[derive(Clone)]
-    pub struct sockaddr_un;
+    pub struct sockaddr_un {
+        pub sun_path: [u8; 1],
+    }
 }
 
-fn sun_path_offset(addr: &libc::sockaddr_un) -> usize {
-    // Work with an actual instance of the type since using a null pointer is UB
-    let base = addr as *const _ as usize;
-    let path = &addr.sun_path as *const _ as usize;
-    path - base
-}
+const SUN_PATH_OFFSET: usize = mem::offset_of!(libc::sockaddr_un, sun_path);
 
 pub(super) fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     // SAFETY: All zeros is a valid representation for `sockaddr_un`.
@@ -30,14 +30,14 @@ pub(super) fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::s
     let bytes = path.as_os_str().as_bytes();
 
     if bytes.contains(&0) {
-        return Err(io::const_io_error!(
+        return Err(io::const_error!(
             io::ErrorKind::InvalidInput,
             "paths must not contain interior null bytes",
         ));
     }
 
     if bytes.len() >= addr.sun_path.len() {
-        return Err(io::const_io_error!(
+        return Err(io::const_error!(
             io::ErrorKind::InvalidInput,
             "path must be shorter than SUN_LEN",
         ));
@@ -50,7 +50,7 @@ pub(super) fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::s
         ptr::copy_nonoverlapping(bytes.as_ptr(), addr.sun_path.as_mut_ptr().cast(), bytes.len())
     };
 
-    let mut len = sun_path_offset(&addr) + bytes.len();
+    let mut len = SUN_PATH_OFFSET + bytes.len();
     match bytes.get(0) {
         Some(&0) | None => {}
         Some(_) => len += 1,
@@ -62,18 +62,6 @@ enum AddressKind<'a> {
     Unnamed,
     Pathname(&'a Path),
     Abstract(&'a [u8]),
-}
-
-struct AsciiEscaped<'a>(&'a [u8]);
-
-impl<'a> fmt::Display for AsciiEscaped<'a> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "\"")?;
-        for byte in self.0.iter().cloned().flat_map(ascii::escape_default) {
-            write!(fmt, "{}", byte as char)?;
-        }
-        write!(fmt, "\"")
-    }
 }
 
 /// An address associated with a Unix socket.
@@ -107,7 +95,7 @@ impl SocketAddr {
         unsafe {
             let mut addr: libc::sockaddr_un = mem::zeroed();
             let mut len = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-            cvt(f(&mut addr as *mut _ as *mut _, &mut len))?;
+            cvt(f((&raw mut addr) as *mut _, &mut len))?;
             SocketAddr::from_parts(addr, len)
         }
     }
@@ -116,12 +104,22 @@ impl SocketAddr {
         addr: libc::sockaddr_un,
         mut len: libc::socklen_t,
     ) -> io::Result<SocketAddr> {
+        if cfg!(target_os = "openbsd") {
+            // on OpenBSD, getsockname(2) returns the actual size of the socket address,
+            // and not the len of the content. Figure out the length for ourselves.
+            // https://marc.info/?l=openbsd-bugs&m=170105481926736&w=2
+            let sun_path: &[u8] =
+                unsafe { mem::transmute::<&[libc::c_char], &[u8]>(&addr.sun_path) };
+            len = core::slice::memchr::memchr(0, sun_path)
+                .map_or(len, |new_len| (new_len + SUN_PATH_OFFSET) as libc::socklen_t);
+        }
+
         if len == 0 {
             // When there is a datagram from unnamed unix socket
             // linux returns zero bytes of address
-            len = sun_path_offset(&addr) as libc::socklen_t; // i.e., zero-length address
+            len = SUN_PATH_OFFSET as libc::socklen_t; // i.e., zero-length address
         } else if addr.sun_family != libc::AF_UNIX as libc::sa_family_t {
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
                 "file descriptor did not correspond to a Unix socket",
             ));
@@ -236,33 +234,8 @@ impl SocketAddr {
         if let AddressKind::Pathname(path) = self.address() { Some(path) } else { None }
     }
 
-    /// Returns the contents of this address if it is an abstract namespace
-    /// without the leading null byte.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// #![feature(unix_socket_abstract)]
-    /// use std::os::unix::net::{UnixListener, SocketAddr};
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let namespace = b"hidden";
-    ///     let namespace_addr = SocketAddr::from_abstract_namespace(&namespace[..])?;
-    ///     let socket = UnixListener::bind_addr(&namespace_addr)?;
-    ///     let local_addr = socket.local_addr().expect("Couldn't get local address");
-    ///     assert_eq!(local_addr.as_abstract_namespace(), Some(&namespace[..]));
-    ///     Ok(())
-    /// }
-    /// ```
-    #[doc(cfg(any(target_os = "android", target_os = "linux")))]
-    #[cfg(any(doc, target_os = "android", target_os = "linux",))]
-    #[unstable(feature = "unix_socket_abstract", issue = "85410")]
-    pub fn as_abstract_namespace(&self) -> Option<&[u8]> {
-        if let AddressKind::Abstract(name) = self.address() { Some(name) } else { None }
-    }
-
     fn address(&self) -> AddressKind<'_> {
-        let len = self.len as usize - sun_path_offset(&self.addr);
+        let len = self.len as usize - SUN_PATH_OFFSET;
         let path = unsafe { mem::transmute::<&[libc::c_char], &[u8]>(&self.addr.sun_path) };
 
         // macOS seems to return a len of 16 and a zeroed sun_path for unnamed addresses
@@ -277,62 +250,41 @@ impl SocketAddr {
             AddressKind::Pathname(OsStr::from_bytes(&path[..len - 1]).as_ref())
         }
     }
+}
 
-    /// Creates an abstract domain socket address from a namespace
-    ///
-    /// An abstract address does not create a file unlike traditional path-based
-    /// Unix sockets. The advantage of this is that the address will disappear when
-    /// the socket bound to it is closed, so no filesystem clean up is required.
-    ///
-    /// The leading null byte for the abstract namespace is automatically added.
-    ///
-    /// This is a Linux-specific extension. See more at [`unix(7)`].
-    ///
-    /// [`unix(7)`]: https://man7.org/linux/man-pages/man7/unix.7.html
-    ///
-    /// # Errors
-    ///
-    /// This will return an error if the given namespace is too long
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// #![feature(unix_socket_abstract)]
-    /// use std::os::unix::net::{UnixListener, SocketAddr};
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let addr = SocketAddr::from_abstract_namespace(b"hidden")?;
-    ///     let listener = match UnixListener::bind_addr(&addr) {
-    ///         Ok(sock) => sock,
-    ///         Err(err) => {
-    ///             println!("Couldn't bind: {err:?}");
-    ///             return Err(err);
-    ///         }
-    ///     };
-    ///     Ok(())
-    /// }
-    /// ```
-    #[doc(cfg(any(target_os = "android", target_os = "linux")))]
-    #[cfg(any(doc, target_os = "android", target_os = "linux",))]
-    #[unstable(feature = "unix_socket_abstract", issue = "85410")]
-    pub fn from_abstract_namespace(namespace: &[u8]) -> io::Result<SocketAddr> {
+#[stable(feature = "unix_socket_abstract", since = "1.70.0")]
+impl Sealed for SocketAddr {}
+
+#[doc(cfg(any(target_os = "android", target_os = "linux")))]
+#[cfg(any(doc, target_os = "android", target_os = "linux"))]
+#[stable(feature = "unix_socket_abstract", since = "1.70.0")]
+impl linux_ext::addr::SocketAddrExt for SocketAddr {
+    fn as_abstract_name(&self) -> Option<&[u8]> {
+        if let AddressKind::Abstract(name) = self.address() { Some(name) } else { None }
+    }
+
+    fn from_abstract_name<N>(name: N) -> crate::io::Result<Self>
+    where
+        N: AsRef<[u8]>,
+    {
+        let name = name.as_ref();
         unsafe {
             let mut addr: libc::sockaddr_un = mem::zeroed();
             addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
 
-            if namespace.len() + 1 > addr.sun_path.len() {
-                return Err(io::const_io_error!(
+            if name.len() + 1 > addr.sun_path.len() {
+                return Err(io::const_error!(
                     io::ErrorKind::InvalidInput,
-                    "namespace must be shorter than SUN_LEN",
+                    "abstract socket name must be shorter than SUN_LEN",
                 ));
             }
 
             crate::ptr::copy_nonoverlapping(
-                namespace.as_ptr(),
-                addr.sun_path.as_mut_ptr().offset(1) as *mut u8,
-                namespace.len(),
+                name.as_ptr(),
+                addr.sun_path.as_mut_ptr().add(1) as *mut u8,
+                name.len(),
             );
-            let len = (sun_path_offset(&addr) + 1 + namespace.len()) as libc::socklen_t;
+            let len = (SUN_PATH_OFFSET + 1 + name.len()) as libc::socklen_t;
             SocketAddr::from_parts(addr, len)
         }
     }
@@ -343,7 +295,7 @@ impl fmt::Debug for SocketAddr {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.address() {
             AddressKind::Unnamed => write!(fmt, "(unnamed)"),
-            AddressKind::Abstract(name) => write!(fmt, "{} (abstract)", AsciiEscaped(name)),
+            AddressKind::Abstract(name) => write!(fmt, "\"{}\" (abstract)", name.escape_ascii()),
             AddressKind::Pathname(path) => write!(fmt, "{path:?} (pathname)"),
         }
     }

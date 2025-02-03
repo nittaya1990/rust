@@ -1,9 +1,9 @@
 //! A wrapper around LLVM's archive (.a) code
 
-use rustc_fs_util::path_to_c_string;
 use std::path::Path;
-use std::slice;
-use std::str;
+use std::{slice, str};
+
+use rustc_fs_util::path_to_c_string;
 
 pub struct ArchiveRO {
     pub raw: &'static mut super::Archive,
@@ -81,17 +81,6 @@ impl<'a> Child<'a> {
                 let name = slice::from_raw_parts(name_ptr as *const u8, name_len as usize);
                 str::from_utf8(name).ok().map(|s| s.trim())
             }
-        }
-    }
-
-    pub fn data(&self) -> &'a [u8] {
-        unsafe {
-            let mut data_len = 0;
-            let data_ptr = super::LLVMRustArchiveChildData(self.raw, &mut data_len);
-            if data_ptr.is_null() {
-                panic!("failed to read data from archive child");
-            }
-            slice::from_raw_parts(data_ptr as *const u8, data_len as usize)
         }
     }
 }

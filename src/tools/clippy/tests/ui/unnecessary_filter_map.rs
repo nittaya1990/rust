@@ -1,21 +1,31 @@
+//@no-rustfix
 #![allow(dead_code)]
 
 fn main() {
     let _ = (0..4).filter_map(|x| if x > 1 { Some(x) } else { None });
+    //~^ ERROR: this `.filter_map` can be written more simply
+    //~| NOTE: `-D clippy::unnecessary-filter-map` implied by `-D warnings`
     let _ = (0..4).filter_map(|x| {
+        //~^ ERROR: this `.filter_map` can be written more simply
         if x > 1 {
             return Some(x);
         };
         None
     });
     let _ = (0..4).filter_map(|x| match x {
+        //~^ ERROR: this `.filter_map` can be written more simply
         0 | 1 => None,
         _ => Some(x),
     });
 
     let _ = (0..4).filter_map(|x| Some(x + 1));
+    //~^ ERROR: this `.filter_map` can be written more simply
 
     let _ = (0..4).filter_map(i32::checked_abs);
+
+    let _ = (0..4).filter_map(Some);
+
+    let _ = vec![Some(10), None].into_iter().filter_map(|x| Some(x));
 }
 
 fn filter_map_none_changes_item_type() -> impl Iterator<Item = bool> {
@@ -147,4 +157,10 @@ mod comment_1052978898 {
             }
         })
     }
+}
+
+fn issue11260() {
+    // #11260 is about unnecessary_find_map, but the fix also kind of applies to
+    // unnecessary_filter_map
+    let _x = std::iter::once(1).filter_map(|n| (n > 1).then_some(n));
 }

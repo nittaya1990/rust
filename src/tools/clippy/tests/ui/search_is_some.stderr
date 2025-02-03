@@ -1,5 +1,5 @@
 error: called `is_some()` after searching an `Iterator` with `find`
-  --> $DIR/search_is_some.rs:14:13
+  --> tests/ui/search_is_some.rs:16:13
    |
 LL |       let _ = v.iter().find(|&x| {
    |  _____________^
@@ -8,11 +8,12 @@ LL | |                           }
 LL | |                    ).is_some();
    | |______________________________^
    |
-   = note: `-D clippy::search-is-some` implied by `-D warnings`
    = help: this is more succinctly expressed by calling `any()`
+   = note: `-D clippy::search-is-some` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::search_is_some)]`
 
 error: called `is_some()` after searching an `Iterator` with `position`
-  --> $DIR/search_is_some.rs:20:13
+  --> tests/ui/search_is_some.rs:22:13
    |
 LL |       let _ = v.iter().position(|&x| {
    |  _____________^
@@ -24,7 +25,7 @@ LL | |                    ).is_some();
    = help: this is more succinctly expressed by calling `any()`
 
 error: called `is_some()` after searching an `Iterator` with `rposition`
-  --> $DIR/search_is_some.rs:26:13
+  --> tests/ui/search_is_some.rs:28:13
    |
 LL |       let _ = v.iter().rposition(|&x| {
    |  _____________^
@@ -36,13 +37,13 @@ LL | |                    ).is_some();
    = help: this is more succinctly expressed by calling `any()`
 
 error: called `is_some()` after searching an `Iterator` with `find`
-  --> $DIR/search_is_some.rs:41:20
+  --> tests/ui/search_is_some.rs:43:20
    |
 LL |     let _ = (0..1).find(some_closure).is_some();
-   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use `any()` instead: `any(some_closure)`
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `any(some_closure)`
 
 error: called `is_none()` after searching an `Iterator` with `find`
-  --> $DIR/search_is_some.rs:51:13
+  --> tests/ui/search_is_some.rs:53:13
    |
 LL |       let _ = v.iter().find(|&x| {
    |  _____________^
@@ -54,7 +55,7 @@ LL | |                    ).is_none();
    = help: this is more succinctly expressed by calling `any()` with negation
 
 error: called `is_none()` after searching an `Iterator` with `position`
-  --> $DIR/search_is_some.rs:57:13
+  --> tests/ui/search_is_some.rs:59:13
    |
 LL |       let _ = v.iter().position(|&x| {
    |  _____________^
@@ -66,7 +67,7 @@ LL | |                    ).is_none();
    = help: this is more succinctly expressed by calling `any()` with negation
 
 error: called `is_none()` after searching an `Iterator` with `rposition`
-  --> $DIR/search_is_some.rs:63:13
+  --> tests/ui/search_is_some.rs:65:13
    |
 LL |       let _ = v.iter().rposition(|&x| {
    |  _____________^
@@ -78,10 +79,10 @@ LL | |                    ).is_none();
    = help: this is more succinctly expressed by calling `any()` with negation
 
 error: called `is_none()` after searching an `Iterator` with `find`
-  --> $DIR/search_is_some.rs:78:13
+  --> tests/ui/search_is_some.rs:80:13
    |
 LL |     let _ = (0..1).find(some_closure).is_none();
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use `!_.any()` instead: `!(0..1).any(some_closure)`
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `!(0..1).any(some_closure)`
 
 error: aborting due to 8 previous errors
 

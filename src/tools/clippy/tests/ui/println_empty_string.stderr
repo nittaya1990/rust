@@ -1,28 +1,37 @@
-error: using `println!("")`
-  --> $DIR/println_empty_string.rs:6:5
+error: empty string literal in `println!`
+  --> tests/ui/println_empty_string.rs:5:5
    |
 LL |     println!("");
-   |     ^^^^^^^^^^^^ help: replace it with: `println!()`
+   |     ^^^^^^^^^--^
+   |              |
+   |              help: remove the empty string
    |
    = note: `-D clippy::println-empty-string` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::println_empty_string)]`
 
-error: using `println!("")`
-  --> $DIR/println_empty_string.rs:9:14
+error: empty string literal in `println!`
+  --> tests/ui/println_empty_string.rs:8:14
    |
 LL |         _ => println!(""),
-   |              ^^^^^^^^^^^^ help: replace it with: `println!()`
+   |              ^^^^^^^^^--^
+   |                       |
+   |                       help: remove the empty string
 
-error: using `eprintln!("")`
-  --> $DIR/println_empty_string.rs:13:5
+error: empty string literal in `eprintln!`
+  --> tests/ui/println_empty_string.rs:12:5
    |
 LL |     eprintln!("");
-   |     ^^^^^^^^^^^^^ help: replace it with: `eprintln!()`
+   |     ^^^^^^^^^^--^
+   |               |
+   |               help: remove the empty string
 
-error: using `eprintln!("")`
-  --> $DIR/println_empty_string.rs:16:14
+error: empty string literal in `eprintln!`
+  --> tests/ui/println_empty_string.rs:15:14
    |
 LL |         _ => eprintln!(""),
-   |              ^^^^^^^^^^^^^ help: replace it with: `eprintln!()`
+   |              ^^^^^^^^^^--^
+   |                        |
+   |                        help: remove the empty string
 
 error: aborting due to 4 previous errors
 

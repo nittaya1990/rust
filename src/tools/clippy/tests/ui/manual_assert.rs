@@ -1,10 +1,12 @@
-// revisions: edition2018 edition2021
-// [edition2018] edition:2018
-// [edition2021] edition:2021
-// run-rustfix
+//@revisions: edition2018 edition2021
+//@[edition2018] edition:2018
+//@[edition2021] edition:2021
+
+//@no-rustfix: need to change the suggestion to a multipart suggestion
 
 #![warn(clippy::manual_assert)]
-#![allow(clippy::nonminimal_bool)]
+#![allow(dead_code, unused_doc_comments)]
+#![allow(clippy::nonminimal_bool, clippy::uninlined_format_args, clippy::useless_vec)]
 
 macro_rules! one {
     () => {
@@ -17,7 +19,7 @@ fn main() {
     let c = Some(2);
     if !a.is_empty()
         && a.len() == 3
-        && c != None
+        && c.is_some()
         && !a.is_empty()
         && a.len() == 3
         && !a.is_empty()
@@ -64,5 +66,32 @@ fn main() {
     }
     if a.is_empty() {
         panic!("with expansion {}", one!())
+    }
+    if a.is_empty() {
+        let _ = 0;
+    } else if a.len() == 1 {
+        panic!("panic6");
+    }
+}
+
+fn issue7730(a: u8) {
+    // Suggestion should preserve comment
+    if a > 2 {
+        // comment
+        /* this is a
+        multiline
+        comment */
+        /// Doc comment
+        panic!("panic with comment") // comment after `panic!`
+    }
+}
+
+fn issue12505() {
+    struct Foo<T, const N: usize>(T);
+
+    impl<T, const N: usize> Foo<T, N> {
+        const BAR: () = if N == 0 {
+            panic!()
+        };
     }
 }

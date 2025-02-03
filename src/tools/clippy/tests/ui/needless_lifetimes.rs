@@ -1,11 +1,19 @@
+//@aux-build:proc_macros.rs
+
 #![warn(clippy::needless_lifetimes)]
 #![allow(
-    dead_code,
+    unused,
     clippy::boxed_local,
+    clippy::extra_unused_type_parameters,
     clippy::needless_pass_by_value,
+    clippy::redundant_allocation,
     clippy::unnecessary_wraps,
-    dyn_drop
+    dyn_drop,
+    clippy::get_first
 )]
+
+extern crate proc_macros;
+use proc_macros::inline_macros;
 
 fn distinct_lifetimes<'a, 'b>(_x: &'a u8, _y: &'b u8, _z: u8) {}
 
@@ -28,9 +36,18 @@ fn multiple_in_and_out_1<'a>(x: &'a u8, _y: &'a u8) -> &'a u8 {
     x
 }
 
-// No error; multiple input refs.
-fn multiple_in_and_out_2<'a, 'b>(x: &'a u8, _y: &'b u8) -> &'a u8 {
+// Error; multiple input refs, but the output lifetime is not elided, i.e., the following is valid:
+//   fn multiple_in_and_out_2a<'a>(x: &'a u8, _y: &u8) -> &'a u8
+//                                                ^^^
+fn multiple_in_and_out_2a<'a, 'b>(x: &'a u8, _y: &'b u8) -> &'a u8 {
     x
+}
+
+// Error; multiple input refs, but the output lifetime is not elided, i.e., the following is valid:
+//   fn multiple_in_and_out_2b<'b>(_x: &u8, y: &'b u8) -> &'b u8
+//                                     ^^^
+fn multiple_in_and_out_2b<'a, 'b>(_x: &'a u8, y: &'b u8) -> &'b u8 {
+    y
 }
 
 // No error; multiple input refs
@@ -43,9 +60,18 @@ fn in_static_and_out<'a>(x: &'a u8, _y: &'static u8) -> &'a u8 {
     x
 }
 
-// No error.
-fn deep_reference_1<'a, 'b>(x: &'a u8, _y: &'b u8) -> Result<&'a u8, ()> {
+// Error; multiple input refs, but the output lifetime is not elided, i.e., the following is valid:
+//   fn deep_reference_1a<'a>(x: &'a u8, _y: &u8) -> Result<&'a u8, ()>
+//                                           ^^^
+fn deep_reference_1a<'a, 'b>(x: &'a u8, _y: &'b u8) -> Result<&'a u8, ()> {
     Ok(x)
+}
+
+// Error; multiple input refs, but the output lifetime is not elided, i.e., the following is valid:
+//   fn deep_reference_1b<'b>(_x: &u8, y: &'b u8) -> Result<&'b u8, ()>
+//                                ^^^
+fn deep_reference_1b<'a, 'b>(_x: &'a u8, y: &'b u8) -> Result<&'b u8, ()> {
+    Ok(y)
 }
 
 // No error; two input refs.
@@ -128,9 +154,18 @@ impl X {
         &self.x
     }
 
-    // No error; multiple input refs.
-    fn self_and_in_out<'s, 't>(&'s self, _x: &'t u8) -> &'s u8 {
+    // Error; multiple input refs, but the output lifetime is not elided, i.e., the following is valid:
+    //   fn self_and_in_out_1<'s>(&'s self, _x: &u8) -> &'s u8
+    //                                          ^^^
+    fn self_and_in_out_1<'s, 't>(&'s self, _x: &'t u8) -> &'s u8 {
         &self.x
+    }
+
+    // Error; multiple input refs, but the output lifetime is not elided, i.e., the following is valid:
+    //   fn self_and_in_out_2<'t>(&self, x: &'t u8) -> &'t u8
+    //                            ^^^^^
+    fn self_and_in_out_2<'s, 't>(&'s self, x: &'t u8) -> &'t u8 {
+        x
     }
 
     fn distinct_self_and_in<'s, 't>(&'s self, _x: &'t u8) {}
@@ -166,8 +201,19 @@ fn struct_with_lt3<'a>(_foo: &Foo<'a>) -> &'a str {
     unimplemented!()
 }
 
-// No warning; two input lifetimes.
-fn struct_with_lt4<'a, 'b>(_foo: &'a Foo<'b>) -> &'a str {
+// Warning; two input lifetimes, but the output lifetime is not elided, i.e., the following is
+// valid:
+//   fn struct_with_lt4a<'a>(_foo: &'a Foo<'_>) -> &'a str
+//                                         ^^
+fn struct_with_lt4a<'a, 'b>(_foo: &'a Foo<'b>) -> &'a str {
+    unimplemented!()
+}
+
+// Warning; two input lifetimes, but the output lifetime is not elided, i.e., the following is
+// valid:
+//   fn struct_with_lt4b<'b>(_foo: &Foo<'b>) -> &'b str
+//                                 ^^^^
+fn struct_with_lt4b<'a, 'b>(_foo: &'a Foo<'b>) -> &'b str {
     unimplemented!()
 }
 
@@ -202,8 +248,19 @@ fn alias_with_lt3<'a>(_foo: &FooAlias<'a>) -> &'a str {
     unimplemented!()
 }
 
-// No warning; two input lifetimes.
-fn alias_with_lt4<'a, 'b>(_foo: &'a FooAlias<'b>) -> &'a str {
+// Warning; two input lifetimes, but the output lifetime is not elided, i.e., the following is
+// valid:
+//   fn alias_with_lt4a<'a>(_foo: &'a FooAlias<'_>) -> &'a str
+//                                             ^^
+fn alias_with_lt4a<'a, 'b>(_foo: &'a FooAlias<'b>) -> &'a str {
+    unimplemented!()
+}
+
+// Warning; two input lifetimes, but the output lifetime is not elided, i.e., the following is
+// valid:
+//   fn alias_with_lt4b<'b>(_foo: &FooAlias<'b>) -> &'b str
+//                                ^^^^^^^^^
+fn alias_with_lt4b<'a, 'b>(_foo: &'a FooAlias<'b>) -> &'b str {
     unimplemented!()
 }
 
@@ -268,7 +325,7 @@ mod issue4291 {
 
 mod issue2944 {
     trait Foo {}
-    struct Bar {}
+    struct Bar;
     struct Baz<'a> {
         bar: &'a Bar,
     }
@@ -328,7 +385,7 @@ mod nested_elision_sites {
         f()
     }
     // lint
-    fn where_clause_elidadable<'a, T>(i: &'a i32, f: T) -> &'a i32
+    fn where_clause_elidable<'a, T>(i: &'a i32, f: T) -> &'a i32
     where
         T: Fn(&i32) -> &i32,
     {
@@ -387,11 +444,20 @@ mod issue7296 {
         fn implicit_mut<'a>(&'a mut self) -> &'a () {
             &()
         }
-
+        #[clippy::msrv = "1.81"]
         fn explicit<'a>(self: &'a Arc<Self>) -> &'a () {
             &()
         }
+        #[clippy::msrv = "1.81"]
         fn explicit_mut<'a>(self: &'a mut Rc<Self>) -> &'a () {
+            &()
+        }
+        #[clippy::msrv = "1.80"]
+        fn explicit_older<'a>(self: &'a Arc<Self>) -> &'a () {
+            &()
+        }
+        #[clippy::msrv = "1.80"]
+        fn explicit_mut_older<'a>(self: &'a mut Rc<Self>) -> &'a () {
             &()
         }
 
@@ -406,8 +472,16 @@ mod issue7296 {
             &()
         }
 
+        #[clippy::msrv = "1.81"]
         fn explicit<'a>(self: &'a Arc<Self>) -> &'a ();
+        #[clippy::msrv = "1.81"]
         fn explicit_provided<'a>(self: &'a Arc<Self>) -> &'a () {
+            &()
+        }
+        #[clippy::msrv = "1.80"]
+        fn explicit_older<'a>(self: &'a Arc<Self>) -> &'a ();
+        #[clippy::msrv = "1.80"]
+        fn explicit_provided_older<'a>(self: &'a Arc<Self>) -> &'a () {
             &()
         }
 
@@ -415,6 +489,189 @@ mod issue7296 {
         fn lifetime_elsewhere_provided<'a>(self: Box<Self>, here: &'a ()) -> &'a () {
             &()
         }
+    }
+}
+
+mod pr_9743_false_negative_fix {
+    #![allow(unused)]
+
+    fn foo<'a>(x: &'a u8, y: &'_ u8) {}
+
+    fn bar<'a>(x: &'a u8, y: &'_ u8, z: &'_ u8) {}
+}
+
+mod pr_9743_output_lifetime_checks {
+    #![allow(unused)]
+
+    // lint: only one input
+    fn one_input<'a>(x: &'a u8) -> &'a u8 {
+        unimplemented!()
+    }
+
+    // lint: multiple inputs, output would not be elided
+    fn multiple_inputs_output_not_elided<'a, 'b>(x: &'a u8, y: &'b u8, z: &'b u8) -> &'b u8 {
+        unimplemented!()
+    }
+
+    // don't lint: multiple inputs, output would be elided (which would create an ambiguity)
+    fn multiple_inputs_output_would_be_elided<'a, 'b>(x: &'a u8, y: &'b u8, z: &'b u8) -> &'a u8 {
+        unimplemented!()
+    }
+}
+
+#[inline_macros]
+mod in_macro {
+    use proc_macros::external;
+
+    // lint local macro expands to function with needless lifetimes
+    inline! {
+        fn one_input<'a>(x: &'a u8) -> &'a u8 {
+            unimplemented!()
+        }
+    }
+
+    // no lint on external macro
+    external! {
+        fn needless_lifetime<'a>(x: &'a u8) -> &'a u8 {
+            unimplemented!()
+        }
+    }
+
+    inline! {
+        fn f<$'a>(arg: &$'a str) -> &$'a str {
+            arg
+        }
+    }
+}
+
+mod issue5787 {
+    use std::sync::MutexGuard;
+
+    struct Foo;
+
+    impl Foo {
+        // doesn't get linted without async
+        pub async fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+            guard
+        }
+    }
+
+    async fn foo<'a>(_x: &i32, y: &'a str) -> &'a str {
+        y
+    }
+}
+
+// https://github.com/rust-lang/rust-clippy/pull/13286#issuecomment-2374245772
+mod rayon {
+    trait ParallelIterator {
+        type Item;
+    }
+
+    struct Copied<I: ParallelIterator> {
+        base: I,
+    }
+
+    impl<'a, T, I> ParallelIterator for Copied<I>
+    where
+        I: ParallelIterator<Item = &'a T>,
+        T: 'a + Copy + Send + Sync,
+    {
+        type Item = T;
+    }
+}
+
+mod issue13749 {
+    pub struct Generic<T>(T);
+    // Non elidable lifetime
+    #[expect(clippy::extra_unused_lifetimes)]
+    impl<'a, T> Generic<T> where T: 'a {}
+}
+
+mod issue13749bis {
+    pub struct Generic<T>(T);
+    // Non elidable lifetime
+    #[expect(clippy::extra_unused_lifetimes)]
+    impl<'a, T: 'a> Generic<T> {}
+}
+
+mod issue13923 {
+    struct Py<'py> {
+        data: &'py str,
+    }
+
+    enum Content<'t, 'py> {
+        Py(Py<'py>),
+        T1(&'t str),
+        T2(&'t str),
+    }
+
+    enum ContentString<'t> {
+        T1(&'t str),
+        T2(&'t str),
+    }
+
+    impl<'t, 'py> ContentString<'t> {
+        // `'py` cannot be elided
+        fn map_content1(self, f: impl FnOnce(&'t str) -> &'t str) -> Content<'t, 'py> {
+            match self {
+                Self::T1(content) => Content::T1(f(content)),
+                Self::T2(content) => Content::T2(f(content)),
+            }
+        }
+    }
+
+    impl<'t, 'py> ContentString<'t> {
+        // `'py` can be elided because of `&self`
+        fn map_content2(&self, f: impl FnOnce(&'t str) -> &'t str) -> Content<'t, 'py> {
+            match self {
+                Self::T1(content) => Content::T1(f(content)),
+                Self::T2(content) => Content::T2(f(content)),
+            }
+        }
+    }
+
+    impl<'t, 'py> ContentString<'t> {
+        // `'py` can be elided because of `&'_ self`
+        fn map_content3(&'_ self, f: impl FnOnce(&'t str) -> &'t str) -> Content<'t, 'py> {
+            match self {
+                Self::T1(content) => Content::T1(f(content)),
+                Self::T2(content) => Content::T2(f(content)),
+            }
+        }
+    }
+
+    impl<'t, 'py> ContentString<'t> {
+        // `'py` should not be elided as the default lifetime, even if working, could be named as `'t`
+        fn map_content4(self, f: impl FnOnce(&'t str) -> &'t str, o: &'t str) -> Content<'t, 'py> {
+            match self {
+                Self::T1(content) => Content::T1(f(content)),
+                Self::T2(_) => Content::T2(o),
+            }
+        }
+    }
+
+    impl<'t, 'py> ContentString<'t> {
+        // `'py` can be elided because of `&Self`
+        fn map_content5(
+            self: std::pin::Pin<&Self>,
+            f: impl FnOnce(&'t str) -> &'t str,
+            o: &'t str,
+        ) -> Content<'t, 'py> {
+            match *self {
+                Self::T1(content) => Content::T1(f(content)),
+                Self::T2(_) => Content::T2(o),
+            }
+        }
+    }
+
+    struct Cx<'a, 'b> {
+        a: &'a u32,
+        b: &'b u32,
+    }
+
+    // `'c` cannot be elided because we have several input lifetimes
+    fn one_explicit<'b>(x: Cx<'_, 'b>) -> &'b u32 {
+        &x.b
     }
 }
 

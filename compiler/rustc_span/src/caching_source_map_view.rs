@@ -1,7 +1,9 @@
-use crate::source_map::SourceMap;
-use crate::{BytePos, SourceFile, SpanData};
-use rustc_data_structures::sync::Lrc;
 use std::ops::Range;
+
+use rustc_data_structures::sync::Lrc;
+
+use crate::source_map::SourceMap;
+use crate::{BytePos, Pos, RelativeBytePos, SourceFile, SpanData};
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -37,6 +39,7 @@ impl CacheEntry {
             self.file_index = file_idx;
         }
 
+        let pos = self.file.relative_position(pos);
         let line_index = self.file.lookup_line(pos).unwrap();
         let line_bounds = self.file.line_bounds(line_index);
         self.line_number = line_index + 1;
@@ -60,7 +63,7 @@ pub struct CachingSourceMapView<'sm> {
 impl<'sm> CachingSourceMapView<'sm> {
     pub fn new(source_map: &'sm SourceMap) -> CachingSourceMapView<'sm> {
         let files = source_map.files();
-        let first_file = files[0].clone();
+        let first_file = Lrc::clone(&files[0]);
         let entry = CacheEntry {
             time_stamp: 0,
             line_number: 0,
@@ -79,7 +82,7 @@ impl<'sm> CachingSourceMapView<'sm> {
     pub fn byte_pos_to_line_and_col(
         &mut self,
         pos: BytePos,
-    ) -> Option<(Lrc<SourceFile>, usize, BytePos)> {
+    ) -> Option<(Lrc<SourceFile>, usize, RelativeBytePos)> {
         self.time_stamp += 1;
 
         // Check if the position is in one of the cached lines
@@ -88,11 +91,8 @@ impl<'sm> CachingSourceMapView<'sm> {
             let cache_entry = &mut self.line_cache[cache_idx as usize];
             cache_entry.touch(self.time_stamp);
 
-            return Some((
-                cache_entry.file.clone(),
-                cache_entry.line_number,
-                pos - cache_entry.line.start,
-            ));
+            let col = RelativeBytePos(pos.to_u32() - cache_entry.line.start.to_u32());
+            return Some((Lrc::clone(&cache_entry.file), cache_entry.line_number, col));
         }
 
         // No cache hit ...
@@ -108,7 +108,8 @@ impl<'sm> CachingSourceMapView<'sm> {
         let cache_entry = &mut self.line_cache[oldest];
         cache_entry.update(new_file_and_idx, pos, self.time_stamp);
 
-        Some((cache_entry.file.clone(), cache_entry.line_number, pos - cache_entry.line.start))
+        let col = RelativeBytePos(pos.to_u32() - cache_entry.line.start.to_u32());
+        Some((Lrc::clone(&cache_entry.file), cache_entry.line_number, col))
     }
 
     pub fn span_data_to_lines_and_cols(
@@ -118,7 +119,7 @@ impl<'sm> CachingSourceMapView<'sm> {
         self.time_stamp += 1;
 
         // Check if lo and hi are in the cached lines.
-        let lo_cache_idx = self.cache_entry_index(span_data.lo);
+        let lo_cache_idx: isize = self.cache_entry_index(span_data.lo);
         let hi_cache_idx = self.cache_entry_index(span_data.hi);
 
         if lo_cache_idx != -1 && hi_cache_idx != -1 {
@@ -132,7 +133,7 @@ impl<'sm> CachingSourceMapView<'sm> {
                 }
 
                 (
-                    lo.file.clone(),
+                    Lrc::clone(&lo.file),
                     lo.line_number,
                     span_data.lo - lo.line.start,
                     hi.line_number,
@@ -165,7 +166,7 @@ impl<'sm> CachingSourceMapView<'sm> {
             Some(new_file_and_idx)
         } else {
             let file = &self.line_cache[oldest].file;
-            if !file_contains(&file, span_data.hi) {
+            if !file_contains(file, span_data.hi) {
                 return None;
             }
 
@@ -180,7 +181,7 @@ impl<'sm> CachingSourceMapView<'sm> {
                 lo.update(new_file_and_idx, span_data.lo, self.time_stamp);
 
                 if !lo.line.contains(&span_data.hi) {
-                    let new_file_and_idx = Some((lo.file.clone(), lo.file_index));
+                    let new_file_and_idx = Some((Lrc::clone(&lo.file), lo.file_index));
                     let next_oldest = self.oldest_cache_entry_index_avoid(oldest);
                     let hi = &mut self.line_cache[next_oldest];
                     hi.update(new_file_and_idx, span_data.hi, self.time_stamp);
@@ -206,7 +207,9 @@ impl<'sm> CachingSourceMapView<'sm> {
                 (lo_cache_idx as usize, oldest)
             }
             _ => {
-                panic!();
+                panic!(
+                    "the case of neither value being equal to -1 was handled above and the function returns."
+                );
             }
         };
 
@@ -224,7 +227,7 @@ impl<'sm> CachingSourceMapView<'sm> {
         assert_eq!(lo.file_index, hi.file_index);
 
         Some((
-            lo.file.clone(),
+            Lrc::clone(&lo.file),
             lo.line_number,
             span_data.lo - lo.line.start,
             hi.line_number,
@@ -274,7 +277,7 @@ impl<'sm> CachingSourceMapView<'sm> {
             let file = &self.source_map.files()[file_idx];
 
             if file_contains(file, pos) {
-                return Some((file.clone(), file_idx));
+                return Some((Lrc::clone(file), file_idx));
             }
         }
 

@@ -1,45 +1,59 @@
-error: called `cloned().last()` on an `Iterator`. It may be more efficient to call `last().cloned()` instead
-  --> $DIR/iter_overeager_cloned.rs:7:29
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:12:29
    |
 LL |     let _: Option<String> = vec.iter().cloned().last();
-   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `vec.iter().last().cloned()`
+   |                             ^^^^^^^^^^----------------
+   |                                       |
+   |                                       help: try: `.last().cloned()`
    |
    = note: `-D clippy::iter-overeager-cloned` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::iter_overeager_cloned)]`
 
-error: called `cloned().next()` on an `Iterator`. It may be more efficient to call `next().cloned()` instead
-  --> $DIR/iter_overeager_cloned.rs:9:29
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:14:29
    |
 LL |     let _: Option<String> = vec.iter().chain(vec.iter()).cloned().next();
-   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `vec.iter().chain(vec.iter()).next().cloned()`
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^----------------
+   |                                                         |
+   |                                                         help: try: `.next().cloned()`
 
-error: called `cloned().count()` on an `Iterator`. It may be more efficient to call `count()` instead
-  --> $DIR/iter_overeager_cloned.rs:11:20
+error: unneeded cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:16:20
    |
 LL |     let _: usize = vec.iter().filter(|x| x == &"2").cloned().count();
-   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `vec.iter().filter(|x| x == &"2").count()`
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-----------------
+   |                                                    |
+   |                                                    help: try: `.count()`
    |
    = note: `-D clippy::redundant-clone` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::redundant_clone)]`
 
-error: called `cloned().take(...)` on an `Iterator`. It may be more efficient to call `take(...).cloned()` instead
-  --> $DIR/iter_overeager_cloned.rs:13:21
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:18:21
    |
 LL |     let _: Vec<_> = vec.iter().cloned().take(2).collect();
-   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `vec.iter().take(2).cloned()`
+   |                     ^^^^^^^^^^-----------------
+   |                               |
+   |                               help: try: `.take(2).cloned()`
 
-error: called `cloned().skip(...)` on an `Iterator`. It may be more efficient to call `skip(...).cloned()` instead
-  --> $DIR/iter_overeager_cloned.rs:15:21
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:20:21
    |
 LL |     let _: Vec<_> = vec.iter().cloned().skip(2).collect();
-   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `vec.iter().skip(2).cloned()`
+   |                     ^^^^^^^^^^-----------------
+   |                               |
+   |                               help: try: `.skip(2).cloned()`
 
-error: called `cloned().nth(...)` on an `Iterator`. It may be more efficient to call `nth(...).cloned()` instead
-  --> $DIR/iter_overeager_cloned.rs:17:13
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:22:13
    |
 LL |     let _ = vec.iter().filter(|x| x == &"2").cloned().nth(2);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `vec.iter().filter(|x| x == &"2").nth(2).cloned()`
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----------------
+   |                                             |
+   |                                             help: try: `.nth(2).cloned()`
 
-error: called `cloned().flatten()` on an `Iterator`. It may be more efficient to call `flatten().cloned()` instead
-  --> $DIR/iter_overeager_cloned.rs:19:13
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:24:13
    |
 LL |       let _ = [Some(Some("str".to_string())), Some(Some("str".to_string()))]
    |  _____________^
@@ -48,11 +62,107 @@ LL | |         .cloned()
 LL | |         .flatten();
    | |__________________^
    |
-help: try this
+help: try
    |
-LL ~     let _ = [Some(Some("str".to_string())), Some(Some("str".to_string()))]
-LL ~         .iter().flatten().cloned();
+LL ~         .iter()
+LL ~         .flatten().cloned();
    |
 
-error: aborting due to 7 previous errors
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:29:13
+   |
+LL |     let _ = vec.iter().cloned().filter(|x| x.starts_with('2'));
+   |             ^^^^^^^^^^----------------------------------------
+   |                       |
+   |                       help: try: `.filter(|&x| x.starts_with('2')).cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:31:13
+   |
+LL |     let _ = vec.iter().cloned().find(|x| x == "2");
+   |             ^^^^^^^^^^----------------------------
+   |                       |
+   |                       help: try: `.find(|&x| x == "2").cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:35:17
+   |
+LL |         let _ = vec.iter().cloned().filter(f);
+   |                 ^^^^^^^^^^-------------------
+   |                           |
+   |                           help: try: `.filter(|&x| f(x)).cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:36:17
+   |
+LL |         let _ = vec.iter().cloned().find(f);
+   |                 ^^^^^^^^^^-----------------
+   |                           |
+   |                           help: try: `.find(|&x| f(x)).cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:42:17
+   |
+LL |         let _ = vec.iter().cloned().filter(f);
+   |                 ^^^^^^^^^^-------------------
+   |                           |
+   |                           help: try: `.filter(|&x| f(x)).cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:43:17
+   |
+LL |         let _ = vec.iter().cloned().find(f);
+   |                 ^^^^^^^^^^-----------------
+   |                           |
+   |                           help: try: `.find(|&x| f(x)).cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:50:9
+   |
+LL |         iter.cloned().filter(move |(&a, b)| a == 1 && b == &target)
+   |         ^^^^-------------------------------------------------------
+   |             |
+   |             help: try: `.filter(move |&(&a, b)| a == 1 && b == &target).cloned()`
+
+error: unnecessarily eager cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:61:13
+   |
+LL |             iter.cloned().filter(move |S { a, b }| **a == 1 && b == &target)
+   |             ^^^^------------------------------------------------------------
+   |                 |
+   |                 help: try: `.filter(move |&S { a, b }| **a == 1 && b == &target).cloned()`
+
+error: unneeded cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:65:13
+   |
+LL |     let _ = vec.iter().cloned().map(|x| x.len());
+   |             ^^^^^^^^^^--------------------------
+   |                       |
+   |                       help: try: `.map(|x| x.len())`
+
+error: unneeded cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:70:13
+   |
+LL |     let _ = vec.iter().cloned().for_each(|x| assert!(!x.is_empty()));
+   |             ^^^^^^^^^^----------------------------------------------
+   |                       |
+   |                       help: try: `.for_each(|x| assert!(!x.is_empty()))`
+
+error: unneeded cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:72:13
+   |
+LL |     let _ = vec.iter().cloned().all(|x| x.len() == 1);
+   |             ^^^^^^^^^^-------------------------------
+   |                       |
+   |                       help: try: `.all(|x| x.len() == 1)`
+
+error: unneeded cloning of iterator items
+  --> tests/ui/iter_overeager_cloned.rs:74:13
+   |
+LL |     let _ = vec.iter().cloned().any(|x| x.len() == 1);
+   |             ^^^^^^^^^^-------------------------------
+   |                       |
+   |                       help: try: `.any(|x| x.len() == 1)`
+
+error: aborting due to 19 previous errors
 

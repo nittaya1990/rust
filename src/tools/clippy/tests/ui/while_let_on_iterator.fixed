@@ -1,12 +1,13 @@
-// run-rustfix
-
 #![warn(clippy::while_let_on_iterator)]
+#![allow(dead_code, unreachable_code, unused_mut)]
 #![allow(
+    clippy::equatable_if_let,
+    clippy::manual_find,
     clippy::never_loop,
-    unreachable_code,
-    unused_mut,
-    dead_code,
-    clippy::equatable_if_let
+    clippy::redundant_closure_call,
+    clippy::single_range_in_vec_init,
+    clippy::uninlined_format_args,
+    clippy::useless_vec
 )]
 
 fn base() {
@@ -258,7 +259,7 @@ fn issue1924() {
         fn f(&mut self) -> Option<u32> {
             // Used as a field.
             for i in self.0.by_ref() {
-                if !(3..=7).contains(&i) {
+                if !(3..8).contains(&i) {
                     return Some(i);
                 }
             }
@@ -399,6 +400,68 @@ fn issue_8113() {
     let mut x = [0..10];
     for x in x[0].by_ref() {
         println!("{}", x);
+    }
+}
+
+fn fn_once_closure() {
+    let mut it = 0..10;
+    (|| {
+        for x in it.by_ref() {
+            if x % 2 == 0 {
+                break;
+            }
+        }
+    })();
+
+    fn f(_: impl FnOnce()) {}
+    let mut it = 0..10;
+    f(|| {
+        for x in it {
+            if x % 2 == 0 {
+                break;
+            }
+        }
+    });
+
+    fn f2(_: impl FnMut()) {}
+    let mut it = 0..10;
+    f2(|| {
+        for x in it.by_ref() {
+            if x % 2 == 0 {
+                break;
+            }
+        }
+    });
+
+    fn f3(_: fn()) {}
+    f3(|| {
+        let mut it = 0..10;
+        for x in it {
+            if x % 2 == 0 {
+                break;
+            }
+        }
+    });
+
+    trait MySpecialFnMut: FnOnce() {}
+    impl<T: FnOnce()> MySpecialFnMut for T {}
+    fn f4(_: impl MySpecialFnMut) {}
+    let mut it = 0..10;
+    f4(|| {
+        for x in it {
+            if x % 2 == 0 {
+                break;
+            }
+        }
+    });
+}
+
+fn issue13123() {
+    let mut it = 0..20;
+    'label: for n in it {
+        if n % 25 == 0 {
+            break 'label;
+        }
     }
 }
 

@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-use std::iter::Iterator;
 use std::ops::RangeBounds;
-use std::vec::Vec;
 
-use rand::{seq::SliceRandom, thread_rng, Rng};
-use test::{black_box, Bencher};
+use rand::Rng;
+use rand::seq::SliceRandom;
+use test::{Bencher, black_box};
 
 macro_rules! map_insert_rand_bench {
     ($name: ident, $n: expr, $map: ident) => {
@@ -13,7 +12,7 @@ macro_rules! map_insert_rand_bench {
             let n: usize = $n;
             let mut map = $map::new();
             // setup
-            let mut rng = thread_rng();
+            let mut rng = crate::bench_rng();
 
             for _ in 0..n {
                 let i = rng.gen::<usize>() % n;
@@ -60,7 +59,7 @@ macro_rules! map_from_iter_rand_bench {
         pub fn $name(b: &mut Bencher) {
             let n: usize = $n;
             // setup
-            let mut rng = thread_rng();
+            let mut rng = crate::bench_rng();
             let mut vec = Vec::with_capacity(n);
 
             for _ in 0..n {
@@ -106,7 +105,7 @@ macro_rules! map_find_rand_bench {
             let n: usize = $n;
 
             // setup
-            let mut rng = thread_rng();
+            let mut rng = crate::bench_rng();
             let mut keys: Vec<_> = (0..n).map(|_| rng.gen::<usize>() % n).collect();
 
             for &k in &keys {
@@ -169,7 +168,7 @@ map_find_seq_bench! {find_seq_10_000, 10_000, BTreeMap}
 
 fn bench_iteration(b: &mut Bencher, size: i32) {
     let mut map = BTreeMap::<i32, i32>::new();
-    let mut rng = thread_rng();
+    let mut rng = crate::bench_rng();
 
     for _ in 0..size {
         map.insert(rng.gen(), rng.gen());
@@ -199,7 +198,7 @@ pub fn iteration_100000(b: &mut Bencher) {
 
 fn bench_iteration_mut(b: &mut Bencher, size: i32) {
     let mut map = BTreeMap::<i32, i32>::new();
-    let mut rng = thread_rng();
+    let mut rng = crate::bench_rng();
 
     for _ in 0..size {
         map.insert(rng.gen(), rng.gen());
@@ -354,6 +353,7 @@ pub fn iter_10k(b: &mut Bencher) {
 }
 
 #[bench]
+#[cfg_attr(target_os = "emscripten", ignore)] // hits an OOM
 pub fn iter_1m(b: &mut Bencher) {
     bench_iter(b, 1_000, 1_000_000);
 }
@@ -386,7 +386,7 @@ pub fn clone_slim_100_and_clear(b: &mut Bencher) {
 #[bench]
 pub fn clone_slim_100_and_drain_all(b: &mut Bencher) {
     let src = slim_map(100);
-    b.iter(|| src.clone().drain_filter(|_, _| true).count())
+    b.iter(|| src.clone().extract_if(|_, _| true).count())
 }
 
 #[bench]
@@ -394,7 +394,7 @@ pub fn clone_slim_100_and_drain_half(b: &mut Bencher) {
     let src = slim_map(100);
     b.iter(|| {
         let mut map = src.clone();
-        assert_eq!(map.drain_filter(|i, _| i % 2 == 0).count(), 100 / 2);
+        assert_eq!(map.extract_if(|i, _| i % 2 == 0).count(), 100 / 2);
         assert_eq!(map.len(), 100 / 2);
     })
 }
@@ -457,7 +457,7 @@ pub fn clone_slim_10k_and_clear(b: &mut Bencher) {
 #[bench]
 pub fn clone_slim_10k_and_drain_all(b: &mut Bencher) {
     let src = slim_map(10_000);
-    b.iter(|| src.clone().drain_filter(|_, _| true).count())
+    b.iter(|| src.clone().extract_if(|_, _| true).count())
 }
 
 #[bench]
@@ -465,7 +465,7 @@ pub fn clone_slim_10k_and_drain_half(b: &mut Bencher) {
     let src = slim_map(10_000);
     b.iter(|| {
         let mut map = src.clone();
-        assert_eq!(map.drain_filter(|i, _| i % 2 == 0).count(), 10_000 / 2);
+        assert_eq!(map.extract_if(|i, _| i % 2 == 0).count(), 10_000 / 2);
         assert_eq!(map.len(), 10_000 / 2);
     })
 }
@@ -528,7 +528,7 @@ pub fn clone_fat_val_100_and_clear(b: &mut Bencher) {
 #[bench]
 pub fn clone_fat_val_100_and_drain_all(b: &mut Bencher) {
     let src = fat_val_map(100);
-    b.iter(|| src.clone().drain_filter(|_, _| true).count())
+    b.iter(|| src.clone().extract_if(|_, _| true).count())
 }
 
 #[bench]
@@ -536,7 +536,7 @@ pub fn clone_fat_val_100_and_drain_half(b: &mut Bencher) {
     let src = fat_val_map(100);
     b.iter(|| {
         let mut map = src.clone();
-        assert_eq!(map.drain_filter(|i, _| i % 2 == 0).count(), 100 / 2);
+        assert_eq!(map.extract_if(|i, _| i % 2 == 0).count(), 100 / 2);
         assert_eq!(map.len(), 100 / 2);
     })
 }

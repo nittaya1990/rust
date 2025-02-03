@@ -1,11 +1,15 @@
-// run-rustfix
-
 #![allow(dead_code)]
+
+fn is_any(acc: bool, x: usize) -> bool {
+    acc || x > 2
+}
 
 /// Calls which should trigger the `UNNECESSARY_FOLD` lint
 fn unnecessary_fold() {
     // Can be replaced by .any
     let _ = (0..3).fold(false, |acc, x| acc || x > 2);
+    // Can be replaced by .any (checking suggestion)
+    let _ = (0..3).fold(false, |acc, x| is_any(acc, x));
     // Can be replaced by .all
     let _ = (0..3).fold(true, |acc, x| acc && x > 2);
     // Can be replaced by .sum
@@ -47,6 +51,30 @@ fn unnecessary_fold_over_multiple_lines() {
         .map(|x| x + 1)
         .filter(|x| x % 2 == 0)
         .fold(false, |acc, x| acc || x > 2);
+}
+
+fn issue10000() {
+    use std::collections::HashMap;
+    use std::hash::BuildHasher;
+
+    fn anything<T>(_: T) {}
+    fn num(_: i32) {}
+    fn smoketest_map<S: BuildHasher>(mut map: HashMap<i32, i32, S>) {
+        map.insert(0, 0);
+        assert_eq!(map.values().fold(0, |x, y| x + y), 0);
+
+        // more cases:
+        let _ = map.values().fold(0, |x, y| x + y);
+        let _ = map.values().fold(1, |x, y| x * y);
+        let _: i32 = map.values().fold(0, |x, y| x + y);
+        let _: i32 = map.values().fold(1, |x, y| x * y);
+        anything(map.values().fold(0, |x, y| x + y));
+        anything(map.values().fold(1, |x, y| x * y));
+        num(map.values().fold(0, |x, y| x + y));
+        num(map.values().fold(1, |x, y| x * y));
+    }
+
+    smoketest_map(HashMap::new());
 }
 
 fn main() {}

@@ -1,4 +1,4 @@
-use test::{black_box, Bencher};
+use test::{Bencher, black_box};
 
 #[bench]
 fn char_iterator(b: &mut Bencher) {
@@ -122,14 +122,13 @@ fn bench_contains_short_short(b: &mut Bencher) {
     let haystack = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
     let needle = "sit";
 
+    b.bytes = haystack.len() as u64;
     b.iter(|| {
-        assert!(haystack.contains(needle));
+        assert!(black_box(haystack).contains(black_box(needle)));
     })
 }
 
-#[bench]
-fn bench_contains_short_long(b: &mut Bencher) {
-    let haystack = "\
+static LONG_HAYSTACK: &str = "\
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Suspendisse quis lorem sit amet dolor \
 ultricies condimentum. Praesent iaculis purus elit, ac malesuada quam malesuada in. Duis sed orci \
 eros. Suspendisse sit amet magna mollis, mollis nunc luctus, imperdiet mi. Integer fringilla non \
@@ -164,10 +163,48 @@ feugiat. Etiam quis mauris vel risus luctus mattis a a nunc. Nullam orci quam, i
 vehicula in, porttitor ut nibh. Duis sagittis adipiscing nisl vitae congue. Donec mollis risus eu \
 leo suscipit, varius porttitor nulla porta. Pellentesque ut sem nec nisi euismod vehicula. Nulla \
 malesuada sollicitudin quam eu fermentum.";
+
+#[bench]
+fn bench_contains_2b_repeated_long(b: &mut Bencher) {
+    let haystack = LONG_HAYSTACK;
+    let needle = "::";
+
+    b.bytes = haystack.len() as u64;
+    b.iter(|| {
+        assert!(!black_box(haystack).contains(black_box(needle)));
+    })
+}
+
+#[bench]
+fn bench_contains_short_long(b: &mut Bencher) {
+    let haystack = LONG_HAYSTACK;
     let needle = "english";
 
+    b.bytes = haystack.len() as u64;
     b.iter(|| {
-        assert!(!haystack.contains(needle));
+        assert!(!black_box(haystack).contains(black_box(needle)));
+    })
+}
+
+#[bench]
+fn bench_contains_16b_in_long(b: &mut Bencher) {
+    let haystack = LONG_HAYSTACK;
+    let needle = "english language";
+
+    b.bytes = haystack.len() as u64;
+    b.iter(|| {
+        assert!(!black_box(haystack).contains(black_box(needle)));
+    })
+}
+
+#[bench]
+fn bench_contains_32b_in_long(b: &mut Bencher) {
+    let haystack = LONG_HAYSTACK;
+    let needle = "the english language sample text";
+
+    b.bytes = haystack.len() as u64;
+    b.iter(|| {
+        assert!(!black_box(haystack).contains(black_box(needle)));
     })
 }
 
@@ -176,8 +213,20 @@ fn bench_contains_bad_naive(b: &mut Bencher) {
     let haystack = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let needle = "aaaaaaaab";
 
+    b.bytes = haystack.len() as u64;
     b.iter(|| {
-        assert!(!haystack.contains(needle));
+        assert!(!black_box(haystack).contains(black_box(needle)));
+    })
+}
+
+#[bench]
+fn bench_contains_bad_simd(b: &mut Bencher) {
+    let haystack = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let needle = "aaabaaaa";
+
+    b.bytes = haystack.len() as u64;
+    b.iter(|| {
+        assert!(!black_box(haystack).contains(black_box(needle)));
     })
 }
 
@@ -186,8 +235,9 @@ fn bench_contains_equal(b: &mut Bencher) {
     let haystack = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
     let needle = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
 
+    b.bytes = haystack.len() as u64;
     b.iter(|| {
-        assert!(haystack.contains(needle));
+        assert!(black_box(haystack).contains(black_box(needle)));
     })
 }
 
@@ -297,3 +347,5 @@ make_test!(rsplitn_space_char, s, s.rsplitn(10, ' ').count());
 
 make_test!(split_space_str, s, s.split(" ").count());
 make_test!(split_ad_str, s, s.split("ad").count());
+
+make_test!(to_lowercase, s, s.to_lowercase());

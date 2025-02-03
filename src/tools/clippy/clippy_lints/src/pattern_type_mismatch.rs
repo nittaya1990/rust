@@ -1,12 +1,12 @@
-use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_hir::{
-    intravisit, Body, Expr, ExprKind, FnDecl, HirId, Let, LocalSource, Mutability, Pat, PatKind, Stmt, StmtKind,
+    Body, Expr, ExprKind, FnDecl, LetExpr, LocalSource, Mutability, Pat, PatKind, Stmt, StmtKind, intravisit,
 };
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
+use rustc_span::def_id::LocalDefId;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -29,9 +29,8 @@ declare_clippy_lint! {
     /// this lint can still be used to highlight areas of interest and ensure a good understanding
     /// of ownership semantics.
     ///
-    /// ### Why is this bad?
-    /// It isn't bad in general. But in some contexts it can be desirable
-    /// because it increases ownership hints in the code, and will guard against some changes
+    /// ### Why restrict this?
+    /// It increases ownership hints in the code, and will guard against some changes
     /// in ownership.
     ///
     /// ### Example
@@ -83,8 +82,8 @@ declare_lint_pass!(PatternTypeMismatch => [PATTERN_TYPE_MISMATCH]);
 
 impl<'tcx> LateLintPass<'tcx> for PatternTypeMismatch {
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
-        if let StmtKind::Local(local) = stmt.kind {
-            if in_external_macro(cx.sess(), local.pat.span) {
+        if let StmtKind::Let(local) = stmt.kind {
+            if local.pat.span.in_external_macro(cx.sess().source_map()) {
                 return;
             }
             let deref_possible = match local.source {
@@ -104,7 +103,7 @@ impl<'tcx> LateLintPass<'tcx> for PatternTypeMismatch {
                 }
             }
         }
-        if let ExprKind::Let(Let { pat, .. }) = expr.kind {
+        if let ExprKind::Let(LetExpr { pat, .. }) = expr.kind {
             apply_lint(cx, pat, DerefPossible::Possible);
         }
     }
@@ -116,7 +115,7 @@ impl<'tcx> LateLintPass<'tcx> for PatternTypeMismatch {
         _: &'tcx FnDecl<'_>,
         body: &'tcx Body<'_>,
         _: Span,
-        _: HirId,
+        _: LocalDefId,
     ) {
         for param in body.params {
             apply_lint(cx, param.pat, DerefPossible::Impossible);
@@ -130,26 +129,28 @@ enum DerefPossible {
     Impossible,
 }
 
-fn apply_lint<'tcx>(cx: &LateContext<'tcx>, pat: &Pat<'_>, deref_possible: DerefPossible) -> bool {
+fn apply_lint(cx: &LateContext<'_>, pat: &Pat<'_>, deref_possible: DerefPossible) -> bool {
     let maybe_mismatch = find_first_mismatch(cx, pat);
     if let Some((span, mutability, level)) = maybe_mismatch {
-        span_lint_and_help(
+        #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+        span_lint_and_then(
             cx,
             PATTERN_TYPE_MISMATCH,
             span,
             "type of pattern does not match the expression type",
-            None,
-            &format!(
-                "{}explicitly match against a `{}` pattern and adjust the enclosed variable bindings",
-                match (deref_possible, level) {
-                    (DerefPossible::Possible, Level::Top) => "use `*` to dereference the match expression or ",
-                    _ => "",
-                },
-                match mutability {
-                    Mutability::Mut => "&mut _",
-                    Mutability::Not => "&_",
-                },
-            ),
+            |diag| {
+                diag.help(format!(
+                    "{}explicitly match against a `{}` pattern and adjust the enclosed variable bindings",
+                    match (deref_possible, level) {
+                        (DerefPossible::Possible, Level::Top) => "use `*` to dereference the match expression or ",
+                        _ => "",
+                    },
+                    match mutability {
+                        Mutability::Mut => "&mut _",
+                        Mutability::Not => "&_",
+                    },
+                ));
+            },
         );
         true
     } else {
@@ -163,14 +164,13 @@ enum Level {
     Lower,
 }
 
-#[allow(rustc::usage_of_ty_tykind)]
-fn find_first_mismatch<'tcx>(cx: &LateContext<'tcx>, pat: &Pat<'_>) -> Option<(Span, Mutability, Level)> {
+fn find_first_mismatch(cx: &LateContext<'_>, pat: &Pat<'_>) -> Option<(Span, Mutability, Level)> {
     let mut result = None;
     pat.walk(|p| {
         if result.is_some() {
             return false;
         }
-        if in_external_macro(cx.sess(), p.span) {
+        if p.span.in_external_macro(cx.sess().source_map()) {
             return true;
         }
         let adjust_pat = match p.kind {

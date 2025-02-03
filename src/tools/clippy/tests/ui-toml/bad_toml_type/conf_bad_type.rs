@@ -1,4 +1,3 @@
-// error-pattern: error reading Clippy's configuration file: `blacklisted-names` is expected to be a
-// `Vec < String >` but is a `integer`
+//@error-in-other-file: invalid type: integer `42`, expected a sequence
 
 fn main() {}

@@ -1,11 +1,10 @@
-//! lint on inherent implementations
-
-use clippy_utils::diagnostics::span_lint_and_note;
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_lint_allowed;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_hir::{def_id::LocalDefId, Item, ItemKind, Node};
+use rustc_hir::def_id::LocalDefId;
+use rustc_hir::{Item, ItemKind, Node};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::Span;
 use std::collections::hash_map::Entry;
 
@@ -13,11 +12,11 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for multiple inherent implementations of a struct
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Splitting the implementation of a type makes the code harder to navigate.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct X;
     /// impl X {
     ///     fn one() {}
@@ -29,7 +28,7 @@ declare_clippy_lint! {
     ///
     /// Could be written:
     ///
-    /// ```rust
+    /// ```no_run
     /// struct X;
     /// impl X {
     ///     fn one() {}
@@ -52,23 +51,22 @@ impl<'tcx> LateLintPass<'tcx> for MultipleInherentImpl {
         // List of spans to lint. (lint_span, first_span)
         let mut lint_spans = Vec::new();
 
-        for (_, impl_ids) in cx
-            .tcx
-            .crate_inherent_impls(())
-            .inherent_impls
-            .iter()
-            .filter(|(&id, impls)| {
-                impls.len() > 1
-                    // Check for `#[allow]` on the type definition
-                    && !is_lint_allowed(
-                        cx,
-                        MULTIPLE_INHERENT_IMPL,
-                        cx.tcx.hir().local_def_id_to_hir_id(id),
-                    )
-            })
-        {
+        let (impls, _) = cx.tcx.crate_inherent_impls(());
+
+        for (&id, impl_ids) in &impls.inherent_impls {
+            if impl_ids.len() < 2
+            // Check for `#[allow]` on the type definition
+            || is_lint_allowed(
+                cx,
+                MULTIPLE_INHERENT_IMPL,
+                cx.tcx.local_def_id_to_hir_id(id),
+            ) {
+                continue;
+            }
+
             for impl_id in impl_ids.iter().map(|id| id.expect_local()) {
-                match type_map.entry(cx.tcx.type_of(impl_id)) {
+                let impl_ty = cx.tcx.type_of(impl_id).instantiate_identity();
+                match type_map.entry(impl_ty) {
                     Entry::Vacant(e) => {
                         // Store the id for the first impl block of this type. The span is retrieved lazily.
                         e.insert(IdOrSpan::Id(impl_id));
@@ -103,13 +101,14 @@ impl<'tcx> LateLintPass<'tcx> for MultipleInherentImpl {
         // `TyCtxt::crate_inherent_impls` doesn't have a defined order. Sort the lint output first.
         lint_spans.sort_by_key(|x| x.0.lo());
         for (span, first_span) in lint_spans {
-            span_lint_and_note(
+            span_lint_and_then(
                 cx,
                 MULTIPLE_INHERENT_IMPL,
                 span,
                 "multiple implementations of this structure",
-                Some(first_span),
-                "first implementation here",
+                |diag| {
+                    diag.span_note(first_span, "first implementation here");
+                },
             );
         }
     }
@@ -117,17 +116,17 @@ impl<'tcx> LateLintPass<'tcx> for MultipleInherentImpl {
 
 /// Gets the span for the given impl block unless it's not being considered by the lint.
 fn get_impl_span(cx: &LateContext<'_>, id: LocalDefId) -> Option<Span> {
-    let id = cx.tcx.hir().local_def_id_to_hir_id(id);
+    let id = cx.tcx.local_def_id_to_hir_id(id);
     if let Node::Item(&Item {
-        kind: ItemKind::Impl(ref impl_item),
+        kind: ItemKind::Impl(impl_item),
         span,
         ..
-    }) = cx.tcx.hir().get(id)
+    }) = cx.tcx.hir_node(id)
     {
         (!span.from_expansion()
             && impl_item.generics.params.is_empty()
             && !is_lint_allowed(cx, MULTIPLE_INHERENT_IMPL, id))
-        .then(|| span)
+        .then_some(span)
     } else {
         None
     }

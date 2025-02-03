@@ -1,37 +1,51 @@
-error: stripping a prefix manually
-  --> $DIR/min_rust_version_attr.rs:186:24
+error: approximate value of `f{32, 64}::consts::LOG2_10` found
+  --> tests/ui/min_rust_version_attr.rs:13:19
    |
-LL |             assert_eq!(s["hello, ".len()..].to_uppercase(), "WORLD!");
-   |                        ^^^^^^^^^^^^^^^^^^^^
+LL |     let log2_10 = 3.321928094887362;
+   |                   ^^^^^^^^^^^^^^^^^
    |
-   = note: `-D clippy::manual-strip` implied by `-D warnings`
-note: the prefix was tested here
-  --> $DIR/min_rust_version_attr.rs:185:9
-   |
-LL |         if s.starts_with("hello, ") {
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-help: try using the `strip_prefix` method
-   |
-LL ~         if let Some(<stripped>) = s.strip_prefix("hello, ") {
-LL ~             assert_eq!(<stripped>.to_uppercase(), "WORLD!");
-   |
+   = help: consider using the constant directly
+   = note: `#[deny(clippy::approx_constant)]` on by default
 
-error: stripping a prefix manually
-  --> $DIR/min_rust_version_attr.rs:198:24
+error: approximate value of `f{32, 64}::consts::LOG2_10` found
+  --> tests/ui/min_rust_version_attr.rs:19:19
    |
-LL |             assert_eq!(s["hello, ".len()..].to_uppercase(), "WORLD!");
-   |                        ^^^^^^^^^^^^^^^^^^^^
+LL |     let log2_10 = 3.321928094887362;
+   |                   ^^^^^^^^^^^^^^^^^
    |
-note: the prefix was tested here
-  --> $DIR/min_rust_version_attr.rs:197:9
-   |
-LL |         if s.starts_with("hello, ") {
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-help: try using the `strip_prefix` method
-   |
-LL ~         if let Some(<stripped>) = s.strip_prefix("hello, ") {
-LL ~             assert_eq!(<stripped>.to_uppercase(), "WORLD!");
-   |
+   = help: consider using the constant directly
 
-error: aborting due to 2 previous errors
+error: approximate value of `f{32, 64}::consts::LOG2_10` found
+  --> tests/ui/min_rust_version_attr.rs:30:19
+   |
+LL |     let log2_10 = 3.321928094887362;
+   |                   ^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using the constant directly
+
+error: approximate value of `f{32, 64}::consts::LOG2_10` found
+  --> tests/ui/min_rust_version_attr.rs:41:19
+   |
+LL |     let log2_10 = 3.321928094887362;
+   |                   ^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using the constant directly
+
+error: approximate value of `f{32, 64}::consts::LOG2_10` found
+  --> tests/ui/min_rust_version_attr.rs:52:19
+   |
+LL |     let log2_10 = 3.321928094887362;
+   |                   ^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using the constant directly
+
+error: approximate value of `f{32, 64}::consts::LOG2_10` found
+  --> tests/ui/min_rust_version_attr.rs:60:27
+   |
+LL |             let log2_10 = 3.321928094887362;
+   |                           ^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using the constant directly
+
+error: aborting due to 6 previous errors
 

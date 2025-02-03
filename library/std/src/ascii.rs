@@ -13,8 +13,10 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+#[unstable(feature = "ascii_char", issue = "110998")]
+pub use core::ascii::Char;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::ascii::{escape_default, EscapeDefault};
+pub use core::ascii::{EscapeDefault, escape_default};
 
 /// Extension methods for ASCII-subset only operations.
 ///
@@ -39,7 +41,7 @@ pub use core::ascii::{escape_default, EscapeDefault};
 ///
 /// [combining character]: https://en.wikipedia.org/wiki/Combining_character
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_deprecated(since = "1.26.0", reason = "use inherent methods instead")]
+#[deprecated(since = "1.26.0", note = "use inherent methods instead")]
 pub trait AsciiExt {
     /// Container type for copied ASCII characters.
     #[stable(feature = "rust1", since = "1.0.0")]

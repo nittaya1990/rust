@@ -1,8 +1,9 @@
 //! Table-of-contents creation.
+use crate::html::escape::Escape;
 
 /// A (recursive) table of contents
 #[derive(Debug, PartialEq)]
-crate struct Toc {
+pub(crate) struct Toc {
     /// The levels are strictly decreasing, i.e.
     ///
     /// `entries[0].level >= entries[1].level >= ...`
@@ -16,7 +17,7 @@ crate struct Toc {
     /// ### A
     /// ## B
     /// ```
-    entries: Vec<TocEntry>,
+    pub(crate) entries: Vec<TocEntry>,
 }
 
 impl Toc {
@@ -26,17 +27,22 @@ impl Toc {
 }
 
 #[derive(Debug, PartialEq)]
-crate struct TocEntry {
-    level: u32,
-    sec_number: String,
-    name: String,
-    id: String,
-    children: Toc,
+pub(crate) struct TocEntry {
+    pub(crate) level: u32,
+    pub(crate) sec_number: String,
+    // name is a plain text header that works in a `title` tag
+    // html includes `<code>` tags
+    // the tooltip is used so that, when a toc is truncated,
+    // you can mouse over it to see the whole thing
+    pub(crate) name: String,
+    pub(crate) html: String,
+    pub(crate) id: String,
+    pub(crate) children: Toc,
 }
 
 /// Progressive construction of a table of contents.
 #[derive(PartialEq)]
-crate struct TocBuilder {
+pub(crate) struct TocBuilder {
     top_level: Toc,
     /// The current hierarchy of parent headings, the levels are
     /// strictly increasing (i.e., `chain[0].level < chain[1].level <
@@ -50,12 +56,12 @@ crate struct TocBuilder {
 }
 
 impl TocBuilder {
-    crate fn new() -> TocBuilder {
+    pub(crate) fn new() -> TocBuilder {
         TocBuilder { top_level: Toc { entries: Vec::new() }, chain: Vec::new() }
     }
 
     /// Converts into a true `Toc` struct.
-    crate fn into_toc(mut self) -> Toc {
+    pub(crate) fn into_toc(mut self) -> Toc {
         // we know all levels are >= 1.
         self.fold_until(0);
         self.top_level
@@ -115,7 +121,7 @@ impl TocBuilder {
     /// Push a level `level` heading into the appropriate place in the
     /// hierarchy, returning a string containing the section number in
     /// `<num>.<num>.<num>` format.
-    crate fn push(&mut self, level: u32, name: String, id: String) -> &str {
+    pub(crate) fn push(&mut self, level: u32, name: String, html: String, id: String) -> &str {
         assert!(level >= 1);
 
         // collapse all previous sections into their parents until we
@@ -149,6 +155,7 @@ impl TocBuilder {
         self.chain.push(TocEntry {
             level,
             name,
+            html,
             sec_number,
             id,
             children: Toc { entries: Vec::new() },
@@ -163,21 +170,25 @@ impl TocBuilder {
 
 impl Toc {
     fn print_inner(&self, v: &mut String) {
+        use std::fmt::Write as _;
+
         v.push_str("<ul>");
         for entry in &self.entries {
             // recursively format this table of contents
-            v.push_str(&format!(
-                "\n<li><a href=\"#{id}\">{num} {name}</a>",
+            let _ = write!(
+                v,
+                "\n<li><a href=\"#{id}\" title=\"{name}\">{num} {html}</a>",
                 id = entry.id,
                 num = entry.sec_number,
-                name = entry.name
-            ));
+                name = Escape(&entry.name),
+                html = &entry.html,
+            );
             entry.children.print_inner(&mut *v);
             v.push_str("</li>");
         }
         v.push_str("</ul>");
     }
-    crate fn print(&self) -> String {
+    pub(crate) fn print(&self) -> String {
         let mut v = String::new();
         self.print_inner(&mut v);
         v

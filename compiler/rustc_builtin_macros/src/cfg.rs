@@ -2,53 +2,57 @@
 //! a literal `true` or `false` based on whether the given cfg matches the
 //! current compilation environment.
 
-use rustc_ast as ast;
 use rustc_ast::token;
 use rustc_ast::tokenstream::TokenStream;
-use rustc_attr as attr;
 use rustc_errors::PResult;
-use rustc_expand::base::{self, *};
+use rustc_expand::base::{DummyResult, ExpandResult, ExtCtxt, MacEager, MacroExpanderResult};
+use rustc_parse::exp;
 use rustc_span::Span;
+use {rustc_ast as ast, rustc_attr_parsing as attr};
 
-pub fn expand_cfg(
+use crate::errors;
+
+pub(crate) fn expand_cfg(
     cx: &mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
-) -> Box<dyn base::MacResult + 'static> {
+) -> MacroExpanderResult<'static> {
     let sp = cx.with_def_site_ctxt(sp);
 
-    match parse_cfg(cx, sp, tts) {
+    ExpandResult::Ready(match parse_cfg(cx, sp, tts) {
         Ok(cfg) => {
             let matches_cfg = attr::cfg_matches(
                 &cfg,
-                &cx.sess.parse_sess,
+                &cx.sess,
                 cx.current_expansion.lint_node_id,
-                cx.ecfg.features,
+                Some(cx.ecfg.features),
             );
             MacEager::expr(cx.expr_bool(sp, matches_cfg))
         }
-        Err(mut err) => {
-            err.emit();
-            DummyResult::any(sp)
+        Err(err) => {
+            let guar = err.emit();
+            DummyResult::any(sp, guar)
         }
-    }
+    })
 }
 
-fn parse_cfg<'a>(cx: &mut ExtCtxt<'a>, sp: Span, tts: TokenStream) -> PResult<'a, ast::MetaItem> {
+fn parse_cfg<'a>(
+    cx: &ExtCtxt<'a>,
+    span: Span,
+    tts: TokenStream,
+) -> PResult<'a, ast::MetaItemInner> {
     let mut p = cx.new_parser_from_tts(tts);
 
     if p.token == token::Eof {
-        let mut err = cx.struct_span_err(sp, "macro requires a cfg-pattern as an argument");
-        err.span_label(sp, "cfg-pattern required");
-        return Err(err);
+        return Err(cx.dcx().create_err(errors::RequiresCfgPattern { span }));
     }
 
-    let cfg = p.parse_meta_item()?;
+    let cfg = p.parse_meta_item_inner()?;
 
-    let _ = p.eat(&token::Comma);
+    let _ = p.eat(exp!(Comma));
 
-    if !p.eat(&token::Eof) {
-        return Err(cx.struct_span_err(sp, "expected 1 cfg-pattern"));
+    if !p.eat(exp!(Eof)) {
+        return Err(cx.dcx().create_err(errors::OneCfgPattern { span }));
     }
 
     Ok(cfg)

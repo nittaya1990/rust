@@ -1,11 +1,13 @@
+use std::cmp;
+
+use rustc_abi::{Align, Size};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::sync::Lock;
-use rustc_target::abi::{Align, Size};
-use std::cmp::{self, Ordering};
+use rustc_span::Symbol;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct VariantInfo {
-    pub name: Option<String>,
+    pub name: Option<Symbol>,
     pub kind: SizeKind,
     pub size: u64,
     pub align: u64,
@@ -18,12 +20,34 @@ pub enum SizeKind {
     Min,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum FieldKind {
+    AdtField,
+    Upvar,
+    CoroutineLocal,
+}
+
+impl std::fmt::Display for FieldKind {
+    fn fmt(&self, w: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FieldKind::AdtField => write!(w, "field"),
+            FieldKind::Upvar => write!(w, "upvar"),
+            FieldKind::CoroutineLocal => write!(w, "local"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FieldInfo {
-    pub name: String,
+    pub kind: FieldKind,
+    pub name: Symbol,
     pub offset: u64,
     pub size: u64,
     pub align: u64,
+    /// Name of the type of this field.
+    /// Present only if the creator thought that this would be important for identifying the field,
+    /// typically because the field name is uninformative.
+    pub type_name: Option<Symbol>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -32,6 +56,7 @@ pub enum DataTypeKind {
     Union,
     Enum,
     Closure,
+    Coroutine,
 }
 
 #[derive(PartialEq, Eq, Hash, Debug)]
@@ -64,7 +89,11 @@ impl CodeStats {
         // Sort variants so the largest ones are shown first. A stable sort is
         // used here so that source code order is preserved for all variants
         // that have the same size.
-        variants.sort_by(|info1, info2| info2.size.cmp(&info1.size));
+        // Except for Coroutines, whose variants are already sorted according to
+        // their yield points in `variant_info_for_coroutine`.
+        if kind != DataTypeKind::Coroutine {
+            variants.sort_by_key(|info| cmp::Reverse(info.size));
+        }
         let info = TypeSizeInfo {
             kind,
             type_description: type_desc.to_string(),
@@ -79,27 +108,23 @@ impl CodeStats {
 
     pub fn print_type_sizes(&self) {
         let type_sizes = self.type_sizes.borrow();
+        // We will soon sort, so the initial order does not matter.
+        #[allow(rustc::potential_query_instability)]
         let mut sorted: Vec<_> = type_sizes.iter().collect();
 
         // Primary sort: large-to-small.
         // Secondary sort: description (dictionary order)
-        sorted.sort_by(|info1, info2| {
-            // (reversing cmp order to get large-to-small ordering)
-            match info2.overall_size.cmp(&info1.overall_size) {
-                Ordering::Equal => info1.type_description.cmp(&info2.type_description),
-                other => other,
-            }
-        });
+        sorted.sort_by_key(|info| (cmp::Reverse(info.overall_size), &info.type_description));
 
-        for info in &sorted {
+        for info in sorted {
+            let TypeSizeInfo { type_description, overall_size, align, kind, variants, .. } = info;
             println!(
-                "print-type-size type: `{}`: {} bytes, alignment: {} bytes",
-                info.type_description, info.overall_size, info.align
+                "print-type-size type: `{type_description}`: {overall_size} bytes, alignment: {align} bytes"
             );
             let indent = "    ";
 
             let discr_size = if let Some(discr_size) = info.opt_discr_size {
-                println!("print-type-size {}discriminant: {} bytes", indent, discr_size);
+                println!("print-type-size {indent}discriminant: {discr_size} bytes");
                 discr_size
             } else {
                 0
@@ -111,22 +136,20 @@ impl CodeStats {
             // to reflect the presence of the discriminant.
             let mut max_variant_size = discr_size;
 
-            let struct_like = match info.kind {
+            let struct_like = match kind {
                 DataTypeKind::Struct | DataTypeKind::Closure => true,
-                DataTypeKind::Enum | DataTypeKind::Union => false,
+                DataTypeKind::Enum | DataTypeKind::Union | DataTypeKind::Coroutine => false,
             };
-            for (i, variant_info) in info.variants.iter().enumerate() {
+            for (i, variant_info) in variants.into_iter().enumerate() {
                 let VariantInfo { ref name, kind: _, align: _, size, ref fields } = *variant_info;
                 let indent = if !struct_like {
                     let name = match name.as_ref() {
-                        Some(name) => name.to_owned(),
+                        Some(name) => name.to_string(),
                         None => i.to_string(),
                     };
                     println!(
-                        "print-type-size {}variant `{}`: {} bytes",
-                        indent,
-                        name,
-                        size - discr_size
+                        "print-type-size {indent}variant `{name}`: {diff} bytes",
+                        diff = size - discr_size
                     );
                     "        "
                 } else {
@@ -144,49 +167,45 @@ impl CodeStats {
                 let mut fields = fields.clone();
                 fields.sort_by_key(|f| (f.offset, f.size));
 
-                for field in fields.iter() {
-                    let FieldInfo { ref name, offset, size, align } = *field;
+                for field in fields {
+                    let FieldInfo { kind, ref name, offset, size, align, type_name } = field;
 
                     if offset > min_offset {
                         let pad = offset - min_offset;
-                        println!("print-type-size {}padding: {} bytes", indent, pad);
+                        println!("print-type-size {indent}padding: {pad} bytes");
                     }
 
                     if offset < min_offset {
                         // If this happens it's probably a union.
-                        println!(
-                            "print-type-size {}field `.{}`: {} bytes, \
-                                  offset: {} bytes, \
-                                  alignment: {} bytes",
-                            indent, name, size, offset, align
+                        print!(
+                            "print-type-size {indent}{kind} `.{name}`: {size} bytes, \
+                                  offset: {offset} bytes, \
+                                  alignment: {align} bytes"
                         );
                     } else if info.packed || offset == min_offset {
-                        println!("print-type-size {}field `.{}`: {} bytes", indent, name, size);
+                        print!("print-type-size {indent}{kind} `.{name}`: {size} bytes");
                     } else {
                         // Include field alignment in output only if it caused padding injection
-                        println!(
-                            "print-type-size {}field `.{}`: {} bytes, \
-                                  alignment: {} bytes",
-                            indent, name, size, align
+                        print!(
+                            "print-type-size {indent}{kind} `.{name}`: {size} bytes, \
+                                  alignment: {align} bytes"
                         );
+                    }
+
+                    if let Some(type_name) = type_name {
+                        println!(", type: {type_name}");
+                    } else {
+                        println!();
                     }
 
                     min_offset = offset + size;
                 }
             }
 
-            assert!(
-                max_variant_size <= info.overall_size,
-                "max_variant_size {} !<= {} overall_size",
-                max_variant_size,
-                info.overall_size
-            );
-            if max_variant_size < info.overall_size {
-                println!(
-                    "print-type-size {}end padding: {} bytes",
-                    indent,
-                    info.overall_size - max_variant_size
-                );
+            match overall_size.checked_sub(max_variant_size) {
+                None => panic!("max_variant_size {max_variant_size} > {overall_size} overall_size"),
+                Some(diff @ 1..) => println!("print-type-size {indent}end padding: {diff} bytes"),
+                Some(0) => {}
             }
         }
     }

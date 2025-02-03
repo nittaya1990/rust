@@ -1,10 +1,13 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_help;
-use rustc_ast::ast::{AssocItemKind, Extern, Fn, FnSig, Impl, Item, ItemKind, Trait, Ty, TyKind};
-use rustc_lint::{EarlyContext, EarlyLintPass};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{sym, Span};
-
-use std::convert::TryInto;
+use clippy_utils::{get_parent_as_impl, has_repr_attr, is_bool};
+use rustc_hir::intravisit::FnKind;
+use rustc_hir::{Body, FnDecl, Item, ItemKind, TraitFn, TraitItem, TraitItemKind, Ty};
+use rustc_lint::{LateContext, LateLintPass};
+use rustc_session::impl_lint_pass;
+use rustc_span::Span;
+use rustc_span::def_id::LocalDefId;
+use rustc_target::spec::abi::Abi;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -20,8 +23,7 @@ declare_clippy_lint! {
     /// readability and API.
     ///
     /// ### Example
-    /// Bad:
-    /// ```rust
+    /// ```no_run
     /// struct S {
     ///     is_pending: bool,
     ///     is_processing: bool,
@@ -29,8 +31,8 @@ declare_clippy_lint! {
     /// }
     /// ```
     ///
-    /// Good:
-    /// ```rust
+    /// Use instead:
+    /// ```no_run
     /// enum S {
     ///     Pending,
     ///     Processing,
@@ -57,12 +59,11 @@ declare_clippy_lint! {
     /// API easier to use.
     ///
     /// ### Example
-    /// Bad:
     /// ```rust,ignore
     /// fn f(is_round: bool, is_hot: bool) { ... }
     /// ```
     ///
-    /// Good:
+    /// Use instead:
     /// ```rust,ignore
     /// enum Shape {
     ///     Round,
@@ -88,93 +89,85 @@ pub struct ExcessiveBools {
 }
 
 impl ExcessiveBools {
-    #[must_use]
-    pub fn new(max_struct_bools: u64, max_fn_params_bools: u64) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            max_struct_bools,
-            max_fn_params_bools,
-        }
-    }
-
-    fn check_fn_sig(&self, cx: &EarlyContext<'_>, fn_sig: &FnSig, span: Span) {
-        match fn_sig.header.ext {
-            Extern::Implicit | Extern::Explicit(_) => return,
-            Extern::None => (),
-        }
-
-        let fn_sig_bools = fn_sig
-            .decl
-            .inputs
-            .iter()
-            .filter(|param| is_bool_ty(&param.ty))
-            .count()
-            .try_into()
-            .unwrap();
-        if self.max_fn_params_bools < fn_sig_bools {
-            span_lint_and_help(
-                cx,
-                FN_PARAMS_EXCESSIVE_BOOLS,
-                span,
-                &format!("more than {} bools in function parameters", self.max_fn_params_bools),
-                None,
-                "consider refactoring bools into two-variant enums",
-            );
+            max_struct_bools: conf.max_struct_bools,
+            max_fn_params_bools: conf.max_fn_params_bools,
         }
     }
 }
 
 impl_lint_pass!(ExcessiveBools => [STRUCT_EXCESSIVE_BOOLS, FN_PARAMS_EXCESSIVE_BOOLS]);
 
-fn is_bool_ty(ty: &Ty) -> bool {
-    if let TyKind::Path(None, path) = &ty.kind {
-        if let [name] = path.segments.as_slice() {
-            return name.ident.name == sym::bool;
-        }
-    }
-    false
+fn has_n_bools<'tcx>(iter: impl Iterator<Item = &'tcx Ty<'tcx>>, mut count: u64) -> bool {
+    iter.filter(|ty| is_bool(ty)).any(|_| {
+        let (x, overflow) = count.overflowing_sub(1);
+        count = x;
+        overflow
+    })
 }
 
-impl EarlyLintPass for ExcessiveBools {
-    fn check_item(&mut self, cx: &EarlyContext<'_>, item: &Item) {
-        if item.span.from_expansion() {
-            return;
-        }
-        match &item.kind {
-            ItemKind::Struct(variant_data, _) => {
-                if item.attrs.iter().any(|attr| attr.has_name(sym::repr)) {
-                    return;
-                }
+fn check_fn_decl(cx: &LateContext<'_>, decl: &FnDecl<'_>, sp: Span, max: u64) {
+    if has_n_bools(decl.inputs.iter(), max) && !sp.from_expansion() {
+        span_lint_and_help(
+            cx,
+            FN_PARAMS_EXCESSIVE_BOOLS,
+            sp,
+            format!("more than {max} bools in function parameters"),
+            None,
+            "consider refactoring bools into two-variant enums",
+        );
+    }
+}
 
-                let struct_bools = variant_data
-                    .fields()
-                    .iter()
-                    .filter(|field| is_bool_ty(&field.ty))
-                    .count()
-                    .try_into()
-                    .unwrap();
-                if self.max_struct_bools < struct_bools {
-                    span_lint_and_help(
-                        cx,
-                        STRUCT_EXCESSIVE_BOOLS,
-                        item.span,
-                        &format!("more than {} bools in a struct", self.max_struct_bools),
-                        None,
-                        "consider using a state machine or refactoring bools into two-variant enums",
-                    );
-                }
-            },
-            ItemKind::Impl(box Impl {
-                of_trait: None, items, ..
-            })
-            | ItemKind::Trait(box Trait { items, .. }) => {
-                for item in items {
-                    if let AssocItemKind::Fn(box Fn { sig, .. }) = &item.kind {
-                        self.check_fn_sig(cx, sig, item.span);
-                    }
-                }
-            },
-            ItemKind::Fn(box Fn { sig, .. }) => self.check_fn_sig(cx, sig, item.span),
-            _ => (),
+impl<'tcx> LateLintPass<'tcx> for ExcessiveBools {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
+        if let ItemKind::Struct(variant_data, _) = &item.kind
+            && variant_data.fields().len() as u64 > self.max_struct_bools
+            && has_n_bools(
+                variant_data.fields().iter().map(|field| field.ty),
+                self.max_struct_bools,
+            )
+            && !has_repr_attr(cx, item.hir_id())
+            && !item.span.from_expansion()
+        {
+            span_lint_and_help(
+                cx,
+                STRUCT_EXCESSIVE_BOOLS,
+                item.span,
+                format!("more than {} bools in a struct", self.max_struct_bools),
+                None,
+                "consider using a state machine or refactoring bools into two-variant enums",
+            );
+        }
+    }
+
+    fn check_trait_item(&mut self, cx: &LateContext<'tcx>, trait_item: &'tcx TraitItem<'tcx>) {
+        // functions with a body are already checked by `check_fn`
+        if let TraitItemKind::Fn(fn_sig, TraitFn::Required(_)) = &trait_item.kind
+            && fn_sig.header.abi == Abi::Rust
+            && fn_sig.decl.inputs.len() as u64 > self.max_fn_params_bools
+        {
+            check_fn_decl(cx, fn_sig.decl, fn_sig.span, self.max_fn_params_bools);
+        }
+    }
+
+    fn check_fn(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        fn_kind: FnKind<'tcx>,
+        fn_decl: &'tcx FnDecl<'tcx>,
+        _: &'tcx Body<'tcx>,
+        span: Span,
+        def_id: LocalDefId,
+    ) {
+        if let Some(fn_header) = fn_kind.header()
+            && fn_header.abi == Abi::Rust
+            && fn_decl.inputs.len() as u64 > self.max_fn_params_bools
+            && get_parent_as_impl(cx.tcx, cx.tcx.local_def_id_to_hir_id(def_id))
+                .is_none_or(|impl_item| impl_item.of_trait.is_none())
+        {
+            check_fn_decl(cx, fn_decl, span, self.max_fn_params_bools);
         }
     }
 }

@@ -1,9 +1,8 @@
 use clippy_utils::diagnostics::span_lint;
 use rustc_hir::{BorrowKind, Expr, ExprKind, Mutability};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::subst::Subst;
 use rustc_middle::ty::{self, Ty};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use std::iter;
 
 declare_clippy_lint! {
@@ -16,12 +15,17 @@ declare_clippy_lint! {
     /// the value. Also the code misleads about the intent of the call site.
     ///
     /// ### Example
-    /// ```ignore
-    /// // Bad
-    /// my_vec.push(&mut value)
+    /// ```no_run
+    /// # let mut vec = Vec::new();
+    /// # let mut value = 5;
+    /// vec.push(&mut value);
+    /// ```
     ///
-    /// // Good
-    /// my_vec.push(&value)
+    /// Use instead:
+    /// ```no_run
+    /// # let mut vec = Vec::new();
+    /// # let value = 5;
+    /// vec.push(&value);
     /// ```
     #[clippy::version = "pre 1.29.0"]
     pub UNNECESSARY_MUT_PASSED,
@@ -33,23 +37,34 @@ declare_lint_pass!(UnnecessaryMutPassed => [UNNECESSARY_MUT_PASSED]);
 
 impl<'tcx> LateLintPass<'tcx> for UnnecessaryMutPassed {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
+        if e.span.from_expansion() {
+            // Issue #11268
+            return;
+        }
+
         match e.kind {
             ExprKind::Call(fn_expr, arguments) => {
                 if let ExprKind::Path(ref path) = fn_expr.kind {
                     check_arguments(
                         cx,
-                        arguments,
+                        &mut arguments.iter(),
                         cx.typeck_results().expr_ty(fn_expr),
-                        &rustc_hir_pretty::to_string(rustc_hir_pretty::NO_ANN, |s| s.print_qpath(path, false)),
+                        &rustc_hir_pretty::qpath_to_string(&cx.tcx, path),
                         "function",
                     );
                 }
             },
-            ExprKind::MethodCall(path, arguments, _) => {
+            ExprKind::MethodCall(path, receiver, arguments, _) => {
                 let def_id = cx.typeck_results().type_dependent_def_id(e.hir_id).unwrap();
-                let substs = cx.typeck_results().node_substs(e.hir_id);
-                let method_type = cx.tcx.type_of(def_id).subst(cx.tcx, substs);
-                check_arguments(cx, arguments, method_type, path.ident.as_str(), "method");
+                let args = cx.typeck_results().node_args(e.hir_id);
+                let method_type = cx.tcx.type_of(def_id).instantiate(cx.tcx, args);
+                check_arguments(
+                    cx,
+                    &mut iter::once(receiver).chain(arguments.iter()),
+                    method_type,
+                    path.ident.as_str(),
+                    "method",
+                );
             },
             _ => (),
         }
@@ -58,26 +73,23 @@ impl<'tcx> LateLintPass<'tcx> for UnnecessaryMutPassed {
 
 fn check_arguments<'tcx>(
     cx: &LateContext<'tcx>,
-    arguments: &[Expr<'_>],
+    arguments: &mut dyn Iterator<Item = &'tcx Expr<'tcx>>,
     type_definition: Ty<'tcx>,
     name: &str,
     fn_kind: &str,
 ) {
     match type_definition.kind() {
-        ty::FnDef(..) | ty::FnPtr(_) => {
+        ty::FnDef(..) | ty::FnPtr(..) => {
             let parameters = type_definition.fn_sig(cx.tcx).skip_binder().inputs();
             for (argument, parameter) in iter::zip(arguments, parameters) {
                 match parameter.kind() {
-                    ty::Ref(_, _, Mutability::Not)
-                    | ty::RawPtr(ty::TypeAndMut {
-                        mutbl: Mutability::Not, ..
-                    }) => {
+                    ty::Ref(_, _, Mutability::Not) | ty::RawPtr(_, Mutability::Not) => {
                         if let ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, _) = argument.kind {
                             span_lint(
                                 cx,
                                 UNNECESSARY_MUT_PASSED,
                                 argument.span,
-                                &format!("the {} `{}` doesn't need a mutable reference", fn_kind, name),
+                                format!("the {fn_kind} `{name}` doesn't need a mutable reference"),
                             );
                         }
                     },

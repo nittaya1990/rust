@@ -1,15 +1,15 @@
 //! Unwind info generation (`.eh_frame`)
 
-use crate::prelude::*;
-
 use cranelift_codegen::ir::Endianness;
-use cranelift_codegen::isa::{unwind::UnwindInfo, TargetIsa};
-
+use cranelift_codegen::isa::TargetIsa;
+use cranelift_codegen::isa::unwind::UnwindInfo;
 use cranelift_object::ObjectProduct;
-use gimli::write::{Address, CieId, EhFrame, FrameTable, Section};
 use gimli::RunTimeEndian;
+use gimli::write::{CieId, EhFrame, FrameTable, Section};
 
+use super::emit::address_for_func;
 use super::object::WriteDebugInfo;
+use crate::prelude::*;
 
 pub(crate) struct UnwindContext {
     endian: RunTimeEndian,
@@ -39,7 +39,17 @@ impl UnwindContext {
     }
 
     pub(crate) fn add_function(&mut self, func_id: FuncId, context: &Context, isa: &dyn TargetIsa) {
-        let unwind_info = if let Some(unwind_info) = context.create_unwind_info(isa).unwrap() {
+        if let target_lexicon::OperatingSystem::MacOSX { .. } = isa.triple().operating_system {
+            // The object crate doesn't currently support DW_GNU_EH_PE_absptr, which macOS
+            // requires for unwinding tables. In addition on arm64 it currently doesn't
+            // support 32bit relocations as we currently use for the unwinding table.
+            // See gimli-rs/object#415 and rust-lang/rustc_codegen_cranelift#1371
+            return;
+        }
+
+        let unwind_info = if let Some(unwind_info) =
+            context.compiled_code().unwrap().create_unwind_info(isa).unwrap()
+        {
             unwind_info
         } else {
             return;
@@ -47,14 +57,11 @@ impl UnwindContext {
 
         match unwind_info {
             UnwindInfo::SystemV(unwind_info) => {
-                self.frame_table.add_fde(
-                    self.cie_id.unwrap(),
-                    unwind_info
-                        .to_fde(Address::Symbol { symbol: func_id.as_u32() as usize, addend: 0 }),
-                );
+                self.frame_table
+                    .add_fde(self.cie_id.unwrap(), unwind_info.to_fde(address_for_func(func_id)));
             }
-            UnwindInfo::WindowsX64(_) => {
-                // FIXME implement this
+            UnwindInfo::WindowsX64(_) | UnwindInfo::WindowsArm64(_) => {
+                // Windows does not have debug info for its unwind info.
             }
             unwind_info => unimplemented!("{:?}", unwind_info),
         }
@@ -81,6 +88,8 @@ impl UnwindContext {
 
     #[cfg(all(feature = "jit", not(windows)))]
     pub(crate) unsafe fn register_jit(self, jit_module: &cranelift_jit::JITModule) {
+        use std::mem::ManuallyDrop;
+
         let mut eh_frame = EhFrame::from(super::emit::WriterRelocate::new(self.endian));
         self.frame_table.write_eh_frame(&mut eh_frame).unwrap();
 
@@ -95,17 +104,16 @@ impl UnwindContext {
 
         // FIXME support unregistering unwind tables once cranelift-jit supports deallocating
         // individual functions
-        #[allow(unused_variables)]
-        let (eh_frame, eh_frame_len, _) = Vec::into_raw_parts(eh_frame);
+        let eh_frame = ManuallyDrop::new(eh_frame);
 
         // =======================================================================
-        // Everything after this line up to the end of the file is loosly based on
+        // Everything after this line up to the end of the file is loosely based on
         // https://github.com/bytecodealliance/wasmtime/blob/4471a82b0c540ff48960eca6757ccce5b1b5c3e4/crates/jit/src/unwind/systemv.rs
         #[cfg(target_os = "macos")]
         {
             // On macOS, `__register_frame` takes a pointer to a single FDE
-            let start = eh_frame;
-            let end = start.add(eh_frame_len);
+            let start = eh_frame.as_ptr();
+            let end = start.add(eh_frame.len());
             let mut current = start;
 
             // Walk all of the entries in the frame table and register them
@@ -124,7 +132,7 @@ impl UnwindContext {
         #[cfg(not(target_os = "macos"))]
         {
             // On other platforms, `__register_frame` will walk the FDEs until an entry of length 0
-            __register_frame(eh_frame);
+            __register_frame(eh_frame.as_ptr());
         }
     }
 }

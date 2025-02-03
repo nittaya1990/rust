@@ -1,6 +1,37 @@
 use crate::f32::consts;
-use crate::num::FpCategory as Fp;
-use crate::num::*;
+use crate::num::{FpCategory as Fp, *};
+
+/// Smallest number
+const TINY_BITS: u32 = 0x1;
+
+/// Next smallest number
+const TINY_UP_BITS: u32 = 0x2;
+
+/// Exponent = 0b11...10, Sifnificand 0b1111..10. Min val > 0
+const MAX_DOWN_BITS: u32 = 0x7f7f_fffe;
+
+/// Zeroed exponent, full significant
+const LARGEST_SUBNORMAL_BITS: u32 = 0x007f_ffff;
+
+/// Exponent = 0b1, zeroed significand
+const SMALLEST_NORMAL_BITS: u32 = 0x0080_0000;
+
+/// First pattern over the mantissa
+const NAN_MASK1: u32 = 0x002a_aaaa;
+
+/// Second pattern over the mantissa
+const NAN_MASK2: u32 = 0x0055_5555;
+
+#[allow(unused_macros)]
+macro_rules! assert_f32_biteq {
+    ($left : expr, $right : expr) => {
+        let l: &f32 = &$left;
+        let r: &f32 = &$right;
+        let lb = l.to_bits();
+        let rb = r.to_bits();
+        assert_eq!(lb, rb, "float {l} ({lb:#010x}) is not bitequal to {r} ({rb:#010x})");
+    };
+}
 
 #[test]
 fn test_num_f32() {
@@ -209,6 +240,7 @@ fn test_ceil() {
 
 #[test]
 fn test_round() {
+    assert_approx_eq!(2.5f32.round(), 3.0f32);
     assert_approx_eq!(1.0f32.round(), 1.0f32);
     assert_approx_eq!(1.3f32.round(), 1.0f32);
     assert_approx_eq!(1.5f32.round(), 2.0f32);
@@ -219,6 +251,21 @@ fn test_round() {
     assert_approx_eq!((-1.3f32).round(), -1.0f32);
     assert_approx_eq!((-1.5f32).round(), -2.0f32);
     assert_approx_eq!((-1.7f32).round(), -2.0f32);
+}
+
+#[test]
+fn test_round_ties_even() {
+    assert_approx_eq!(2.5f32.round_ties_even(), 2.0f32);
+    assert_approx_eq!(1.0f32.round_ties_even(), 1.0f32);
+    assert_approx_eq!(1.3f32.round_ties_even(), 1.0f32);
+    assert_approx_eq!(1.5f32.round_ties_even(), 2.0f32);
+    assert_approx_eq!(1.7f32.round_ties_even(), 2.0f32);
+    assert_approx_eq!(0.0f32.round_ties_even(), 0.0f32);
+    assert_approx_eq!((-0.0f32).round_ties_even(), -0.0f32);
+    assert_approx_eq!((-1.0f32).round_ties_even(), -1.0f32);
+    assert_approx_eq!((-1.3f32).round_ties_even(), -1.0f32);
+    assert_approx_eq!((-1.5f32).round_ties_even(), -2.0f32);
+    assert_approx_eq!((-1.7f32).round_ties_even(), -2.0f32);
 }
 
 #[test]
@@ -297,6 +344,67 @@ fn test_is_sign_negative() {
     assert!((1f32 / f32::NEG_INFINITY).is_sign_negative());
     assert!(!f32::NAN.is_sign_negative());
     assert!((-f32::NAN).is_sign_negative());
+}
+
+#[test]
+fn test_next_up() {
+    let tiny = f32::from_bits(TINY_BITS);
+    let tiny_up = f32::from_bits(TINY_UP_BITS);
+    let max_down = f32::from_bits(MAX_DOWN_BITS);
+    let largest_subnormal = f32::from_bits(LARGEST_SUBNORMAL_BITS);
+    let smallest_normal = f32::from_bits(SMALLEST_NORMAL_BITS);
+    assert_f32_biteq!(f32::NEG_INFINITY.next_up(), f32::MIN);
+    assert_f32_biteq!(f32::MIN.next_up(), -max_down);
+    assert_f32_biteq!((-1.0 - f32::EPSILON).next_up(), -1.0);
+    assert_f32_biteq!((-smallest_normal).next_up(), -largest_subnormal);
+    assert_f32_biteq!((-tiny_up).next_up(), -tiny);
+    assert_f32_biteq!((-tiny).next_up(), -0.0f32);
+    assert_f32_biteq!((-0.0f32).next_up(), tiny);
+    assert_f32_biteq!(0.0f32.next_up(), tiny);
+    assert_f32_biteq!(tiny.next_up(), tiny_up);
+    assert_f32_biteq!(largest_subnormal.next_up(), smallest_normal);
+    assert_f32_biteq!(1.0f32.next_up(), 1.0 + f32::EPSILON);
+    assert_f32_biteq!(f32::MAX.next_up(), f32::INFINITY);
+    assert_f32_biteq!(f32::INFINITY.next_up(), f32::INFINITY);
+
+    // Check that NaNs roundtrip.
+    let nan0 = f32::NAN;
+    let nan1 = f32::from_bits(f32::NAN.to_bits() ^ NAN_MASK1);
+    let nan2 = f32::from_bits(f32::NAN.to_bits() ^ NAN_MASK2);
+    assert_f32_biteq!(nan0.next_up(), nan0);
+    assert_f32_biteq!(nan1.next_up(), nan1);
+    assert_f32_biteq!(nan2.next_up(), nan2);
+}
+
+#[test]
+fn test_next_down() {
+    let tiny = f32::from_bits(TINY_BITS);
+    let tiny_up = f32::from_bits(TINY_UP_BITS);
+    let max_down = f32::from_bits(MAX_DOWN_BITS);
+    let largest_subnormal = f32::from_bits(LARGEST_SUBNORMAL_BITS);
+    let smallest_normal = f32::from_bits(SMALLEST_NORMAL_BITS);
+    assert_f32_biteq!(f32::NEG_INFINITY.next_down(), f32::NEG_INFINITY);
+    assert_f32_biteq!(f32::MIN.next_down(), f32::NEG_INFINITY);
+    assert_f32_biteq!((-max_down).next_down(), f32::MIN);
+    assert_f32_biteq!((-1.0f32).next_down(), -1.0 - f32::EPSILON);
+    assert_f32_biteq!((-largest_subnormal).next_down(), -smallest_normal);
+    assert_f32_biteq!((-tiny).next_down(), -tiny_up);
+    assert_f32_biteq!((-0.0f32).next_down(), -tiny);
+    assert_f32_biteq!((0.0f32).next_down(), -tiny);
+    assert_f32_biteq!(tiny.next_down(), 0.0f32);
+    assert_f32_biteq!(tiny_up.next_down(), tiny);
+    assert_f32_biteq!(smallest_normal.next_down(), largest_subnormal);
+    assert_f32_biteq!((1.0 + f32::EPSILON).next_down(), 1.0f32);
+    assert_f32_biteq!(f32::MAX.next_down(), max_down);
+    assert_f32_biteq!(f32::INFINITY.next_down(), f32::MAX);
+
+    // Check that NaNs roundtrip.
+    let nan0 = f32::NAN;
+    let nan1 = f32::from_bits(f32::NAN.to_bits() ^ NAN_MASK1);
+    let nan2 = f32::from_bits(f32::NAN.to_bits() ^ NAN_MASK2);
+    assert_f32_biteq!(nan0.next_down(), nan0);
+    assert_f32_biteq!(nan1.next_down(), nan1);
+    assert_f32_biteq!(nan2.next_down(), nan2);
 }
 
 #[test]
@@ -509,6 +617,11 @@ fn test_asinh() {
     assert_approx_eq!((-2.0f32).asinh(), -1.443635475178810342493276740273105f32);
     // regression test for the catastrophic cancellation fixed in 72486
     assert_approx_eq!((-3000.0f32).asinh(), -8.699514775987968673236893537700647f32);
+
+    // test for low accuracy from issue 104548
+    assert_approx_eq!(60.0f32, 60.0f32.sinh().asinh());
+    // mul needed for approximate comparison to be meaningful
+    assert_approx_eq!(1.0f32, 1e-15f32.sinh().asinh() * 1e15f32);
 }
 
 #[test]
@@ -524,6 +637,9 @@ fn test_acosh() {
     assert!(nan.acosh().is_nan());
     assert_approx_eq!(2.0f32.acosh(), 1.31695789692481670862504634730796844f32);
     assert_approx_eq!(3.0f32.acosh(), 1.76274717403908605046521864995958461f32);
+
+    // test for low accuracy from issue 104548
+    assert_approx_eq!(60.0f32, 60.0f32.cosh().acosh());
 }
 
 #[test]
@@ -548,6 +664,38 @@ fn test_atanh() {
 
     assert_approx_eq!(0.5f32.atanh(), 0.54930614433405484569762261846126285f32);
     assert_approx_eq!((-0.5f32).atanh(), -0.54930614433405484569762261846126285f32);
+}
+
+#[test]
+fn test_gamma() {
+    // precision can differ between platforms
+    assert_approx_eq!(1.0f32.gamma(), 1.0f32);
+    assert_approx_eq!(2.0f32.gamma(), 1.0f32);
+    assert_approx_eq!(3.0f32.gamma(), 2.0f32);
+    assert_approx_eq!(4.0f32.gamma(), 6.0f32);
+    assert_approx_eq!(5.0f32.gamma(), 24.0f32);
+    assert_approx_eq!(0.5f32.gamma(), consts::PI.sqrt());
+    assert_approx_eq!((-0.5f32).gamma(), -2.0 * consts::PI.sqrt());
+    assert_eq!(0.0f32.gamma(), f32::INFINITY);
+    assert_eq!((-0.0f32).gamma(), f32::NEG_INFINITY);
+    assert!((-1.0f32).gamma().is_nan());
+    assert!((-2.0f32).gamma().is_nan());
+    assert!(f32::NAN.gamma().is_nan());
+    assert!(f32::NEG_INFINITY.gamma().is_nan());
+    assert_eq!(f32::INFINITY.gamma(), f32::INFINITY);
+    assert_eq!(171.71f32.gamma(), f32::INFINITY);
+}
+
+#[test]
+fn test_ln_gamma() {
+    assert_approx_eq!(1.0f32.ln_gamma().0, 0.0f32);
+    assert_eq!(1.0f32.ln_gamma().1, 1);
+    assert_approx_eq!(2.0f32.ln_gamma().0, 0.0f32);
+    assert_eq!(2.0f32.ln_gamma().1, 1);
+    assert_approx_eq!(3.0f32.ln_gamma().0, 2.0f32.ln());
+    assert_eq!(3.0f32.ln_gamma().1, 1);
+    assert_approx_eq!((-0.5f32).ln_gamma().0, (2.0 * consts::PI.sqrt()).ln());
+    assert_eq!((-0.5f32).ln_gamma().1, -1);
 }
 
 #[test]
@@ -600,8 +748,8 @@ fn test_float_bits_conv() {
 
     // Check that NaNs roundtrip their bits regardless of signaling-ness
     // 0xA is 0b1010; 0x5 is 0b0101 -- so these two together clobbers all the mantissa bits
-    let masked_nan1 = f32::NAN.to_bits() ^ 0x002A_AAAA;
-    let masked_nan2 = f32::NAN.to_bits() ^ 0x0055_5555;
+    let masked_nan1 = f32::NAN.to_bits() ^ NAN_MASK1;
+    let masked_nan2 = f32::NAN.to_bits() ^ NAN_MASK2;
     assert!(f32::from_bits(masked_nan1).is_nan());
     assert!(f32::from_bits(masked_nan2).is_nan());
 

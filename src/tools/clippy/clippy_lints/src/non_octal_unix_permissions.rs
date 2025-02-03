@@ -1,12 +1,10 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::source::{snippet_opt, snippet_with_applicability};
-use clippy_utils::ty::match_type;
-use clippy_utils::{match_def_path, paths};
-use if_chain::if_chain;
+use clippy_utils::source::{SpanRangeExt, snippet_with_applicability};
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
+use rustc_span::sym;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -43,49 +41,39 @@ declare_lint_pass!(NonOctalUnixPermissions => [NON_OCTAL_UNIX_PERMISSIONS]);
 impl<'tcx> LateLintPass<'tcx> for NonOctalUnixPermissions {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         match &expr.kind {
-            ExprKind::MethodCall(path, [func, param], _) => {
-                let obj_ty = cx.typeck_results().expr_ty(func).peel_refs();
-
-                if_chain! {
-                    if (path.ident.name == sym!(mode)
-                        && (match_type(cx, obj_ty, &paths::OPEN_OPTIONS)
-                            || match_type(cx, obj_ty, &paths::DIR_BUILDER)))
-                        || (path.ident.name == sym!(set_mode) && match_type(cx, obj_ty, &paths::PERMISSIONS));
-                    if let ExprKind::Lit(_) = param.kind;
-
-                    then {
-                        let snip = match snippet_opt(cx, param.span) {
-                            Some(s) => s,
-                            _ => return,
-                        };
-
-                        if !snip.starts_with("0o") {
-                            show_error(cx, param);
-                        }
-                    }
+            ExprKind::MethodCall(path, func, [param], _) => {
+                if let Some(adt) = cx.typeck_results().expr_ty(func).peel_refs().ty_adt_def()
+                    && ((path.ident.name.as_str() == "mode"
+                        && matches!(
+                            cx.tcx.get_diagnostic_name(adt.did()),
+                            Some(sym::FsOpenOptions | sym::DirBuilder)
+                        ))
+                        || (path.ident.name.as_str() == "set_mode"
+                            && cx.tcx.is_diagnostic_item(sym::FsPermissions, adt.did())))
+                    && let ExprKind::Lit(_) = param.kind
+                    && param.span.eq_ctxt(expr.span)
+                    && param
+                        .span
+                        .check_source_text(cx, |src| !matches!(src.as_bytes(), [b'0', b'o' | b'b', ..]))
+                {
+                    show_error(cx, param);
                 }
             },
             ExprKind::Call(func, [param]) => {
-                if_chain! {
-                    if let ExprKind::Path(ref path) = func.kind;
-                    if let Some(def_id) = cx.qpath_res(path, func.hir_id).opt_def_id();
-                    if match_def_path(cx, def_id, &paths::PERMISSIONS_FROM_MODE);
-                    if let ExprKind::Lit(_) = param.kind;
-
-                    then {
-                        let snip = match snippet_opt(cx, param.span) {
-                            Some(s) => s,
-                            _ => return,
-                        };
-
-                        if !snip.starts_with("0o") {
-                            show_error(cx, param);
-                        }
-                    }
+                if let ExprKind::Path(ref path) = func.kind
+                    && let Some(def_id) = cx.qpath_res(path, func.hir_id).opt_def_id()
+                    && cx.tcx.is_diagnostic_item(sym::permissions_from_mode, def_id)
+                    && let ExprKind::Lit(_) = param.kind
+                    && param.span.eq_ctxt(expr.span)
+                    && param
+                        .span
+                        .check_source_text(cx, |src| !matches!(src.as_bytes(), [b'0', b'o' | b'b', ..]))
+                {
+                    show_error(cx, param);
                 }
             },
             _ => {},
-        };
+        }
     }
 }
 

@@ -1,5 +1,10 @@
-#![allow(dead_code, clippy::eval_order_dependence)]
-#![deny(clippy::if_same_then_else, clippy::branches_sharing_code)]
+#![deny(clippy::branches_sharing_code, clippy::if_same_then_else)]
+#![allow(dead_code)]
+#![allow(
+    clippy::mixed_read_write_in_expression,
+    clippy::uninlined_format_args,
+    clippy::needless_else
+)]
 
 // This tests valid if blocks that shouldn't trigger the lint
 
@@ -104,6 +109,7 @@ fn valid_examples() {
     if false {
     } else {
     }
+    //~^^^ ERROR: this `if` has identical blocks
 }
 
 /// This makes sure that the `if_same_then_else` masks the `shared_code_in_if_blocks` lint
@@ -121,9 +127,11 @@ fn trigger_other_lint() {
         println!("How are u today?");
         let _ = "This is a string";
     }
+    //~^^^^^^^^^ ERROR: this `if` has identical blocks
 
     // Only same expression
     let _ = if x == 6 { 7 } else { 7 };
+    //~^ ERROR: this `if` has identical blocks
 
     // Same in else if block
     let _ = if x == 67 {
@@ -131,25 +139,23 @@ fn trigger_other_lint() {
         "I'm a pretty string"
     } else if x == 68 {
         println!("I'm a doppelgänger");
-        // Don't listen to my clone below
 
         if y == 90 { "=^.^=" } else { ":D" }
     } else {
-        // Don't listen to my clone above
         println!("I'm a doppelgänger");
 
         if y == 90 { "=^.^=" } else { ":D" }
     };
+    //~^^^^^^^^^ ERROR: this `if` has identical blocks
 
     if x == 0 {
         println!("I'm single");
     } else if x == 68 {
         println!("I'm a doppelgänger");
-        // Don't listen to my clone below
     } else {
-        // Don't listen to my clone above
         println!("I'm a doppelgänger");
     }
+    //~^^^^^ ERROR: this `if` has identical blocks
 }
 
 fn main() {}

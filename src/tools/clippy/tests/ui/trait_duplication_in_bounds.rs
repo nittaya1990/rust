@@ -1,98 +1,197 @@
 #![deny(clippy::trait_duplication_in_bounds)]
+#![allow(unused)]
+#![feature(associated_const_equality, const_trait_impl)]
 
-use std::collections::BTreeMap;
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
+use std::any::Any;
 
-fn bad_foo<T: Clone + Default, Z: Copy>(arg0: T, arg1: Z)
+fn bad_foo<T: Clone + Clone + Clone + Copy, U: Clone + Copy>(arg0: T, argo1: U) {
+    unimplemented!();
+}
+
+fn bad_bar<T, U>(arg0: T, arg1: U)
 where
-    T: Clone,
-    T: Default,
+    T: Clone + Clone + Clone + Copy,
+    U: Clone + Copy,
 {
     unimplemented!();
 }
 
-fn good_bar<T: Clone + Default>(arg: T) {
+fn good_bar<T: Clone + Copy, U: Clone + Copy>(arg0: T, arg1: U) {
     unimplemented!();
 }
 
-fn good_foo<T>(arg: T)
+fn good_foo<T, U>(arg0: T, arg1: U)
 where
-    T: Clone + Default,
+    T: Clone + Copy,
+    U: Clone + Copy,
 {
     unimplemented!();
 }
 
-fn good_foobar<T: Default>(arg: T)
-where
-    T: Clone,
-{
-    unimplemented!();
+trait GoodSelfTraitBound: Clone + Copy {
+    fn f();
 }
 
-trait T: Default {
+trait GoodSelfWhereClause {
     fn f()
     where
-        Self: Default;
+        Self: Clone + Copy;
 }
 
-trait U: Default {
+trait BadSelfTraitBound: Clone + Clone + Clone {
+    fn f();
+}
+
+trait BadSelfWhereClause {
     fn f()
     where
-        Self: Clone;
+        Self: Clone + Clone + Clone;
 }
 
-trait ZZ: Default {
-    fn g();
-    fn h();
+trait GoodTraitBound<T: Clone + Copy, U: Clone + Copy> {
+    fn f();
+}
+
+trait GoodWhereClause<T, U> {
     fn f()
     where
-        Self: Default + Clone;
+        T: Clone + Copy,
+        U: Clone + Copy;
 }
 
-trait BadTrait: Default + Clone {
+trait BadTraitBound<T: Clone + Clone + Clone + Copy, U: Clone + Copy> {
+    fn f();
+}
+
+trait BadWhereClause<T, U> {
     fn f()
     where
-        Self: Default + Clone;
-    fn g()
-    where
-        Self: Default;
-    fn h()
-    where
-        Self: Copy;
+        T: Clone + Clone + Clone + Copy,
+        U: Clone + Copy;
 }
 
-#[derive(Default, Clone)]
-struct Life {}
+struct GoodStructBound<T: Clone + Copy, U: Clone + Copy> {
+    t: T,
+    u: U,
+}
 
-impl T for Life {
+impl<T: Clone + Copy, U: Clone + Copy> GoodTraitBound<T, U> for GoodStructBound<T, U> {
     // this should not warn
     fn f() {}
 }
 
-impl U for Life {
+struct GoodStructWhereClause;
+
+impl<T, U> GoodTraitBound<T, U> for GoodStructWhereClause
+where
+    T: Clone + Copy,
+    U: Clone + Copy,
+{
     // this should not warn
     fn f() {}
 }
 
-// should not warn
-trait Iter: Iterator {
-    fn into_group_btreemap<K, V>(self) -> BTreeMap<K, Vec<V>>
-    where
-        Self: Iterator<Item = (K, V)> + Sized,
-        K: Ord + Eq,
-    {
-        unimplemented!();
-    }
+fn no_error_separate_arg_bounds(program: impl AsRef<()>, dir: impl AsRef<()>, args: &[impl AsRef<()>]) {}
+
+trait GenericTrait<T> {}
+
+fn good_generic<T: GenericTrait<u64> + GenericTrait<u32>>(arg0: T) {
+    unimplemented!();
 }
 
-struct Foo {}
-
-trait FooIter: Iterator<Item = Foo> {
-    fn bar()
-    where
-        Self: Iterator<Item = Foo>,
-    {
-    }
+fn bad_generic<T: GenericTrait<u64> + GenericTrait<u32> + GenericTrait<u64>>(arg0: T) {
+    unimplemented!();
 }
 
-fn main() {}
+mod foo {
+    pub trait Clone {}
+}
+
+fn qualified_path<T: std::clone::Clone + Clone + foo::Clone>(arg0: T) {
+    unimplemented!();
+}
+
+fn good_trait_object(arg0: &(dyn Any + Send)) {
+    unimplemented!();
+}
+
+fn bad_trait_object(arg0: &(dyn Any + Send + Send)) {
+    unimplemented!();
+}
+
+trait Proj {
+    type S;
+}
+
+impl Proj for () {
+    type S = ();
+}
+
+impl Proj for i32 {
+    type S = i32;
+}
+
+trait Base<T> {
+    fn is_base(&self);
+}
+
+trait Derived<B: Proj>: Base<B::S> + Base<()> {
+    fn is_derived(&self);
+}
+
+fn f<P: Proj>(obj: &dyn Derived<P>) {
+    obj.is_derived();
+    Base::<P::S>::is_base(obj);
+    Base::<()>::is_base(obj);
+}
+
+// #13476
+trait Value<const N: usize> {}
+fn const_generic<T: Value<0> + Value<1>>() {}
+
+// #11067 and #9626
+fn assoc_tys_generics<'a, 'b, T, U>()
+where
+    T: IntoIterator<Item = ()> + IntoIterator<Item = i32>,
+    U: From<&'a str> + From<&'b [u16]>,
+{
+}
+
+// #13476
+#[const_trait]
+trait ConstTrait {}
+const fn const_trait_bounds_good<T: ConstTrait + ~const ConstTrait>() {}
+
+const fn const_trait_bounds_bad<T: ~const ConstTrait + ~const ConstTrait>() {}
+//~^ trait_duplication_in_bounds
+
+fn projections<T, U, V>()
+where
+    U: ToOwned,
+    V: ToOwned,
+    T: IntoIterator<Item = U::Owned> + IntoIterator<Item = U::Owned>,
+    //~^ trait_duplication_in_bounds
+    V: IntoIterator<Item = U::Owned> + IntoIterator<Item = V::Owned>,
+{
+}
+
+fn main() {
+    let _x: fn(_) = f::<()>;
+    let _x: fn(_) = f::<i32>;
+}
+
+// #13706
+fn assoc_tys_bounds<T>()
+where
+    T: Iterator<Item: Clone> + Iterator<Item: Clone>,
+{
+}
+trait AssocConstTrait {
+    const ASSOC: usize;
+}
+fn assoc_const_args<T>()
+where
+    T: AssocConstTrait<ASSOC = 0> + AssocConstTrait<ASSOC = 0>,
+    //~^ trait_duplication_in_bounds
+{
+}

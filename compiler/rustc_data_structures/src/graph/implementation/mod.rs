@@ -20,16 +20,17 @@
 //! the field `next_edge`). Each of those fields is an array that should
 //! be indexed by the direction (see the type `Direction`).
 
-use crate::snapshot_vec::{SnapshotVec, SnapshotVecDelegate};
-use rustc_index::bit_set::BitSet;
 use std::fmt::Debug;
+
+use rustc_index::bit_set::DenseBitSet;
+use tracing::debug;
 
 #[cfg(test)]
 mod tests;
 
 pub struct Graph<N, E> {
-    nodes: SnapshotVec<Node<N>>,
-    edges: SnapshotVec<Edge<E>>,
+    nodes: Vec<Node<N>>,
+    edges: Vec<Edge<E>>,
 }
 
 pub struct Node<N> {
@@ -43,20 +44,6 @@ pub struct Edge<E> {
     source: NodeIndex,
     target: NodeIndex,
     pub data: E,
-}
-
-impl<N> SnapshotVecDelegate for Node<N> {
-    type Value = Node<N>;
-    type Undo = ();
-
-    fn reverse(_: &mut Vec<Node<N>>, _: ()) {}
-}
-
-impl<N> SnapshotVecDelegate for Edge<N> {
-    type Value = Edge<N>;
-    type Undo = ();
-
-    fn reverse(_: &mut Vec<Edge<N>>, _: ()) {}
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -86,11 +73,11 @@ impl NodeIndex {
 
 impl<N: Debug, E: Debug> Graph<N, E> {
     pub fn new() -> Graph<N, E> {
-        Graph { nodes: SnapshotVec::new(), edges: SnapshotVec::new() }
+        Graph { nodes: Vec::new(), edges: Vec::new() }
     }
 
     pub fn with_capacity(nodes: usize, edges: usize) -> Graph<N, E> {
-        Graph { nodes: SnapshotVec::with_capacity(nodes), edges: SnapshotVec::with_capacity(edges) }
+        Graph { nodes: Vec::with_capacity(nodes), edges: Vec::with_capacity(edges) }
     }
 
     // # Simple accessors
@@ -206,17 +193,11 @@ impl<N: Debug, E: Debug> Graph<N, E> {
         AdjacentEdges { graph: self, direction, next: first_edge }
     }
 
-    pub fn successor_nodes<'a>(
-        &'a self,
-        source: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    pub fn successor_nodes(&self, source: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
         self.outgoing_edges(source).targets()
     }
 
-    pub fn predecessor_nodes<'a>(
-        &'a self,
-        target: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    pub fn predecessor_nodes(&self, target: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
         self.incoming_edges(target).sources()
     }
 
@@ -233,7 +214,7 @@ impl<N: Debug, E: Debug> Graph<N, E> {
         direction: Direction,
         entry_node: NodeIndex,
     ) -> Vec<NodeIndex> {
-        let mut visited = BitSet::new_empty(self.len_nodes());
+        let mut visited = DenseBitSet::new_empty(self.len_nodes());
         let mut stack = vec![];
         let mut result = Vec::with_capacity(self.len_nodes());
         let mut push_node = |stack: &mut Vec<_>, node: NodeIndex| {
@@ -306,7 +287,7 @@ impl<'g, N: Debug, E: Debug> Iterator for AdjacentEdges<'g, N, E> {
 pub struct DepthFirstTraversal<'g, N, E> {
     graph: &'g Graph<N, E>,
     stack: Vec<NodeIndex>,
-    visited: BitSet<usize>,
+    visited: DenseBitSet<usize>,
     direction: Direction,
 }
 
@@ -316,7 +297,7 @@ impl<'g, N: Debug, E: Debug> DepthFirstTraversal<'g, N, E> {
         start_node: NodeIndex,
         direction: Direction,
     ) -> Self {
-        let mut visited = BitSet::new_empty(graph.len_nodes());
+        let mut visited = DenseBitSet::new_empty(graph.len_nodes());
         visited.insert(start_node.node_id());
         DepthFirstTraversal { graph, stack: vec![start_node], visited, direction }
     }

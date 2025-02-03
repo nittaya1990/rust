@@ -1,4 +1,5 @@
 #!/bin/bash
+# ignore-tidy-linelength
 # This script installs clang on the local machine. Note that we don't install
 # clang on Linux since its compiler story is just so different. Each container
 # has its own toolchain configured appropriately already.
@@ -9,18 +10,24 @@ IFS=$'\n\t'
 source "$(cd "$(dirname "$0")" && pwd)/../shared.sh"
 
 # Update both macOS's and Windows's tarballs when bumping the version here.
-LLVM_VERSION="12.0.0"
+# Try to keep this in sync with src/ci/docker/host-x86_64/dist-x86_64-linux/build-clang.sh
+LLVM_VERSION="18.1.4"
 
 if isMacOS; then
+    # FIXME: This is the latest pre-built version of LLVM that's available for
+    # x86_64 MacOS. We may want to consider building our own LLVM binaries
+    # instead, or set `USE_XCODE_CLANG` like AArch64 does.
+    LLVM_VERSION="15.0.7"
+
     # If the job selects a specific Xcode version, use that instead of
     # downloading our own version.
     if [[ ${USE_XCODE_CLANG-0} -eq 1 ]]; then
         bindir="$(xcode-select --print-path)/Toolchains/XcodeDefault.xctoolchain/usr/bin"
     else
-        file="${MIRRORS_BASE}/clang%2Bllvm-${LLVM_VERSION}-x86_64-apple-darwin.tar.xz"
-        retry curl -f "${file}" -o "clang+llvm-${LLVM_VERSION}-x86_64-apple-darwin.tar.xz"
-        tar xJf "clang+llvm-${LLVM_VERSION}-x86_64-apple-darwin.tar.xz"
-        bindir="$(pwd)/clang+llvm-${LLVM_VERSION}-x86_64-apple-darwin/bin"
+        file="${MIRRORS_BASE}/clang%2Bllvm-${LLVM_VERSION}-x86_64-apple-darwin21.0.tar.xz"
+        retry curl -f "${file}" -o "clang+llvm-${LLVM_VERSION}-x86_64-apple-darwin21.0.tar.xz"
+        tar xJf "clang+llvm-${LLVM_VERSION}-x86_64-apple-darwin21.0.tar.xz"
+        bindir="$(pwd)/clang+llvm-${LLVM_VERSION}-x86_64-apple-darwin21.0/bin"
     fi
 
     ciCommandSetEnv CC "${bindir}/clang"
@@ -33,16 +40,10 @@ if isMacOS; then
     # our own clang can figure out the correct include path on its own.
     ciCommandSetEnv SDKROOT "$(xcrun --sdk macosx --show-sdk-path)"
 
-    # Configure `AR` specifically so rustbuild doesn't try to infer it as
+    # Configure `AR` specifically so bootstrap doesn't try to infer it as
     # `clang-ar` by accident.
     ciCommandSetEnv AR "ar"
-elif isWindows && [[ ${CUSTOM_MINGW-0} -ne 1 ]]; then
-
-    if [[ ${WINDOWS_SDK_20348_HACK-0} -eq 1 ]]; then
-        rm -rf '/c/Program Files (x86)/Windows Kits/10/include/10.0.20348.0'
-        mv '/c/Program Files (x86)/Windows Kits/10/include/'10.0.{19041,20348}.0
-    fi
-
+elif isWindows && ! isKnownToBeMingwBuild; then
     # If we're compiling for MSVC then we, like most other distribution builders,
     # switch to clang as the compiler. This'll allow us eventually to enable LTO
     # amongst LLVM and rustc. Note that we only do this on MSVC as I don't think
@@ -60,6 +61,10 @@ elif isWindows && [[ ${CUSTOM_MINGW-0} -ne 1 ]]; then
     7z x -oclang-rust/ "LLVM-${LLVM_VERSION}-win64.exe"
     ciCommandSetEnv RUST_CONFIGURE_ARGS \
         "${RUST_CONFIGURE_ARGS} --set llvm.clang-cl=$(pwd)/clang-rust/bin/clang-cl.exe"
+
+    # Disable downloading CI LLVM on this builder;
+    # setting up clang-cl just above conflicts with the default if-unchanged option.
+    ciCommandSetEnv NO_DOWNLOAD_CI_LLVM 1
 fi
 
 if isWindows; then

@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 
 pub fn fold_quote<F, I, T>(input: impl Iterator<Item = I>, f: F) -> TokenStream
 where
@@ -22,10 +22,10 @@ pub fn is_unit(v: &syn::Variant) -> bool {
 #[cfg(feature = "debug-with-rustfmt")]
 /// Pretty-print the output of proc macro using rustfmt.
 pub fn debug_with_rustfmt(input: &TokenStream) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     use std::env;
     use std::ffi::OsStr;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     let rustfmt_var = env::var_os("RUSTFMT");
     let rustfmt = match &rustfmt_var {

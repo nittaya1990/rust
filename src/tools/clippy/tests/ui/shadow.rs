@@ -1,4 +1,23 @@
+//@aux-build:proc_macro_derive.rs
+
 #![warn(clippy::shadow_same, clippy::shadow_reuse, clippy::shadow_unrelated)]
+#![allow(
+    clippy::let_unit_value,
+    clippy::needless_if,
+    clippy::redundant_guards,
+    clippy::redundant_locals
+)]
+
+extern crate proc_macro_derive;
+
+#[derive(proc_macro_derive::ShadowDerive)]
+pub struct Nothing;
+
+macro_rules! reuse {
+    ($v:ident) => {
+        let $v = $v + 1;
+    };
+}
 
 fn shadow_same() {
     let x = 1;
@@ -23,6 +42,12 @@ fn shadow_reuse() -> Option<()> {
         _ => 3,
     };
     None
+}
+
+fn shadow_reuse_macro() {
+    let x = 1;
+    // this should not warn
+    reuse!(x);
 }
 
 fn shadow_unrelated() {
@@ -85,6 +110,35 @@ pub async fn foo1(_a: i32) {}
 
 pub async fn foo2(_a: i32, _b: i64) {
     let _b = _a;
+}
+
+fn ice_8748() {
+    let _ = [0; {
+        let x = 1;
+        if let Some(x) = Some(1) { x } else { 1 }
+    }];
+}
+
+// https://github.com/rust-lang/rust-clippy/issues/10780
+fn shadow_closure() {
+    // These are not shadow_unrelated; but they are correctly shadow_reuse
+    let x = Some(1);
+    #[allow(clippy::shadow_reuse)]
+    let y = x.map(|x| x + 1);
+    let z = x.map(|x| x + 1);
+    let a: Vec<Option<u8>> = [100u8, 120, 140]
+        .iter()
+        .map(|i| i.checked_mul(2))
+        .map(|i| i.map(|i| i - 10))
+        .collect();
+}
+
+struct Issue13795 {
+    value: i32,
+}
+
+fn issue13795(value: Issue13795) {
+    let Issue13795 { value, .. } = value;
 }
 
 fn main() {}

@@ -3,11 +3,12 @@
 // Run-time:
 //   status: 0
 
-#![feature(asm_const, asm_sym)]
-
+#[cfg(target_arch = "x86_64")]
 use std::arch::{asm, global_asm};
 
-global_asm!("
+#[cfg(target_arch = "x86_64")]
+global_asm!(
+    "
     .global add_asm
 add_asm:
      mov rax, rdi
@@ -19,6 +20,7 @@ extern "C" {
     fn add_asm(a: i64, b: i64) -> i64;
 }
 
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn mem_cpy(dst: *mut u8, src: *const u8, len: usize) {
     asm!(
         "rep movsb",
@@ -29,7 +31,8 @@ pub unsafe fn mem_cpy(dst: *mut u8, src: *const u8, len: usize) {
     );
 }
 
-fn main() {
+#[cfg(target_arch = "x86_64")]
+fn asm() {
     unsafe {
         asm!("nop");
     }
@@ -123,7 +126,7 @@ fn main() {
     // check const (ATT syntax)
     let mut x: u64 = 42;
     unsafe {
-        asm!("add {}, {}",
+        asm!("add ${}, {}",
             const 1,
             inout(reg) x,
             options(att_syntax)
@@ -132,7 +135,9 @@ fn main() {
     assert_eq!(x, 43);
 
     // check sym fn
-    extern "C" fn foo() -> u64 { 42 }
+    extern "C" fn foo() -> u64 {
+        42
+    }
     let x: u64;
     unsafe {
         asm!("call {}", sym foo, lateout("rax") x);
@@ -169,4 +174,11 @@ fn main() {
         mem_cpy(array2.as_mut_ptr(), array1.as_ptr(), 3);
     }
     assert_eq!(array1, array2);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn asm() {}
+
+fn main() {
+    asm();
 }

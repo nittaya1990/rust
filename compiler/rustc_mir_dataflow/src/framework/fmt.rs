@@ -1,9 +1,12 @@
 //! Custom formatting traits used when outputting Graphviz diagrams with the results of a dataflow
 //! analysis.
 
-use rustc_index::bit_set::{BitSet, ChunkedBitSet, HybridBitSet};
-use rustc_index::vec::Idx;
 use std::fmt;
+
+use rustc_index::Idx;
+use rustc_index::bit_set::{ChunkedBitSet, DenseBitSet, MixedBitSet};
+
+use super::lattice::MaybeReachable;
 
 /// An extension to `fmt::Debug` for data that can be better printed with some auxiliary data `C`.
 pub trait DebugWithContext<C>: Eq + fmt::Debug {
@@ -70,7 +73,7 @@ where
 
 // Impls
 
-impl<T, C> DebugWithContext<C> for BitSet<T>
+impl<T, C> DebugWithContext<C> for DenseBitSet<T>
 where
     T: Idx + DebugWithContext<C>,
 {
@@ -82,8 +85,8 @@ where
         let size = self.domain_size();
         assert_eq!(size, old.domain_size());
 
-        let mut set_in_self = HybridBitSet::new_empty(size);
-        let mut cleared_in_self = HybridBitSet::new_empty(size);
+        let mut set_in_self = MixedBitSet::new_empty(size);
+        let mut cleared_in_self = MixedBitSet::new_empty(size);
 
         for i in (0..size).map(T::new) {
             match (self.contains(i), old.contains(i)) {
@@ -93,43 +96,7 @@ where
             };
         }
 
-        let mut first = true;
-        for idx in set_in_self.iter() {
-            let delim = if first {
-                "\u{001f}+"
-            } else if f.alternate() {
-                "\n\u{001f}+"
-            } else {
-                ", "
-            };
-
-            write!(f, "{}", delim)?;
-            idx.fmt_with(ctxt, f)?;
-            first = false;
-        }
-
-        if !f.alternate() {
-            first = true;
-            if !set_in_self.is_empty() && !cleared_in_self.is_empty() {
-                write!(f, "\t")?;
-            }
-        }
-
-        for idx in cleared_in_self.iter() {
-            let delim = if first {
-                "\u{001f}-"
-            } else if f.alternate() {
-                "\n\u{001f}-"
-            } else {
-                ", "
-            };
-
-            write!(f, "{}", delim)?;
-            idx.fmt_with(ctxt, f)?;
-            first = false;
-        }
-
-        Ok(())
+        fmt_diff(&set_in_self, &cleared_in_self, ctxt, f)
     }
 }
 
@@ -137,13 +104,126 @@ impl<T, C> DebugWithContext<C> for ChunkedBitSet<T>
 where
     T: Idx + DebugWithContext<C>,
 {
-    fn fmt_with(&self, _ctxt: &C, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("implement when/if needed");
+    fn fmt_with(&self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter().map(|i| DebugWithAdapter { this: i, ctxt })).finish()
     }
 
-    fn fmt_diff_with(&self, _old: &Self, _ctxt: &C, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("implement when/if needed");
+    fn fmt_diff_with(&self, old: &Self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let size = self.domain_size();
+        assert_eq!(size, old.domain_size());
+
+        let mut set_in_self = MixedBitSet::new_empty(size);
+        let mut cleared_in_self = MixedBitSet::new_empty(size);
+
+        for i in (0..size).map(T::new) {
+            match (self.contains(i), old.contains(i)) {
+                (true, false) => set_in_self.insert(i),
+                (false, true) => cleared_in_self.insert(i),
+                _ => continue,
+            };
+        }
+
+        fmt_diff(&set_in_self, &cleared_in_self, ctxt, f)
     }
+}
+
+impl<T, C> DebugWithContext<C> for MixedBitSet<T>
+where
+    T: Idx + DebugWithContext<C>,
+{
+    fn fmt_with(&self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MixedBitSet::Small(set) => set.fmt_with(ctxt, f),
+            MixedBitSet::Large(set) => set.fmt_with(ctxt, f),
+        }
+    }
+
+    fn fmt_diff_with(&self, old: &Self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self, old) {
+            (MixedBitSet::Small(set), MixedBitSet::Small(old)) => set.fmt_diff_with(old, ctxt, f),
+            (MixedBitSet::Large(set), MixedBitSet::Large(old)) => set.fmt_diff_with(old, ctxt, f),
+            _ => panic!("MixedBitSet size mismatch"),
+        }
+    }
+}
+
+impl<S, C> DebugWithContext<C> for MaybeReachable<S>
+where
+    S: DebugWithContext<C>,
+{
+    fn fmt_with(&self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MaybeReachable::Unreachable => {
+                write!(f, "unreachable")
+            }
+            MaybeReachable::Reachable(set) => set.fmt_with(ctxt, f),
+        }
+    }
+
+    fn fmt_diff_with(&self, old: &Self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self, old) {
+            (MaybeReachable::Unreachable, MaybeReachable::Unreachable) => Ok(()),
+            (MaybeReachable::Unreachable, MaybeReachable::Reachable(set)) => {
+                write!(f, "\u{001f}+")?;
+                set.fmt_with(ctxt, f)
+            }
+            (MaybeReachable::Reachable(set), MaybeReachable::Unreachable) => {
+                write!(f, "\u{001f}-")?;
+                set.fmt_with(ctxt, f)
+            }
+            (MaybeReachable::Reachable(this), MaybeReachable::Reachable(old)) => {
+                this.fmt_diff_with(old, ctxt, f)
+            }
+        }
+    }
+}
+
+fn fmt_diff<T, C>(
+    inserted: &MixedBitSet<T>,
+    removed: &MixedBitSet<T>,
+    ctxt: &C,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result
+where
+    T: Idx + DebugWithContext<C>,
+{
+    let mut first = true;
+    for idx in inserted.iter() {
+        let delim = if first {
+            "\u{001f}+"
+        } else if f.alternate() {
+            "\n\u{001f}+"
+        } else {
+            ", "
+        };
+
+        write!(f, "{delim}")?;
+        idx.fmt_with(ctxt, f)?;
+        first = false;
+    }
+
+    if !f.alternate() {
+        first = true;
+        if !inserted.is_empty() && !removed.is_empty() {
+            write!(f, "\t")?;
+        }
+    }
+
+    for idx in removed.iter() {
+        let delim = if first {
+            "\u{001f}-"
+        } else if f.alternate() {
+            "\n\u{001f}-"
+        } else {
+            ", "
+        };
+
+        write!(f, "{delim}")?;
+        idx.fmt_with(ctxt, f)?;
+        first = false;
+    }
+
+    Ok(())
 }
 
 impl<T, C> DebugWithContext<C> for &'_ T
@@ -168,18 +248,5 @@ where
 {
     fn fmt_with(&self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", ctxt.move_data().move_paths[*self])
-    }
-}
-
-impl<T, C> DebugWithContext<C> for crate::lattice::Dual<T>
-where
-    T: DebugWithContext<C>,
-{
-    fn fmt_with(&self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.0).fmt_with(ctxt, f)
-    }
-
-    fn fmt_diff_with(&self, old: &Self, ctxt: &C, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.0).fmt_diff_with(&old.0, ctxt, f)
     }
 }

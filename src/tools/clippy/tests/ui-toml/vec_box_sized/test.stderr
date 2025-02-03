@@ -1,19 +1,20 @@
 error: `Vec<T>` is already on the heap, the boxing is unnecessary
-  --> $DIR/test.rs:9:12
+  --> tests/ui-toml/vec_box_sized/test.rs:9:12
    |
 LL | struct Foo(Vec<Box<u8>>);
    |            ^^^^^^^^^^^^ help: try: `Vec<u8>`
    |
    = note: `-D clippy::vec-box` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::vec_box)]`
 
 error: `Vec<T>` is already on the heap, the boxing is unnecessary
-  --> $DIR/test.rs:10:12
+  --> tests/ui-toml/vec_box_sized/test.rs:10:12
    |
-LL | struct Bar(Vec<Box<u32>>);
-   |            ^^^^^^^^^^^^^ help: try: `Vec<u32>`
+LL | struct Bar(Vec<Box<u16>>);
+   |            ^^^^^^^^^^^^^ help: try: `Vec<u16>`
 
 error: `Vec<T>` is already on the heap, the boxing is unnecessary
-  --> $DIR/test.rs:13:18
+  --> tests/ui-toml/vec_box_sized/test.rs:14:18
    |
 LL | struct FooBarBaz(Vec<Box<C>>);
    |                  ^^^^^^^^^^^ help: try: `Vec<C>`

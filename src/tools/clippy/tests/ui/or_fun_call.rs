@@ -1,11 +1,14 @@
-// run-rustfix
-
 #![warn(clippy::or_fun_call)]
 #![allow(dead_code)]
-#![allow(clippy::unnecessary_wraps, clippy::borrow_as_ptr)]
+#![allow(
+    clippy::borrow_as_ptr,
+    clippy::uninlined_format_args,
+    clippy::unnecessary_wraps,
+    clippy::unnecessary_literal_unwrap,
+    clippy::useless_vec
+)]
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// Checks implementation of the `OR_FUN_CALL` lint.
@@ -90,8 +93,8 @@ fn or_fun_call() {
     let mut btree_vec = BTreeMap::<u64, Vec<i32>>::new();
     btree_vec.entry(42).or_insert(vec![]);
 
-    let stringy = Some(String::from(""));
-    let _ = stringy.unwrap_or("".to_owned());
+    let stringy = Some(String::new());
+    let _ = stringy.unwrap_or(String::new());
 
     let opt = Some(1);
     let hello = "Hello";
@@ -224,6 +227,142 @@ mod issue8239 {
         })
         .unwrap_or(String::new());
     }
+}
+
+mod issue9608 {
+    fn sig_drop() {
+        enum X {
+            X(std::fs::File),
+            Y(u32),
+        }
+
+        let _ = None.unwrap_or(X::Y(0));
+    }
+}
+
+mod issue8993 {
+    fn g() -> i32 {
+        3
+    }
+
+    fn f(n: i32) -> i32 {
+        n
+    }
+
+    fn test_map_or() {
+        let _ = Some(4).map_or(g(), |v| v);
+        let _ = Some(4).map_or(g(), f);
+        let _ = Some(4).map_or(0, f);
+    }
+}
+
+mod lazy {
+    use super::*;
+
+    fn foo() {
+        struct Foo;
+
+        impl Foo {
+            fn new() -> Foo {
+                Foo
+            }
+        }
+
+        struct FakeDefault;
+        impl FakeDefault {
+            fn default() -> Self {
+                FakeDefault
+            }
+        }
+
+        impl Default for FakeDefault {
+            fn default() -> Self {
+                FakeDefault
+            }
+        }
+
+        let with_new = Some(vec![1]);
+        with_new.unwrap_or_else(Vec::new);
+
+        let with_default_trait = Some(1);
+        with_default_trait.unwrap_or_else(Default::default);
+
+        let with_default_type = Some(1);
+        with_default_type.unwrap_or_else(u64::default);
+
+        let real_default = None::<FakeDefault>;
+        real_default.unwrap_or_else(<FakeDefault as Default>::default);
+
+        let mut map = HashMap::<u64, String>::new();
+        map.entry(42).or_insert_with(String::new);
+
+        let mut btree = BTreeMap::<u64, String>::new();
+        btree.entry(42).or_insert_with(String::new);
+
+        let stringy = Some(String::new());
+        let _ = stringy.unwrap_or_else(String::new);
+
+        // negative tests
+        let self_default = None::<FakeDefault>;
+        self_default.unwrap_or_else(<FakeDefault>::default);
+
+        let without_default = Some(Foo);
+        without_default.unwrap_or_else(Foo::new);
+    }
+}
+
+fn host_effect() {
+    // #12877 - make sure we don't ICE in type_certainty
+    use std::ops::Add;
+
+    Add::<i32>::add(1, 1).add(i32::MIN);
+}
+
+mod issue_10228 {
+    struct Entry;
+
+    impl Entry {
+        fn or_insert(self, _default: i32) {}
+        fn or_default(self) {
+            // Don't lint, suggested code is an infinite recursion
+            self.or_insert(Default::default())
+        }
+    }
+}
+
+// issue #12973
+fn fn_call_in_nested_expr() {
+    struct Foo {
+        val: String,
+    }
+
+    fn f() -> i32 {
+        1
+    }
+    let opt: Option<i32> = Some(1);
+
+    //~v ERROR: function call inside of `unwrap_or`
+    let _ = opt.unwrap_or({ f() }); // suggest `.unwrap_or_else(f)`
+    //
+    //~v ERROR: function call inside of `unwrap_or`
+    let _ = opt.unwrap_or(f() + 1); // suggest `.unwrap_or_else(|| f() + 1)`
+    //
+    //~v ERROR: function call inside of `unwrap_or`
+    let _ = opt.unwrap_or({
+        let x = f();
+        x + 1
+    });
+    //~v ERROR: function call inside of `map_or`
+    let _ = opt.map_or(f() + 1, |v| v); // suggest `.map_or_else(|| f() + 1, |v| v)`
+    //
+    //~v ERROR: use of `unwrap_or` to construct default value
+    let _ = opt.unwrap_or({ i32::default() });
+
+    let opt_foo = Some(Foo {
+        val: String::from("123"),
+    });
+    //~v ERROR: function call inside of `unwrap_or`
+    let _ = opt_foo.unwrap_or(Foo { val: String::default() });
 }
 
 fn main() {}

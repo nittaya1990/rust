@@ -24,6 +24,29 @@ impl<T> Future for Ready<T> {
     }
 }
 
+impl<T> Ready<T> {
+    /// Consumes the `Ready`, returning the wrapped value.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if this [`Ready`] was already polled to completion.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::future;
+    ///
+    /// let a = future::ready(1);
+    /// assert_eq!(a.into_inner(), 1);
+    /// ```
+    #[stable(feature = "ready_into_inner", since = "1.82.0")]
+    #[must_use]
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.0.expect("Called `into_inner()` on `Ready` after completion")
+    }
+}
+
 /// Creates a future that is immediately ready with a value.
 ///
 /// Futures created through this function are functionally similar to those

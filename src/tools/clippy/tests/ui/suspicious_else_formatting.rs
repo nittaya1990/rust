@@ -1,7 +1,12 @@
-// aux-build:proc_macro_suspicious_else_formatting.rs
+//@aux-build:proc_macro_suspicious_else_formatting.rs
 
 #![warn(clippy::suspicious_else_formatting)]
-#![allow(clippy::if_same_then_else)]
+#![allow(
+    clippy::if_same_then_else,
+    clippy::let_unit_value,
+    clippy::needless_if,
+    clippy::needless_else
+)]
 
 extern crate proc_macro_suspicious_else_formatting;
 use proc_macro_suspicious_else_formatting::DeriveBadSpan;
@@ -108,6 +113,41 @@ fn main() {
     else
     {
     }
+
+    //#10273 This is fine. Don't warn
+    if foo() {
+    } else
+    /* whelp */
+    {
+    }
+
+    // #12497 Don't trigger lint as rustfmt wants it
+    if true {
+        println!("true");
+    }
+    /*else if false {
+}*/
+    else {
+        println!("false");
+    }
+
+    if true {
+        println!("true");
+    } // else if false {}
+    else {
+        println!("false");
+    }
+
+    if true {
+        println!("true");
+    } /* if true {
+        println!("true");
+}
+    */
+    else {
+        println!("false");
+    }
+
 }
 
 // #7650 - Don't lint. Proc-macro using bad spans for `if` expressions.

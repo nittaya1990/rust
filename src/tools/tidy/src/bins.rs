@@ -26,6 +26,8 @@ mod os_impl {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
+    use crate::walk::{filter_dirs, walk_no_read};
+
     enum FilesystemSupport {
         Supported,
         Unsupported,
@@ -56,11 +58,11 @@ mod os_impl {
             match fs::File::create(&path) {
                 Ok(file) => {
                     let exec = is_executable(&path).unwrap_or(false);
-                    std::mem::drop(file);
-                    std::fs::remove_file(&path).expect("Deleted temp file");
+                    drop(file);
+                    fs::remove_file(&path).expect("Deleted temp file");
                     // If the file is executable, then we assume that this
                     // filesystem does not track executability, so skip this check.
-                    return if exec { Unsupported } else { Supported };
+                    if exec { Unsupported } else { Supported }
                 }
                 Err(e) => {
                     // If the directory is read-only or we otherwise don't have rights,
@@ -75,7 +77,7 @@ mod os_impl {
 
                     panic!("unable to create temporary file `{:?}`: {:?}", path, e);
                 }
-            };
+            }
         }
 
         for &source_dir in sources {
@@ -91,25 +93,60 @@ mod os_impl {
             }
         }
 
-        return true;
+        true
+    }
+
+    // FIXME: check when rust-installer test sh files will be removed,
+    // and then remove them from exclude list
+    const RI_EXCLUSION_LIST: &[&str] = &[
+        "src/tools/rust-installer/test/image1/bin/program",
+        "src/tools/rust-installer/test/image1/bin/program2",
+        "src/tools/rust-installer/test/image1/bin/bad-bin",
+        "src/tools/rust-installer/test/image2/bin/oldprogram",
+        "src/tools/rust-installer/test/image3/bin/cargo",
+    ];
+
+    fn filter_rust_installer_no_so_bins(path: &Path) -> bool {
+        RI_EXCLUSION_LIST.iter().any(|p| path.ends_with(p))
     }
 
     #[cfg(unix)]
     pub fn check(path: &Path, bad: &mut bool) {
-        crate::walk_no_read(
-            path,
-            &mut |path| crate::filter_dirs(path) || path.ends_with("src/etc"),
+        use std::ffi::OsStr;
+
+        const ALLOWED: &[&str] = &["configure", "x"];
+
+        for p in RI_EXCLUSION_LIST {
+            if !path.join(Path::new(p)).exists() {
+                tidy_error!(bad, "rust-installer test bins missed: {p}");
+            }
+        }
+
+        // FIXME: we don't need to look at all binaries, only files that have been modified in this branch
+        // (e.g. using `git ls-files`).
+        walk_no_read(
+            &[path],
+            |path, _is_dir| {
+                filter_dirs(path)
+                    || path.ends_with("src/etc")
+                    || filter_rust_installer_no_so_bins(path)
+            },
             &mut |entry| {
                 let file = entry.path();
-                let filename = file.file_name().unwrap().to_string_lossy();
-                let extensions = [".py", ".sh"];
-                if extensions.iter().any(|e| filename.ends_with(e)) {
+                let extension = file.extension();
+                let scripts = ["py", "sh", "ps1", "woff2"];
+                if scripts.into_iter().any(|e| extension == Some(OsStr::new(e))) {
                     return;
                 }
 
                 if t!(is_executable(&file), file) {
                     let rel_path = file.strip_prefix(path).unwrap();
                     let git_friendly_path = rel_path.to_str().unwrap().replace("\\", "/");
+
+                    if ALLOWED.contains(&git_friendly_path.as_str()) {
+                        return;
+                    }
+
                     let output = Command::new("git")
                         .arg("ls-files")
                         .arg(&git_friendly_path)

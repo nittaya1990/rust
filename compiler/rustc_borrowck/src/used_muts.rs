@@ -1,12 +1,13 @@
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::FxIndexSet;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{
     Local, Location, Place, Statement, StatementKind, Terminator, TerminatorKind,
 };
+use tracing::debug;
 
 use crate::MirBorrowckCtxt;
 
-impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
+impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
     /// Walks the MIR adding to the set of `used_mut` locals that will be ignored for the purposes
     /// of the `unused_mut` lint.
     ///
@@ -22,10 +23,10 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     ///  been assigned to - this set is used as a proxy for locals that were not initialized due to
     ///  unreachable code. These locals are then considered "used" to silence the lint for them.
     ///  See #55344 for context.
-    crate fn gather_used_muts(
+    pub(crate) fn gather_used_muts(
         &mut self,
-        temporary_used_locals: FxHashSet<Local>,
-        mut never_initialized_mut_locals: FxHashSet<Local>,
+        temporary_used_locals: FxIndexSet<Local>,
+        mut never_initialized_mut_locals: FxIndexSet<Local>,
     ) {
         {
             let mut visitor = GatherUsedMutsVisitor {
@@ -33,7 +34,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 never_initialized_mut_locals: &mut never_initialized_mut_locals,
                 mbcx: self,
             };
-            visitor.visit_body(&visitor.mbcx.body);
+            visitor.visit_body(visitor.mbcx.body);
         }
 
         // Take the union of the existed `used_mut` set with those variables we've found were
@@ -45,32 +46,30 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
 /// MIR visitor for collecting used mutable variables.
 /// The 'visit lifetime represents the duration of the MIR walk.
-struct GatherUsedMutsVisitor<'visit, 'cx, 'tcx> {
-    temporary_used_locals: FxHashSet<Local>,
-    never_initialized_mut_locals: &'visit mut FxHashSet<Local>,
-    mbcx: &'visit mut MirBorrowckCtxt<'cx, 'tcx>,
+struct GatherUsedMutsVisitor<'a, 'b, 'infcx, 'tcx> {
+    temporary_used_locals: FxIndexSet<Local>,
+    never_initialized_mut_locals: &'a mut FxIndexSet<Local>,
+    mbcx: &'a mut MirBorrowckCtxt<'b, 'infcx, 'tcx>,
 }
 
-impl GatherUsedMutsVisitor<'_, '_, '_> {
+impl GatherUsedMutsVisitor<'_, '_, '_, '_> {
     fn remove_never_initialized_mut_locals(&mut self, into: Place<'_>) {
         // Remove any locals that we found were initialized from the
         // `never_initialized_mut_locals` set. At the end, the only remaining locals will
         // be those that were never initialized - we will consider those as being used as
         // they will either have been removed by unreachable code optimizations; or linted
         // as unused variables.
-        self.never_initialized_mut_locals.remove(&into.local);
+        // FIXME(#120456) - is `swap_remove` correct?
+        self.never_initialized_mut_locals.swap_remove(&into.local);
     }
 }
 
-impl<'visit, 'cx, 'tcx> Visitor<'tcx> for GatherUsedMutsVisitor<'visit, 'cx, 'tcx> {
+impl<'tcx> Visitor<'tcx> for GatherUsedMutsVisitor<'_, '_, '_, 'tcx> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         debug!("visit_terminator: terminator={:?}", terminator);
         match &terminator.kind {
-            TerminatorKind::Call { destination: Some((into, _)), .. } => {
-                self.remove_never_initialized_mut_locals(*into);
-            }
-            TerminatorKind::DropAndReplace { place, .. } => {
-                self.remove_never_initialized_mut_locals(*place);
+            TerminatorKind::Call { destination, .. } => {
+                self.remove_never_initialized_mut_locals(*destination);
             }
             _ => {}
         }
@@ -91,8 +90,8 @@ impl<'visit, 'cx, 'tcx> Visitor<'tcx> for GatherUsedMutsVisitor<'visit, 'cx, 'tc
         self.super_statement(statement, location);
     }
 
-    fn visit_local(&mut self, local: &Local, place_context: PlaceContext, location: Location) {
-        if place_context.is_place_assignment() && self.temporary_used_locals.contains(local) {
+    fn visit_local(&mut self, local: Local, place_context: PlaceContext, location: Location) {
+        if place_context.is_place_assignment() && self.temporary_used_locals.contains(&local) {
             // Propagate the Local assigned at this Location as a used mutable local variable
             for moi in &self.mbcx.move_data.loc_map[location] {
                 let mpi = &self.mbcx.move_data.moves[*moi].path;

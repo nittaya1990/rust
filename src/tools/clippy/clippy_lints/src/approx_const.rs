@@ -1,10 +1,11 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_help;
-use clippy_utils::{meets_msrv, msrvs};
+use clippy_utils::msrvs::{self, Msrv};
 use rustc_ast::ast::{FloatTy, LitFloatType, LitKind};
+use rustc_attr_parsing::RustcVersion;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_semver::RustcVersion;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_session::impl_lint_pass;
 use rustc_span::symbol;
 use std::f64::consts as f64;
 
@@ -24,12 +25,12 @@ declare_clippy_lint! {
     /// issue](https://github.com/rust-lang/rust/issues).
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = 3.14;
     /// let y = 1_f64 / x;
     /// ```
-    /// Use predefined constants instead:
-    /// ```rust
+    /// Use instead:
+    /// ```no_run
     /// let x = std::f32::consts::PI;
     /// let y = std::f64::consts::FRAC_1_PI;
     /// ```
@@ -63,21 +64,25 @@ const KNOWN_CONSTS: [(f64, &str, usize, Option<RustcVersion>); 19] = [
 ];
 
 pub struct ApproxConstant {
-    msrv: Option<RustcVersion>,
+    msrv: Msrv,
 }
 
 impl ApproxConstant {
-    #[must_use]
-    pub fn new(msrv: Option<RustcVersion>) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 
     fn check_lit(&self, cx: &LateContext<'_>, lit: &LitKind, e: &Expr<'_>) {
         match *lit {
             LitKind::Float(s, LitFloatType::Suffixed(fty)) => match fty {
+                FloatTy::F16 => self.check_known_consts(cx, e, s, "f16"),
                 FloatTy::F32 => self.check_known_consts(cx, e, s, "f32"),
                 FloatTy::F64 => self.check_known_consts(cx, e, s, "f64"),
+                FloatTy::F128 => self.check_known_consts(cx, e, s, "f128"),
             },
+            // FIXME(f16_f128): add `f16` and `f128` when these types become stable.
             LitKind::Float(s, LitFloatType::Unsuffixed) => self.check_known_consts(cx, e, s, "f{32, 64}"),
             _ => (),
         }
@@ -87,14 +92,12 @@ impl ApproxConstant {
         let s = s.as_str();
         if s.parse::<f64>().is_ok() {
             for &(constant, name, min_digits, msrv) in &KNOWN_CONSTS {
-                if is_approx_const(constant, s, min_digits)
-                    && msrv.as_ref().map_or(true, |msrv| meets_msrv(self.msrv.as_ref(), msrv))
-                {
+                if is_approx_const(constant, s, min_digits) && msrv.is_none_or(|msrv| self.msrv.meets(msrv)) {
                     span_lint_and_help(
                         cx,
                         APPROX_CONSTANT,
                         e.span,
-                        &format!("approximate value of `{}::consts::{}` found", module, &name),
+                        format!("approximate value of `{module}::consts::{name}` found"),
                         None,
                         "consider using the constant directly",
                     );
@@ -128,7 +131,7 @@ fn is_approx_const(constant: f64, value: &str, min_digits: usize) -> bool {
         // The value is a truncated constant
         true
     } else {
-        let round_const = format!("{:.*}", value.len() - 2, constant);
+        let round_const = format!("{constant:.*}", value.len() - 2);
         value == round_const
     }
 }

@@ -4,7 +4,7 @@ use rustc_hir::Expr;
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, FloatTy, Ty};
 
-use super::{utils, CAST_PRECISION_LOSS};
+use super::{CAST_PRECISION_LOSS, utils};
 
 pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, cast_from: Ty<'_>, cast_to: Ty<'_>) {
     if !cast_from.is_integral() || cast_to.is_integral() {
@@ -38,7 +38,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, cast_from: Ty<'_>, ca
         cx,
         CAST_PRECISION_LOSS,
         expr.span,
-        &format!(
+        format!(
             "casting `{0}` to `{1}` causes a loss of precision {2}(`{0}` is {3} bits wide, \
              but `{1}`'s mantissa is only {4} bits wide)",
             cast_from,

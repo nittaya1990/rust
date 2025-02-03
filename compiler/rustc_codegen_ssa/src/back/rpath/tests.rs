@@ -1,32 +1,24 @@
-use super::RPathConfig;
-use super::{get_rpath_relative_to_output, minimize_rpaths, rpaths_to_flags};
-use std::path::{Path, PathBuf};
-
-#[test]
-fn test_rpaths_to_flags() {
-    let flags = rpaths_to_flags(&["path1".to_string(), "path2".to_string()]);
-    assert_eq!(flags, ["-Wl,-rpath,path1", "-Wl,-rpath,path2"]);
-}
+use super::*;
 
 #[test]
 fn test_minimize1() {
-    let res = minimize_rpaths(&["rpath1".to_string(), "rpath2".to_string(), "rpath1".to_string()]);
+    let res = minimize_rpaths(&["rpath1".into(), "rpath2".into(), "rpath1".into()]);
     assert!(res == ["rpath1", "rpath2",]);
 }
 
 #[test]
 fn test_minimize2() {
     let res = minimize_rpaths(&[
-        "1a".to_string(),
-        "2".to_string(),
-        "2".to_string(),
-        "1a".to_string(),
-        "4a".to_string(),
-        "1a".to_string(),
-        "2".to_string(),
-        "3".to_string(),
-        "4a".to_string(),
-        "3".to_string(),
+        "1a".into(),
+        "2".into(),
+        "2".into(),
+        "1a".into(),
+        "4a".into(),
+        "1a".into(),
+        "2".into(),
+        "3".into(),
+        "4a".into(),
+        "3".into(),
     ]);
     assert!(res == ["1a", "2", "4a", "3",]);
 }
@@ -36,7 +28,6 @@ fn test_rpath_relative() {
     if cfg!(target_os = "macos") {
         let config = &mut RPathConfig {
             libs: &[],
-            has_rpath: true,
             is_like_osx: true,
             linker_is_gnu: false,
             out_filename: PathBuf::from("bin/rustc"),
@@ -47,7 +38,6 @@ fn test_rpath_relative() {
         let config = &mut RPathConfig {
             libs: &[],
             out_filename: PathBuf::from("bin/rustc"),
-            has_rpath: true,
             is_like_osx: false,
             linker_is_gnu: true,
         };
@@ -57,16 +47,16 @@ fn test_rpath_relative() {
 }
 
 #[test]
-fn test_xlinker() {
-    let args = rpaths_to_flags(&["a/normal/path".to_string(), "a,comma,path".to_string()]);
-
-    assert_eq!(
-        args,
-        vec![
-            "-Wl,-rpath,a/normal/path".to_string(),
-            "-Wl,-rpath".to_string(),
-            "-Xlinker".to_string(),
-            "a,comma,path".to_string()
-        ]
-    );
+fn test_rpath_relative_issue_119571() {
+    let config = &mut RPathConfig {
+        libs: &[],
+        out_filename: PathBuf::from("rustc"),
+        is_like_osx: false,
+        linker_is_gnu: true,
+    };
+    // Should not panic when out_filename only contains filename.
+    // Issue 119571
+    let _ = get_rpath_relative_to_output(config, Path::new("lib/libstd.so"));
+    // Should not panic when lib only contains filename.
+    let _ = get_rpath_relative_to_output(config, Path::new("libstd.so"));
 }

@@ -1,92 +1,125 @@
 use std::path::PathBuf;
 
-use rustc_data_structures::fx::FxHashMap;
+use rinja::Template;
+use rustc_data_structures::fx::FxIndexMap;
 
-use crate::error::Error;
+use super::static_files::{STATIC_FILES, StaticFiles};
 use crate::externalfiles::ExternalHtml;
 use crate::html::format::{Buffer, Print};
-use crate::html::render::{ensure_trailing_slash, StylePath};
-
-use askama::Template;
+use crate::html::render::{StylePath, ensure_trailing_slash};
 
 #[derive(Clone)]
-crate struct Layout {
-    crate logo: String,
-    crate favicon: String,
-    crate external_html: ExternalHtml,
-    crate default_settings: FxHashMap<String, String>,
-    crate krate: String,
+pub(crate) struct Layout {
+    pub(crate) logo: String,
+    pub(crate) favicon: String,
+    pub(crate) external_html: ExternalHtml,
+    pub(crate) default_settings: FxIndexMap<String, String>,
+    pub(crate) krate: String,
+    pub(crate) krate_version: String,
     /// The given user css file which allow to customize the generated
     /// documentation theme.
-    crate css_file_extension: Option<PathBuf>,
+    pub(crate) css_file_extension: Option<PathBuf>,
     /// If true, then scrape-examples.js will be included in the output HTML file
-    crate scrape_examples_extension: bool,
+    pub(crate) scrape_examples_extension: bool,
 }
 
-crate struct Page<'a> {
-    crate title: &'a str,
-    crate css_class: &'a str,
-    crate root_path: &'a str,
-    crate static_root_path: Option<&'a str>,
-    crate description: &'a str,
-    crate keywords: &'a str,
-    crate resource_suffix: &'a str,
-    crate extra_scripts: &'a [&'a str],
-    crate static_extra_scripts: &'a [&'a str],
+pub(crate) struct Page<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) css_class: &'a str,
+    pub(crate) root_path: &'a str,
+    pub(crate) static_root_path: Option<&'a str>,
+    pub(crate) description: &'a str,
+    pub(crate) resource_suffix: &'a str,
+    pub(crate) rust_logo: bool,
 }
 
-impl<'a> Page<'a> {
-    crate fn get_static_root_path(&self) -> &str {
-        self.static_root_path.unwrap_or(self.root_path)
+impl Page<'_> {
+    pub(crate) fn get_static_root_path(&self) -> String {
+        match self.static_root_path {
+            Some(s) => s.to_string(),
+            None => format!("{}static.files/", self.root_path),
+        }
     }
 }
 
 #[derive(Template)]
 #[template(path = "page.html")]
 struct PageLayout<'a> {
-    static_root_path: &'a str,
+    static_root_path: String,
     page: &'a Page<'a>,
     layout: &'a Layout,
+
+    files: &'static StaticFiles,
+
     themes: Vec<String>,
     sidebar: String,
     content: String,
-    krate_with_trailing_slash: String,
-    crate rustdoc_version: &'a str,
+    rust_channel: &'static str,
+    pub(crate) rustdoc_version: &'a str,
+    // same as layout.krate, except on top-level pages like
+    // Settings, Help, All Crates, and About Scraped Examples,
+    // where these things instead give Rustdoc name and version.
+    //
+    // These are separate from the variables used for the search
+    // engine, because "Rustdoc" isn't necessarily a crate in
+    // the current workspace.
+    display_krate: &'a str,
+    display_krate_with_trailing_slash: String,
+    display_krate_version_number: &'a str,
+    display_krate_version_extra: &'a str,
 }
 
-crate fn render<T: Print, S: Print>(
+pub(crate) use crate::html::render::sidebar::filters;
+
+pub(crate) fn render<T: Print, S: Print>(
     layout: &Layout,
     page: &Page<'_>,
     sidebar: S,
     t: T,
     style_files: &[StylePath],
 ) -> String {
+    let rustdoc_version = rustc_interface::util::version_str!().unwrap_or("unknown version");
+
+    let (display_krate, display_krate_version, display_krate_with_trailing_slash) =
+        if page.root_path == "./" {
+            // top level pages use Rust branding
+            ("Rustdoc", rustdoc_version, String::new())
+        } else {
+            let display_krate_with_trailing_slash =
+                ensure_trailing_slash(&layout.krate).to_string();
+            (&layout.krate[..], &layout.krate_version[..], display_krate_with_trailing_slash)
+        };
     let static_root_path = page.get_static_root_path();
-    let krate_with_trailing_slash = ensure_trailing_slash(&layout.krate).to_string();
-    let mut themes: Vec<String> = style_files
-        .iter()
-        .map(StylePath::basename)
-        .collect::<Result<_, Error>>()
-        .unwrap_or_default();
+
+    // bootstrap passes in parts of the version separated by tabs, but other stuff might use spaces
+    let (display_krate_version_number, display_krate_version_extra) =
+        display_krate_version.split_once([' ', '\t']).unwrap_or((display_krate_version, ""));
+
+    let mut themes: Vec<String> = style_files.iter().map(|s| s.basename().unwrap()).collect();
     themes.sort();
-    let rustdoc_version = rustc_interface::util::version_str().unwrap_or("unknown version");
+
     let content = Buffer::html().to_display(t); // Note: This must happen before making the sidebar.
     let sidebar = Buffer::html().to_display(sidebar);
     PageLayout {
         static_root_path,
         page,
         layout,
+        files: &STATIC_FILES,
         themes,
         sidebar,
         content,
-        krate_with_trailing_slash,
+        display_krate,
+        display_krate_with_trailing_slash,
+        display_krate_version_number,
+        display_krate_version_extra,
+        rust_channel: *crate::clean::utils::DOC_CHANNEL,
         rustdoc_version,
     }
     .render()
     .unwrap()
 }
 
-crate fn redirect(url: &str) -> String {
+pub(crate) fn redirect(url: &str) -> String {
     // <script> triggers a redirect before refresh, so this is fine.
     format!(
         r##"<!DOCTYPE html>

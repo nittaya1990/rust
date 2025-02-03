@@ -1,17 +1,11 @@
-//! New recursive solver modeled on Chalk's recursive solver. Most of
-//! the guts are broken up into modules; see the comments in those modules.
+//! Queries that are independent from the main solver code.
 
-#![feature(crate_visibility_modifier)]
-#![feature(let_else)]
-#![feature(nll)]
+// tidy-alphabetical-start
 #![recursion_limit = "256"]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
-
-mod chalk;
+mod codegen;
 mod dropck_outlives;
 mod evaluate_obligation;
 mod implied_outlives_bounds;
@@ -19,16 +13,16 @@ mod normalize_erasing_regions;
 mod normalize_projection_ty;
 mod type_op;
 
-pub use type_op::{type_op_ascribe_user_type_with_span, type_op_prove_predicate_with_cause};
-
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
+pub use rustc_trait_selection::traits::query::type_op::ascribe_user_type::type_op_ascribe_user_type_with_span;
+pub use type_op::type_op_prove_predicate_with_cause;
 
 pub fn provide(p: &mut Providers) {
     dropck_outlives::provide(p);
     evaluate_obligation::provide(p);
     implied_outlives_bounds::provide(p);
-    chalk::provide(p);
     normalize_projection_ty::provide(p);
     normalize_erasing_regions::provide(p);
     type_op::provide(p);
+    p.codegen_select_candidate = codegen::codegen_select_candidate;
 }

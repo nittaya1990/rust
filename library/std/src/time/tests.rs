@@ -1,6 +1,9 @@
-use super::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use core::fmt::Debug;
+
 #[cfg(not(target_arch = "wasm32"))]
-use test::{black_box, Bencher};
+use test::{Bencher, black_box};
+
+use super::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 macro_rules! assert_almost_eq {
     ($a:expr, $b:expr) => {{
@@ -31,7 +34,8 @@ fn instant_monotonic_concurrent() -> crate::thread::Result<()> {
         .map(|_| {
             crate::thread::spawn(|| {
                 let mut old = Instant::now();
-                for _ in 0..5_000_000 {
+                let count = if cfg!(miri) { 1_000 } else { 5_000_000 };
+                for _ in 0..count {
                     let new = Instant::now();
                     assert!(new >= old);
                     old = new;
@@ -87,6 +91,14 @@ fn instant_math_is_associative() {
     // Changing the order of instant math shouldn't change the results,
     // especially when the expression reduces to X + identity.
     assert_eq!((now + offset) - now, (now - now) + offset);
+
+    // On any platform, `Instant` should have the same resolution as `Duration` (e.g. 1 nanosecond)
+    // or better. Otherwise, math will be non-associative (see #91417).
+    let now = Instant::now();
+    let provided_offset = Duration::from_nanos(1);
+    let later = now + provided_offset;
+    let measured_offset = later - now;
+    assert_eq!(measured_offset, provided_offset);
 }
 
 #[test]
@@ -192,13 +204,39 @@ fn since_epoch() {
     assert!(a < hundred_twenty_years);
 }
 
+#[test]
+fn big_math() {
+    // Check that the same result occurs when adding/subtracting each duration one at a time as when
+    // adding/subtracting them all at once.
+    #[track_caller]
+    fn check<T: Eq + Copy + Debug>(start: Option<T>, op: impl Fn(&T, Duration) -> Option<T>) {
+        const DURATIONS: [Duration; 2] =
+            [Duration::from_secs(i64::MAX as _), Duration::from_secs(50)];
+        if let Some(start) = start {
+            assert_eq!(
+                op(&start, DURATIONS.into_iter().sum()),
+                DURATIONS.into_iter().try_fold(start, |t, d| op(&t, d))
+            )
+        }
+    }
+
+    check(SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(100)), SystemTime::checked_add);
+    check(SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(100)), SystemTime::checked_sub);
+
+    let instant = Instant::now();
+    check(instant.checked_sub(Duration::from_secs(100)), Instant::checked_add);
+    check(instant.checked_sub(Duration::from_secs(i64::MAX as _)), Instant::checked_add);
+    check(instant.checked_add(Duration::from_secs(100)), Instant::checked_sub);
+    check(instant.checked_add(Duration::from_secs(i64::MAX as _)), Instant::checked_sub);
+}
+
 macro_rules! bench_instant_threaded {
     ($bench_name:ident, $thread_count:expr) => {
         #[bench]
         #[cfg(not(target_arch = "wasm32"))]
         fn $bench_name(b: &mut Bencher) -> crate::thread::Result<()> {
-            use crate::sync::atomic::{AtomicBool, Ordering};
             use crate::sync::Arc;
+            use crate::sync::atomic::{AtomicBool, Ordering};
 
             let running = Arc::new(AtomicBool::new(true));
 

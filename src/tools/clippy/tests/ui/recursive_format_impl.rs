@@ -1,8 +1,10 @@
 #![warn(clippy::recursive_format_impl)]
 #![allow(
+    clippy::borrow_deref_ref,
+    clippy::deref_addrof,
     clippy::inherent_to_string_shadow_display,
     clippy::to_string_in_format_args,
-    clippy::deref_addrof
+    clippy::uninlined_format_args
 )]
 
 use std::fmt;
@@ -27,6 +29,8 @@ impl B for A {
 impl fmt::Display for A {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.to_string())
+        //~^ ERROR: using `self.to_string` in `fmt::Display` implementation will cause inf
+        //~| NOTE: `-D clippy::recursive-format-impl` implied by `-D warnings`
     }
 }
 
@@ -66,40 +70,44 @@ impl std::fmt::Display for D {
 
 // Check for use of self as Display, in Display impl
 // Triggers on direct use of self
-struct G {}
+struct G;
 
 impl std::fmt::Display for G {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
 // Triggers on reference to self
-struct H {}
+struct H;
 
 impl std::fmt::Display for H {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", &self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
 impl std::fmt::Debug for H {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", &self)
+        //~^ ERROR: using `self` as `Debug` in `impl Debug` will cause infinite recursion
     }
 }
 
 // Triggers on multiple reference to self
-struct H2 {}
+struct H2;
 
 impl std::fmt::Display for H2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", &&&self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
 // Doesn't trigger on correct deref
-struct I {}
+struct I;
 
 impl std::ops::Deref for I {
     type Target = str;
@@ -122,7 +130,7 @@ impl std::fmt::Debug for I {
 }
 
 // Doesn't trigger on multiple correct deref
-struct I2 {}
+struct I2;
 
 impl std::ops::Deref for I2 {
     type Target = str;
@@ -139,7 +147,7 @@ impl std::fmt::Display for I2 {
 }
 
 // Doesn't trigger on multiple correct deref
-struct I3 {}
+struct I3;
 
 impl std::ops::Deref for I3 {
     type Target = str;
@@ -156,7 +164,7 @@ impl std::fmt::Display for I3 {
 }
 
 // Does trigger when deref resolves to self
-struct J {}
+struct J;
 
 impl std::ops::Deref for J {
     type Target = str;
@@ -169,16 +177,18 @@ impl std::ops::Deref for J {
 impl std::fmt::Display for J {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", &*self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
 impl std::fmt::Debug for J {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", &*self)
+        //~^ ERROR: using `self` as `Debug` in `impl Debug` will cause infinite recursion
     }
 }
 
-struct J2 {}
+struct J2;
 
 impl std::ops::Deref for J2 {
     type Target = str;
@@ -191,10 +201,11 @@ impl std::ops::Deref for J2 {
 impl std::fmt::Display for J2 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", *self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
-struct J3 {}
+struct J3;
 
 impl std::ops::Deref for J3 {
     type Target = str;
@@ -207,10 +218,11 @@ impl std::ops::Deref for J3 {
 impl std::fmt::Display for J3 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", **&&*self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
-struct J4 {}
+struct J4;
 
 impl std::ops::Deref for J4 {
     type Target = str;
@@ -223,11 +235,12 @@ impl std::ops::Deref for J4 {
 impl std::fmt::Display for J4 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", &&**&&*self)
+        //~^ ERROR: using `self` as `Display` in `impl Display` will cause infinite recurs
     }
 }
 
 // Doesn't trigger on Debug from Display
-struct K {}
+struct K;
 
 impl std::fmt::Debug for K {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -242,7 +255,7 @@ impl std::fmt::Display for K {
 }
 
 // Doesn't trigger on Display from Debug
-struct K2 {}
+struct K2;
 
 impl std::fmt::Debug for K2 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

@@ -1,14 +1,14 @@
-use crate::MirPass;
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
+use tracing::debug;
 
 #[derive(PartialEq)]
-pub enum AddCallGuards {
+pub(super) enum AddCallGuards {
     AllCallEdges,
     CriticalCallEdges,
 }
-pub use self::AddCallGuards::*;
+pub(super) use self::AddCallGuards::*;
 
 /**
  * Breaks outgoing critical edges for call terminators in the MIR.
@@ -30,35 +30,27 @@ pub use self::AddCallGuards::*;
  *
  */
 
-impl<'tcx> MirPass<'tcx> for AddCallGuards {
+impl<'tcx> crate::MirPass<'tcx> for AddCallGuards {
     fn run_pass(&self, _tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        self.add_call_guards(body);
-    }
-}
-
-impl AddCallGuards {
-    pub fn add_call_guards(&self, body: &mut Body<'_>) {
         let mut pred_count: IndexVec<_, _> =
-            body.predecessors().iter().map(|ps| ps.len()).collect();
+            body.basic_blocks.predecessors().iter().map(|ps| ps.len()).collect();
         pred_count[START_BLOCK] += 1;
 
         // We need a place to store the new blocks generated
         let mut new_blocks = Vec::new();
 
-        let cur_len = body.basic_blocks().len();
+        let cur_len = body.basic_blocks.len();
 
         for block in body.basic_blocks_mut() {
             match block.terminator {
                 Some(Terminator {
-                    kind:
-                        TerminatorKind::Call {
-                            destination: Some((_, ref mut destination)),
-                            cleanup,
-                            ..
-                        },
+                    kind: TerminatorKind::Call { target: Some(ref mut destination), unwind, .. },
                     source_info,
                 }) if pred_count[*destination] > 1
-                    && (cleanup.is_some() || self == &AllCallEdges) =>
+                    && (matches!(
+                        unwind,
+                        UnwindAction::Cleanup(_) | UnwindAction::Terminate(_)
+                    ) || self == &AllCallEdges) =>
                 {
                     // It's a critical edge, break it
                     let call_guard = BasicBlockData {
@@ -82,5 +74,9 @@ impl AddCallGuards {
         debug!("Broke {} N edges", new_blocks.len());
 
         body.basic_blocks_mut().extend(new_blocks);
+    }
+
+    fn is_required(&self) -> bool {
+        true
     }
 }

@@ -1,19 +1,17 @@
-//! Checks for needless boolean results of if-else expressions
-//!
-//! This lint is **warn** by default
-
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
-use clippy_utils::higher;
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::sugg::Sugg;
-use clippy_utils::{get_parent_node, is_else_clause, is_expn_of, peel_blocks, peel_blocks_with_stmt};
+use clippy_utils::{
+    SpanlessEq, get_parent_expr, higher, is_block_like, is_else_clause, is_expn_of, is_parent_stmt,
+    is_receiver_of_method_call, peel_blocks, peel_blocks_with_stmt, span_extract_comment,
+};
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
-use rustc_hir::{BinOpKind, Block, Expr, ExprKind, HirId, Node, UnOp};
+use rustc_hir::{BinOpKind, Expr, ExprKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Spanned;
+use rustc_session::declare_lint_pass;
 use rustc_span::Span;
+use rustc_span::source_map::Spanned;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -30,16 +28,21 @@ declare_clippy_lint! {
     /// shorter code.
     ///
     /// ### Example
-    /// ```rust,ignore
+    /// ```no_run
+    /// # let x = true;
     /// if x {
     ///     false
     /// } else {
     ///     true
     /// }
+    /// # ;
     /// ```
-    /// Could be written as
-    /// ```rust,ignore
+    ///
+    /// Use instead:
+    /// ```no_run
+    /// # let x = true;
     /// !x
+    /// # ;
     /// ```
     #[clippy::version = "pre 1.29.0"]
     pub NEEDLESS_BOOL,
@@ -72,7 +75,39 @@ declare_clippy_lint! {
     "comparing a variable to a boolean, e.g., `if x == true` or `if x != true`"
 }
 
-declare_lint_pass!(NeedlessBool => [NEEDLESS_BOOL]);
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for expressions of the form `if c { x = true } else { x = false }`
+    /// (or vice versa) and suggest assigning the variable directly from the
+    /// condition.
+    ///
+    /// ### Why is this bad?
+    /// Redundant code.
+    ///
+    /// ### Example
+    /// ```rust,ignore
+    /// # fn must_keep(x: i32, y: i32) -> bool { x == y }
+    /// # let x = 32; let y = 10;
+    /// # let mut skip: bool;
+    /// if must_keep(x, y) {
+    ///     skip = false;
+    /// } else {
+    ///     skip = true;
+    /// }
+    /// ```
+    /// Use instead:
+    /// ```rust,ignore
+    /// # fn must_keep(x: i32, y: i32) -> bool { x == y }
+    /// # let x = 32; let y = 10;
+    /// # let mut skip: bool;
+    /// skip = !must_keep(x, y);
+    /// ```
+    #[clippy::version = "1.71.0"]
+    pub NEEDLESS_BOOL_ASSIGN,
+    complexity,
+    "setting the same boolean variable in both branches of an if-statement"
+}
+declare_lint_pass!(NeedlessBool => [NEEDLESS_BOOL, NEEDLESS_BOOL_ASSIGN]);
 
 fn condition_needs_parentheses(e: &Expr<'_>) -> bool {
     let mut inner = e;
@@ -80,16 +115,9 @@ fn condition_needs_parentheses(e: &Expr<'_>) -> bool {
     | ExprKind::Call(i, _)
     | ExprKind::Cast(i, _)
     | ExprKind::Type(i, _)
-    | ExprKind::Index(i, _) = inner.kind
+    | ExprKind::Index(i, _, _) = inner.kind
     {
-        if matches!(
-            i.kind,
-            ExprKind::Block(..)
-                | ExprKind::ConstBlock(..)
-                | ExprKind::If(..)
-                | ExprKind::Loop(..)
-                | ExprKind::Match(..)
-        ) {
+        if is_block_like(i) {
             return true;
         }
         inner = i;
@@ -97,17 +125,10 @@ fn condition_needs_parentheses(e: &Expr<'_>) -> bool {
     false
 }
 
-fn is_parent_stmt(cx: &LateContext<'_>, id: HirId) -> bool {
-    matches!(
-        get_parent_node(cx.tcx, id),
-        Some(Node::Stmt(..) | Node::Block(Block { stmts: &[], .. }))
-    )
-}
-
 impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
         use self::Expression::{Bool, RetBool};
-        if e.span.from_expansion() {
+        if e.span.from_expansion() || !span_extract_comment(cx.tcx.sess.source_map(), e.span).is_empty() {
             return;
         }
         if let Some(higher::If {
@@ -129,7 +150,10 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
                     snip = snip.blockify();
                 }
 
-                if condition_needs_parentheses(cond) && is_parent_stmt(cx, e.hir_id) {
+                if (condition_needs_parentheses(cond) && is_parent_stmt(cx, e.hir_id))
+                    || is_receiver_of_method_call(cx, e)
+                    || is_as_argument(cx, e)
+                {
                     snip = snip.maybe_par();
                 }
 
@@ -167,6 +191,28 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
                     (Bool(false), Bool(true)) => reduce(false, true),
                     _ => (),
                 }
+            }
+            if let Some((lhs_a, a)) = fetch_assign(then)
+                && let Some((lhs_b, b)) = fetch_assign(r#else)
+                && SpanlessEq::new(cx).eq_expr(lhs_a, lhs_b)
+            {
+                let mut applicability = Applicability::MachineApplicable;
+                let cond = Sugg::hir_with_applicability(cx, cond, "..", &mut applicability);
+                let lhs = snippet_with_applicability(cx, lhs_a.span, "..", &mut applicability);
+                let sugg = if a == b {
+                    format!("{cond}; {lhs} = {a:?};")
+                } else {
+                    format!("{lhs} = {};", if a { cond } else { !cond })
+                };
+                span_lint_and_sugg(
+                    cx,
+                    NEEDLESS_BOOL_ASSIGN,
+                    e.span,
+                    "this if-then-else expression assigns a bool literal",
+                    "you can reduce it to",
+                    sugg,
+                    applicability,
+                );
             }
         }
     }
@@ -263,11 +309,11 @@ fn one_side_is_unary_not<'tcx>(left_side: &'tcx Expr<'_>, right_side: &'tcx Expr
 fn check_comparison<'a, 'tcx>(
     cx: &LateContext<'tcx>,
     e: &'tcx Expr<'_>,
-    left_true: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &str)>,
-    left_false: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &str)>,
-    right_true: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &str)>,
-    right_false: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &str)>,
-    no_literal: Option<(impl FnOnce(Sugg<'a>, Sugg<'a>) -> Sugg<'a>, &str)>,
+    left_true: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &'static str)>,
+    left_false: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &'static str)>,
+    right_true: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &'static str)>,
+    right_false: Option<(impl FnOnce(Sugg<'a>) -> Sugg<'a>, &'static str)>,
+    no_literal: Option<(impl FnOnce(Sugg<'a>, Sugg<'a>) -> Sugg<'a>, &'static str)>,
 ) {
     if let ExprKind::Binary(op, left_side, right_side) = e.kind {
         let (l_ty, r_ty) = (
@@ -279,6 +325,12 @@ fn check_comparison<'a, 'tcx>(
         }
         if l_ty.is_bool() && r_ty.is_bool() {
             let mut applicability = Applicability::MachineApplicable;
+            // Eliminate parentheses in `e` by using the lo pos of lhs and hi pos of rhs,
+            // calling `source_callsite` make sure macros are handled correctly, see issue #9907
+            let binop_span = left_side
+                .span
+                .source_callsite()
+                .with_hi(right_side.span.source_callsite().hi());
 
             if op.node == BinOpKind::Eq {
                 let expression_info = one_side_is_unary_not(left_side, right_side);
@@ -286,13 +338,23 @@ fn check_comparison<'a, 'tcx>(
                     span_lint_and_sugg(
                         cx,
                         BOOL_COMPARISON,
-                        e.span,
+                        binop_span,
                         "this comparison might be written more concisely",
                         "try simplifying it as shown",
                         format!(
                             "{} != {}",
-                            snippet_with_applicability(cx, expression_info.left_span, "..", &mut applicability),
-                            snippet_with_applicability(cx, expression_info.right_span, "..", &mut applicability)
+                            snippet_with_applicability(
+                                cx,
+                                expression_info.left_span.source_callsite(),
+                                "..",
+                                &mut applicability
+                            ),
+                            snippet_with_applicability(
+                                cx,
+                                expression_info.right_span.source_callsite(),
+                                "..",
+                                &mut applicability
+                            )
                         ),
                         applicability,
                     );
@@ -301,16 +363,16 @@ fn check_comparison<'a, 'tcx>(
 
             match (fetch_bool_expr(left_side), fetch_bool_expr(right_side)) {
                 (Some(true), None) => left_true.map_or((), |(h, m)| {
-                    suggest_bool_comparison(cx, e, right_side, applicability, m, h);
+                    suggest_bool_comparison(cx, binop_span, right_side, applicability, m, h);
                 }),
                 (None, Some(true)) => right_true.map_or((), |(h, m)| {
-                    suggest_bool_comparison(cx, e, left_side, applicability, m, h);
+                    suggest_bool_comparison(cx, binop_span, left_side, applicability, m, h);
                 }),
                 (Some(false), None) => left_false.map_or((), |(h, m)| {
-                    suggest_bool_comparison(cx, e, right_side, applicability, m, h);
+                    suggest_bool_comparison(cx, binop_span, right_side, applicability, m, h);
                 }),
                 (None, Some(false)) => right_false.map_or((), |(h, m)| {
-                    suggest_bool_comparison(cx, e, left_side, applicability, m, h);
+                    suggest_bool_comparison(cx, binop_span, left_side, applicability, m, h);
                 }),
                 (None, None) => no_literal.map_or((), |(h, m)| {
                     let left_side = Sugg::hir_with_applicability(cx, left_side, "..", &mut applicability);
@@ -318,10 +380,10 @@ fn check_comparison<'a, 'tcx>(
                     span_lint_and_sugg(
                         cx,
                         BOOL_COMPARISON,
-                        e.span,
+                        binop_span,
                         m,
                         "try simplifying it as shown",
-                        h(left_side, right_side).to_string(),
+                        h(left_side, right_side).into_string(),
                         applicability,
                     );
                 }),
@@ -333,28 +395,21 @@ fn check_comparison<'a, 'tcx>(
 
 fn suggest_bool_comparison<'a, 'tcx>(
     cx: &LateContext<'tcx>,
-    e: &'tcx Expr<'_>,
+    span: Span,
     expr: &Expr<'_>,
-    mut applicability: Applicability,
-    message: &str,
+    mut app: Applicability,
+    message: &'static str,
     conv_hint: impl FnOnce(Sugg<'a>) -> Sugg<'a>,
 ) {
-    let hint = if expr.span.from_expansion() {
-        if applicability != Applicability::Unspecified {
-            applicability = Applicability::MaybeIncorrect;
-        }
-        Sugg::hir_with_macro_callsite(cx, expr, "..")
-    } else {
-        Sugg::hir_with_applicability(cx, expr, "..", &mut applicability)
-    };
+    let hint = Sugg::hir_with_context(cx, expr, span.ctxt(), "..", &mut app);
     span_lint_and_sugg(
         cx,
         BOOL_COMPARISON,
-        e.span,
+        span,
         message,
         "try simplifying it as shown",
-        conv_hint(hint).to_string(),
-        applicability,
+        conv_hint(hint).into_string(),
+        app,
     );
 }
 
@@ -371,10 +426,22 @@ fn fetch_bool_block(expr: &Expr<'_>) -> Option<Expression> {
 }
 
 fn fetch_bool_expr(expr: &Expr<'_>) -> Option<bool> {
-    if let ExprKind::Lit(ref lit_ptr) = peel_blocks(expr).kind {
+    if let ExprKind::Lit(lit_ptr) = peel_blocks(expr).kind {
         if let LitKind::Bool(value) = lit_ptr.node {
             return Some(value);
         }
     }
     None
+}
+
+fn fetch_assign<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, bool)> {
+    if let ExprKind::Assign(lhs, rhs, _) = peel_blocks_with_stmt(expr).kind {
+        fetch_bool_expr(rhs).map(|b| (lhs, b))
+    } else {
+        None
+    }
+}
+
+fn is_as_argument(cx: &LateContext<'_>, e: &Expr<'_>) -> bool {
+    matches!(get_parent_expr(cx, e).map(|e| e.kind), Some(ExprKind::Cast(_, _)))
 }

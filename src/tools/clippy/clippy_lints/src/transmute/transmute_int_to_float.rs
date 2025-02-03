@@ -1,5 +1,6 @@
 use super::TRANSMUTE_INT_TO_FLOAT;
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::sugg;
 use rustc_errors::Applicability;
 use rustc_hir::Expr;
@@ -15,14 +16,15 @@ pub(super) fn check<'tcx>(
     to_ty: Ty<'tcx>,
     arg: &'tcx Expr<'_>,
     const_context: bool,
+    msrv: &Msrv,
 ) -> bool {
     match (&from_ty.kind(), &to_ty.kind()) {
-        (ty::Int(_) | ty::Uint(_), ty::Float(_)) if !const_context => {
+        (ty::Int(_) | ty::Uint(_), ty::Float(_)) if !const_context || msrv.meets(msrvs::CONST_FLOAT_BITS_CONV) => {
             span_lint_and_then(
                 cx,
                 TRANSMUTE_INT_TO_FLOAT,
                 e.span,
-                &format!("transmute from a `{}` to a `{}`", from_ty, to_ty),
+                format!("transmute from a `{from_ty}` to a `{to_ty}`"),
                 |diag| {
                     let arg = sugg::Sugg::hir(cx, arg, "..");
                     let arg = if let ty::Int(int_ty) = from_ty.kind() {
@@ -36,7 +38,7 @@ pub(super) fn check<'tcx>(
                     diag.span_suggestion(
                         e.span,
                         "consider using",
-                        format!("{}::from_bits({})", to_ty, arg),
+                        format!("{to_ty}::from_bits({arg})"),
                         Applicability::Unspecified,
                     );
                 },

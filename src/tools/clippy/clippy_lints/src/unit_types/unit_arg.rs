@@ -1,13 +1,13 @@
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::source::{indent_of, reindent_multiline, snippet_opt};
-use if_chain::if_chain;
+use clippy_utils::is_from_proc_macro;
+use clippy_utils::source::{SourceText, SpanRangeExt, indent_of, reindent_multiline};
 use rustc_errors::Applicability;
-use rustc_hir::{self as hir, Block, Expr, ExprKind, MatchSource, Node, StmtKind};
+use rustc_hir::{Block, Expr, ExprKind, MatchSource, Node, StmtKind};
 use rustc_lint::LateContext;
 
-use super::{utils, UNIT_ARG};
+use super::{UNIT_ARG, utils};
 
-pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>) {
+pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
     if expr.span.from_expansion() {
         return;
     }
@@ -19,36 +19,34 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>) {
     if is_questionmark_desugar_marked_call(expr) {
         return;
     }
-    let map = &cx.tcx.hir();
-    let opt_parent_node = map.find(map.get_parent_node(expr.hir_id));
-    if_chain! {
-        if let Some(hir::Node::Expr(parent_expr)) = opt_parent_node;
-        if is_questionmark_desugar_marked_call(parent_expr);
-        then {
-            return;
-        }
+    if let Node::Expr(parent_expr) = cx.tcx.parent_hir_node(expr.hir_id)
+        && is_questionmark_desugar_marked_call(parent_expr)
+    {
+        return;
     }
 
-    match expr.kind {
-        ExprKind::Call(_, args) | ExprKind::MethodCall(_, args, _) => {
-            let args_to_recover = args
-                .iter()
-                .filter(|arg| {
-                    if cx.typeck_results().expr_ty(arg).is_unit() && !utils::is_unit_literal(arg) {
-                        !matches!(
-                            &arg.kind,
-                            ExprKind::Match(.., MatchSource::TryDesugar) | ExprKind::Path(..)
-                        )
-                    } else {
-                        false
-                    }
-                })
-                .collect::<Vec<_>>();
-            if !args_to_recover.is_empty() {
-                lint_unit_args(cx, expr, &args_to_recover);
+    let (receiver, args) = match expr.kind {
+        ExprKind::Call(_, args) => (None, args),
+        ExprKind::MethodCall(_, receiver, args, _) => (Some(receiver), args),
+        _ => return,
+    };
+
+    let args_to_recover = receiver
+        .into_iter()
+        .chain(args)
+        .filter(|arg| {
+            if cx.typeck_results().expr_ty(arg).is_unit() && !utils::is_unit_literal(arg) {
+                !matches!(
+                    &arg.kind,
+                    ExprKind::Match(.., MatchSource::TryDesugar(_)) | ExprKind::Path(..)
+                )
+            } else {
+                false
             }
-        },
-        _ => (),
+        })
+        .collect::<Vec<_>>();
+    if !args_to_recover.is_empty() && !is_from_proc_macro(cx, expr) {
+        lint_unit_args(cx, expr, args_to_recover.as_slice());
     }
 }
 
@@ -72,51 +70,45 @@ fn lint_unit_args(cx: &LateContext<'_>, expr: &Expr<'_>, args_to_recover: &[&Exp
         cx,
         UNIT_ARG,
         expr.span,
-        &format!("passing {}unit value{} to a function", singular, plural),
+        format!("passing {singular}unit value{plural} to a function"),
         |db| {
             let mut or = "";
             args_to_recover
                 .iter()
                 .filter_map(|arg| {
-                    if_chain! {
-                        if let ExprKind::Block(block, _) = arg.kind;
-                        if block.expr.is_none();
-                        if let Some(last_stmt) = block.stmts.iter().last();
-                        if let StmtKind::Semi(last_expr) = last_stmt.kind;
-                        if let Some(snip) = snippet_opt(cx, last_expr.span);
-                        then {
-                            Some((
-                                last_stmt.span,
-                                snip,
-                            ))
-                        }
-                        else {
-                            None
-                        }
+                    if let ExprKind::Block(block, _) = arg.kind
+                        && block.expr.is_none()
+                        && let Some(last_stmt) = block.stmts.iter().last()
+                        && let StmtKind::Semi(last_expr) = last_stmt.kind
+                        && let Some(snip) = last_expr.span.get_source_text(cx)
+                    {
+                        Some((last_stmt.span, snip))
+                    } else {
+                        None
                     }
                 })
                 .for_each(|(span, sugg)| {
                     db.span_suggestion(
                         span,
                         "remove the semicolon from the last statement in the block",
-                        sugg,
+                        sugg.as_str(),
                         Applicability::MaybeIncorrect,
                     );
                     or = "or ";
                     applicability = Applicability::MaybeIncorrect;
                 });
 
-            let arg_snippets: Vec<String> = args_to_recover
+            let arg_snippets: Vec<_> = args_to_recover
                 .iter()
-                .filter_map(|arg| snippet_opt(cx, arg.span))
+                .filter_map(|arg| arg.span.get_source_text(cx))
                 .collect();
-            let arg_snippets_without_empty_blocks: Vec<String> = args_to_recover
+            let arg_snippets_without_empty_blocks: Vec<_> = args_to_recover
                 .iter()
                 .filter(|arg| !is_empty_block(arg))
-                .filter_map(|arg| snippet_opt(cx, arg.span))
+                .filter_map(|arg| arg.span.get_source_text(cx))
                 .collect();
 
-            if let Some(call_snippet) = snippet_opt(cx, expr.span) {
+            if let Some(call_snippet) = expr.span.get_source_text(cx) {
                 let sugg = fmt_stmts_and_call(
                     cx,
                     expr,
@@ -127,7 +119,7 @@ fn lint_unit_args(cx: &LateContext<'_>, expr: &Expr<'_>, args_to_recover: &[&Exp
 
                 if arg_snippets_without_empty_blocks.is_empty() {
                     db.multipart_suggestion(
-                        &format!("use {}unit literal{} instead", singular, plural),
+                        format!("use {singular}unit literal{plural} instead"),
                         args_to_recover
                             .iter()
                             .map(|arg| (arg.span, "()".to_string()))
@@ -140,9 +132,8 @@ fn lint_unit_args(cx: &LateContext<'_>, expr: &Expr<'_>, args_to_recover: &[&Exp
                     let it_or_them = if plural { "them" } else { "it" };
                     db.span_suggestion(
                         expr.span,
-                        &format!(
-                            "{}move the expression{} in front of the call and replace {} with the unit literal `()`",
-                            or, empty_or_s, it_or_them
+                        format!(
+                            "{or}move the expression{empty_or_s} in front of the call and replace {it_or_them} with the unit literal `()`"
                         ),
                         sugg,
                         applicability,
@@ -158,7 +149,7 @@ fn is_empty_block(expr: &Expr<'_>) -> bool {
         expr.kind,
         ExprKind::Block(
             Block {
-                stmts: &[],
+                stmts: [],
                 expr: None,
                 ..
             },
@@ -171,8 +162,8 @@ fn fmt_stmts_and_call(
     cx: &LateContext<'_>,
     call_expr: &Expr<'_>,
     call_snippet: &str,
-    args_snippets: &[impl AsRef<str>],
-    non_empty_block_args_snippets: &[impl AsRef<str>],
+    args_snippets: &[SourceText],
+    non_empty_block_args_snippets: &[SourceText],
 ) -> String {
     let call_expr_indent = indent_of(cx, call_expr.span).unwrap_or(0);
     let call_snippet_with_replacements = args_snippets
@@ -191,8 +182,8 @@ fn fmt_stmts_and_call(
 
     let mut stmts_and_call_snippet = stmts_and_call.join(&format!("{}{}", ";\n", " ".repeat(call_expr_indent)));
     // expr is not in a block statement or result expression position, wrap in a block
-    let parent_node = cx.tcx.hir().find(cx.tcx.hir().get_parent_node(call_expr.hir_id));
-    if !matches!(parent_node, Some(Node::Block(_))) && !matches!(parent_node, Some(Node::Stmt(_))) {
+    let parent_node = cx.tcx.parent_hir_node(call_expr.hir_id);
+    if !matches!(parent_node, Node::Block(_)) && !matches!(parent_node, Node::Stmt(_)) {
         let block_indent = call_expr_indent + 4;
         stmts_and_call_snippet =
             reindent_multiline(stmts_and_call_snippet.into(), true, Some(block_indent)).into_owned();

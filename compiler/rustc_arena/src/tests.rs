@@ -1,7 +1,9 @@
 extern crate test;
-use super::TypedArena;
 use std::cell::Cell;
+
 use test::Bencher;
+
+use super::TypedArena;
 
 #[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq)]
@@ -30,7 +32,7 @@ impl<T> TypedArena<T> {
 }
 
 #[test]
-pub fn test_unused() {
+fn test_unused() {
     let arena: TypedArena<Point> = TypedArena::default();
     assert!(arena.chunks.borrow().is_empty());
 }
@@ -52,19 +54,15 @@ fn test_arena_alloc_nested() {
 
     impl<'a> Wrap<'a> {
         fn alloc_inner<F: Fn() -> Inner>(&self, f: F) -> &Inner {
-            let r: &EI<'_> = self.0.alloc(EI::I(f()));
-            if let &EI::I(ref i) = r {
-                i
-            } else {
-                panic!("mismatch");
+            match self.0.alloc(EI::I(f())) {
+                EI::I(i) => i,
+                _ => panic!("mismatch"),
             }
         }
         fn alloc_outer<F: Fn() -> Outer<'a>>(&self, f: F) -> &Outer<'_> {
-            let r: &EI<'_> = self.0.alloc(EI::O(f()));
-            if let &EI::O(ref o) = r {
-                o
-            } else {
-                panic!("mismatch");
+            match self.0.alloc(EI::O(f())) {
+                EI::O(o) => o,
+                _ => panic!("mismatch"),
             }
         }
     }
@@ -77,21 +75,25 @@ fn test_arena_alloc_nested() {
 }
 
 #[test]
-pub fn test_copy() {
+fn test_copy() {
     let arena = TypedArena::default();
-    for _ in 0..100000 {
+    #[cfg(not(miri))]
+    const N: usize = 100000;
+    #[cfg(miri)]
+    const N: usize = 1000;
+    for _ in 0..N {
         arena.alloc(Point { x: 1, y: 2, z: 3 });
     }
 }
 
 #[bench]
-pub fn bench_copy(b: &mut Bencher) {
+fn bench_copy(b: &mut Bencher) {
     let arena = TypedArena::default();
     b.iter(|| arena.alloc(Point { x: 1, y: 2, z: 3 }))
 }
 
 #[bench]
-pub fn bench_copy_nonarena(b: &mut Bencher) {
+fn bench_copy_nonarena(b: &mut Bencher) {
     b.iter(|| {
         let _: Box<_> = Box::new(Point { x: 1, y: 2, z: 3 });
     })
@@ -104,34 +106,46 @@ struct Noncopy {
 }
 
 #[test]
-pub fn test_noncopy() {
+fn test_noncopy() {
     let arena = TypedArena::default();
-    for _ in 0..100000 {
+    #[cfg(not(miri))]
+    const N: usize = 100000;
+    #[cfg(miri)]
+    const N: usize = 1000;
+    for _ in 0..N {
         arena.alloc(Noncopy { string: "hello world".to_string(), array: vec![1, 2, 3, 4, 5] });
     }
 }
 
 #[test]
-pub fn test_typed_arena_zero_sized() {
+fn test_typed_arena_zero_sized() {
     let arena = TypedArena::default();
-    for _ in 0..100000 {
+    #[cfg(not(miri))]
+    const N: usize = 100000;
+    #[cfg(miri)]
+    const N: usize = 1000;
+    for _ in 0..N {
         arena.alloc(());
     }
 }
 
 #[test]
-pub fn test_typed_arena_clear() {
+fn test_typed_arena_clear() {
     let mut arena = TypedArena::default();
     for _ in 0..10 {
         arena.clear();
-        for _ in 0..10000 {
+        #[cfg(not(miri))]
+        const N: usize = 10000;
+        #[cfg(miri)]
+        const N: usize = 100;
+        for _ in 0..N {
             arena.alloc(Point { x: 1, y: 2, z: 3 });
         }
     }
 }
 
 #[bench]
-pub fn bench_typed_arena_clear(b: &mut Bencher) {
+fn bench_typed_arena_clear(b: &mut Bencher) {
     let mut arena = TypedArena::default();
     b.iter(|| {
         arena.alloc(Point { x: 1, y: 2, z: 3 });
@@ -140,7 +154,7 @@ pub fn bench_typed_arena_clear(b: &mut Bencher) {
 }
 
 #[bench]
-pub fn bench_typed_arena_clear_100(b: &mut Bencher) {
+fn bench_typed_arena_clear_100(b: &mut Bencher) {
     let mut arena = TypedArena::default();
     b.iter(|| {
         for _ in 0..100 {
@@ -216,7 +230,7 @@ fn test_typed_arena_drop_small_count() {
 }
 
 #[bench]
-pub fn bench_noncopy(b: &mut Bencher) {
+fn bench_noncopy(b: &mut Bencher) {
     let arena = TypedArena::default();
     b.iter(|| {
         arena.alloc(Noncopy { string: "hello world".to_string(), array: vec![1, 2, 3, 4, 5] })
@@ -224,7 +238,7 @@ pub fn bench_noncopy(b: &mut Bencher) {
 }
 
 #[bench]
-pub fn bench_noncopy_nonarena(b: &mut Bencher) {
+fn bench_noncopy_nonarena(b: &mut Bencher) {
     b.iter(|| {
         let _: Box<_> =
             Box::new(Noncopy { string: "hello world".to_string(), array: vec![1, 2, 3, 4, 5] });

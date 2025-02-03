@@ -8,11 +8,13 @@ pub struct Bar {
 }
 
 #[derive(Eq, PartialEq, Debug, Hash)]
-pub struct Foo {}
+pub struct Foo;
 
 #[allow(clippy::implicit_hasher)]
 // This should not cause a "cannot relate bound region" ICE.
 pub fn add_barfoos_to_foos<'a>(bars: &HashSet<&'a Bar>) {
+    //~^ ERROR: the following explicit lifetimes could be elided: 'a
+    //~| NOTE: `-D clippy::needless-lifetimes` implied by `-D warnings`
     let mut foos = HashSet::new();
     foos.extend(bars.iter().map(|b| &b.foo));
 }

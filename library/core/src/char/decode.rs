@@ -1,8 +1,8 @@
 //! UTF-8 and UTF-16 decoding iterators
 
+use crate::error::Error;
 use crate::fmt;
-
-use super::from_u32_unchecked;
+use crate::iter::FusedIterator;
 
 /// An iterator that decodes UTF-16 encoded code points from an iterator of `u16`s.
 ///
@@ -30,54 +30,9 @@ pub struct DecodeUtf16Error {
 }
 
 /// Creates an iterator over the UTF-16 encoded code points in `iter`,
-/// returning unpaired surrogates as `Err`s.
-///
-/// # Examples
-///
-/// Basic usage:
-///
-/// ```
-/// use std::char::decode_utf16;
-///
-/// // 𝄞mus<invalid>ic<invalid>
-/// let v = [
-///     0xD834, 0xDD1E, 0x006d, 0x0075, 0x0073, 0xDD1E, 0x0069, 0x0063, 0xD834,
-/// ];
-///
-/// assert_eq!(
-///     decode_utf16(v.iter().cloned())
-///         .map(|r| r.map_err(|e| e.unpaired_surrogate()))
-///         .collect::<Vec<_>>(),
-///     vec![
-///         Ok('𝄞'),
-///         Ok('m'), Ok('u'), Ok('s'),
-///         Err(0xDD1E),
-///         Ok('i'), Ok('c'),
-///         Err(0xD834)
-///     ]
-/// );
-/// ```
-///
-/// A lossy decoder can be obtained by replacing `Err` results with the replacement character:
-///
-/// ```
-/// use std::char::{decode_utf16, REPLACEMENT_CHARACTER};
-///
-/// // 𝄞mus<invalid>ic<invalid>
-/// let v = [
-///     0xD834, 0xDD1E, 0x006d, 0x0075, 0x0073, 0xDD1E, 0x0069, 0x0063, 0xD834,
-/// ];
-///
-/// assert_eq!(
-///     decode_utf16(v.iter().cloned())
-///        .map(|r| r.unwrap_or(REPLACEMENT_CHARACTER))
-///        .collect::<String>(),
-///     "𝄞mus�ic�"
-/// );
-/// ```
-#[stable(feature = "decode_utf16", since = "1.9.0")]
+/// returning unpaired surrogates as `Err`s. See [`char::decode_utf16`].
 #[inline]
-pub fn decode_utf16<I: IntoIterator<Item = u16>>(iter: I) -> DecodeUtf16<I::IntoIter> {
+pub(super) fn decode_utf16<I: IntoIterator<Item = u16>>(iter: I) -> DecodeUtf16<I::IntoIter> {
     DecodeUtf16 { iter: iter.into_iter(), buf: None }
 }
 
@@ -91,9 +46,9 @@ impl<I: Iterator<Item = u16>> Iterator for DecodeUtf16<I> {
             None => self.iter.next()?,
         };
 
-        if u < 0xD800 || 0xDFFF < u {
+        if !u.is_utf16_surrogate() {
             // SAFETY: not a surrogate
-            Some(Ok(unsafe { from_u32_unchecked(u as u32) }))
+            Some(Ok(unsafe { char::from_u32_unchecked(u as u32) }))
         } else if u >= 0xDC00 {
             // a trailing surrogate
             Some(Err(DecodeUtf16Error { code: u }))
@@ -111,9 +66,9 @@ impl<I: Iterator<Item = u16>> Iterator for DecodeUtf16<I> {
             }
 
             // all ok, so lets decode it.
-            let c = (((u - 0xD800) as u32) << 10 | (u2 - 0xDC00) as u32) + 0x1_0000;
+            let c = (((u & 0x3ff) as u32) << 10 | (u2 & 0x3ff) as u32) + 0x1_0000;
             // SAFETY: we checked that it's a legal unicode value
-            Some(Ok(unsafe { from_u32_unchecked(c) }))
+            Some(Ok(unsafe { char::from_u32_unchecked(c) }))
         }
     }
 
@@ -125,7 +80,7 @@ impl<I: Iterator<Item = u16>> Iterator for DecodeUtf16<I> {
             // buf is empty, no additional elements from it.
             None => (0, 0),
             // `u` is a non surrogate, so it's always an additional character.
-            Some(u) if u < 0xD800 || 0xDFFF < u => (1, 1),
+            Some(u) if !u.is_utf16_surrogate() => (1, 1),
             // `u` is a leading surrogate (it can never be a trailing surrogate and
             // it's a surrogate due to the previous branch) and `self.iter` is empty.
             //
@@ -151,6 +106,9 @@ impl<I: Iterator<Item = u16>> Iterator for DecodeUtf16<I> {
     }
 }
 
+#[stable(feature = "decode_utf16_fused_iterator", since = "1.75.0")]
+impl<I: Iterator<Item = u16> + FusedIterator> FusedIterator for DecodeUtf16<I> {}
+
 impl DecodeUtf16Error {
     /// Returns the unpaired surrogate which caused this error.
     #[must_use]
@@ -164,5 +122,13 @@ impl DecodeUtf16Error {
 impl fmt::Display for DecodeUtf16Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "unpaired surrogate found: {:x}", self.code)
+    }
+}
+
+#[stable(feature = "decode_utf16", since = "1.9.0")]
+impl Error for DecodeUtf16Error {
+    #[allow(deprecated)]
+    fn description(&self) -> &str {
+        "unpaired surrogate found"
     }
 }

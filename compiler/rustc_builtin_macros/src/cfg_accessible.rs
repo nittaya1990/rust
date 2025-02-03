@@ -4,21 +4,29 @@ use rustc_ast as ast;
 use rustc_expand::base::{Annotatable, ExpandResult, ExtCtxt, Indeterminate, MultiItemModifier};
 use rustc_feature::AttributeTemplate;
 use rustc_parse::validate_attr;
-use rustc_span::symbol::sym;
-use rustc_span::Span;
+use rustc_span::{Span, sym};
 
-crate struct Expander;
+use crate::errors;
 
-fn validate_input<'a>(ecx: &mut ExtCtxt<'_>, mi: &'a ast::MetaItem) -> Option<&'a ast::Path> {
+pub(crate) struct Expander;
+
+fn validate_input<'a>(ecx: &ExtCtxt<'_>, mi: &'a ast::MetaItem) -> Option<&'a ast::Path> {
+    use errors::CfgAccessibleInvalid::*;
     match mi.meta_item_list() {
         None => {}
-        Some([]) => ecx.span_err(mi.span, "`cfg_accessible` path is not specified"),
-        Some([_, .., l]) => ecx.span_err(l.span(), "multiple `cfg_accessible` paths are specified"),
+        Some([]) => {
+            ecx.dcx().emit_err(UnspecifiedPath(mi.span));
+        }
+        Some([_, .., l]) => {
+            ecx.dcx().emit_err(MultiplePaths(l.span()));
+        }
         Some([nmi]) => match nmi.meta_item() {
-            None => ecx.span_err(nmi.span(), "`cfg_accessible` path cannot be a literal"),
+            None => {
+                ecx.dcx().emit_err(LiteralPath(nmi.span()));
+            }
             Some(mi) => {
                 if !mi.is_word() {
-                    ecx.span_err(mi.span, "`cfg_accessible` path cannot accept arguments");
+                    ecx.dcx().emit_err(HasArguments(mi.span));
                 }
                 return Some(&mi.path);
             }
@@ -34,14 +42,16 @@ impl MultiItemModifier for Expander {
         span: Span,
         meta_item: &ast::MetaItem,
         item: Annotatable,
+        _is_derive_const: bool,
     ) -> ExpandResult<Vec<Annotatable>, Annotatable> {
         let template = AttributeTemplate { list: Some("path"), ..Default::default() };
-        let attr = &ecx.attribute(meta_item.clone());
-        validate_attr::check_builtin_attribute(
-            &ecx.sess.parse_sess,
-            attr,
+        validate_attr::check_builtin_meta_item(
+            &ecx.sess.psess,
+            meta_item,
+            ast::AttrStyle::Outer,
             sym::cfg_accessible,
             template,
+            true,
         );
 
         let Some(path) = validate_input(ecx, meta_item) else {
@@ -52,7 +62,7 @@ impl MultiItemModifier for Expander {
             Ok(true) => ExpandResult::Ready(vec![item]),
             Ok(false) => ExpandResult::Ready(Vec::new()),
             Err(Indeterminate) if ecx.force_mode => {
-                ecx.span_err(span, "cannot determine whether the path is accessible or not");
+                ecx.dcx().emit_err(errors::CfgAccessibleIndeterminate { span });
                 ExpandResult::Ready(vec![item])
             }
             Err(Indeterminate) => ExpandResult::Retry(item),

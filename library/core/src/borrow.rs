@@ -1,4 +1,4 @@
-//! A module for working with borrowed data.
+//! Utilities for working with borrowed data.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -22,11 +22,11 @@
 /// Types express that they can be borrowed as some type `T` by implementing
 /// `Borrow<T>`, providing a reference to a `T` in the trait’s
 /// [`borrow`] method. A type is free to borrow as several different types.
-/// If it wishes to mutably borrow as the type – allowing the underlying data
+/// If it wishes to mutably borrow as the type, allowing the underlying data
 /// to be modified, it can additionally implement [`BorrowMut<T>`].
 ///
 /// Further, when providing implementations for additional traits, it needs
-/// to be considered whether they should behave identical to those of the
+/// to be considered whether they should behave identically to those of the
 /// underlying type as a consequence of acting as a representation of that
 /// underlying type. Generic code typically uses `Borrow<T>` when it relies
 /// on the identical behavior of these additional trait implementations.
@@ -184,6 +184,7 @@ pub trait Borrow<Borrowed: ?Sized> {
 /// an underlying type by providing a mutable reference. See [`Borrow<T>`]
 /// for more information on borrowing as another type.
 #[stable(feature = "rust1", since = "1.0.0")]
+#[rustc_diagnostic_item = "BorrowMut"]
 pub trait BorrowMut<Borrowed: ?Sized>: Borrow<Borrowed> {
     /// Mutably borrows from an owned value.
     ///
@@ -205,8 +206,7 @@ pub trait BorrowMut<Borrowed: ?Sized>: Borrow<Borrowed> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_borrow", issue = "91522")]
-impl<T: ?Sized> const Borrow<T> for T {
+impl<T: ?Sized> Borrow<T> for T {
     #[rustc_diagnostic_item = "noop_method_borrow"]
     fn borrow(&self) -> &T {
         self
@@ -214,32 +214,28 @@ impl<T: ?Sized> const Borrow<T> for T {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_borrow", issue = "91522")]
-impl<T: ?Sized> const BorrowMut<T> for T {
+impl<T: ?Sized> BorrowMut<T> for T {
     fn borrow_mut(&mut self) -> &mut T {
         self
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_borrow", issue = "91522")]
-impl<T: ?Sized> const Borrow<T> for &T {
+impl<T: ?Sized> Borrow<T> for &T {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_borrow", issue = "91522")]
-impl<T: ?Sized> const Borrow<T> for &mut T {
+impl<T: ?Sized> Borrow<T> for &mut T {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_borrow", issue = "91522")]
-impl<T: ?Sized> const BorrowMut<T> for &mut T {
+impl<T: ?Sized> BorrowMut<T> for &mut T {
     fn borrow_mut(&mut self) -> &mut T {
         &mut **self
     }

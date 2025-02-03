@@ -1,5 +1,5 @@
-use super::utils::is_layout_incompatible;
 use super::UNSOUND_COLLECTION_TRANSMUTE;
+use super::utils::is_layout_incompatible;
 use clippy_utils::diagnostics::span_lint;
 use rustc_hir::Expr;
 use rustc_lint::LateContext;
@@ -10,7 +10,7 @@ use rustc_span::symbol::sym;
 /// Returns `true` if it's triggered, otherwise returns `false`.
 pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>, from_ty: Ty<'tcx>, to_ty: Ty<'tcx>) -> bool {
     match (&from_ty.kind(), &to_ty.kind()) {
-        (ty::Adt(from_adt, from_substs), ty::Adt(to_adt, to_substs)) => {
+        (ty::Adt(from_adt, from_args), ty::Adt(to_adt, to_args)) => {
             if from_adt.did() != to_adt.did() {
                 return false;
             }
@@ -28,19 +28,16 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>, from_ty: Ty
             ) {
                 return false;
             }
-            if from_substs
+            if from_args
                 .types()
-                .zip(to_substs.types())
+                .zip(to_args.types())
                 .any(|(from_ty, to_ty)| is_layout_incompatible(cx, from_ty, to_ty))
             {
                 span_lint(
                     cx,
                     UNSOUND_COLLECTION_TRANSMUTE,
                     e.span,
-                    &format!(
-                        "transmute from `{}` to `{}` with mismatched layout is unsound",
-                        from_ty, to_ty
-                    ),
+                    format!("transmute from `{from_ty}` to `{to_ty}` with mismatched layout is unsound"),
                 );
                 true
             } else {

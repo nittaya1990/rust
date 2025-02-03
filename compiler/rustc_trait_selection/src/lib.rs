@@ -1,4 +1,4 @@
-//! This crates defines the trait resolution method.
+//! This crate defines the trait resolution method.
 //!
 //! - **Traits.** Trait resolution is implemented in the `traits` module.
 //!
@@ -10,34 +10,36 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![allow(rustc::potential_query_instability)]
+// tidy-alphabetical-start
+#![allow(internal_features)]
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(bool_to_option)]
+#![doc(rust_logo)]
+#![feature(assert_matches)]
+#![feature(associated_type_defaults)]
 #![feature(box_patterns)]
-#![feature(control_flow_enum)]
-#![feature(crate_visibility_modifier)]
-#![feature(derive_default_enum)]
-#![feature(drain_filter)]
-#![feature(hash_drain_filter)]
-#![feature(label_break_value)]
+#![feature(cfg_version)]
+#![feature(extract_if)]
+#![feature(if_let_guard)]
+#![feature(iter_intersperse)]
+#![feature(iterator_try_reduce)]
 #![feature(let_chains)]
-#![feature(let_else)]
 #![feature(never_type)]
+#![feature(rustdoc_internals)]
+#![feature(try_blocks)]
+#![feature(type_alias_impl_trait)]
+#![feature(unwrap_infallible)]
+#![feature(yeet_expr)]
 #![recursion_limit = "512"] // For rustdoc
+#![warn(unreachable_pub)] // For rustdoc
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate rustc_macros;
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-#[macro_use]
-extern crate rustc_data_structures;
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
-#[macro_use]
-extern crate smallvec;
-
-pub mod autoderef;
+pub mod error_reporting;
+pub mod errors;
 pub mod infer;
-pub mod opaque_types;
+pub mod regions;
+pub mod solve;
 pub mod traits;
+
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

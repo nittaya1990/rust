@@ -1,9 +1,10 @@
-use super::{InlineAsmArch, InlineAsmType};
-use crate::spec::{RelocModel, Target};
-use rustc_data_structures::stable_set::FxHashSet;
-use rustc_macros::HashStable_Generic;
-use rustc_span::Symbol;
 use std::fmt;
+
+use rustc_data_structures::fx::FxIndexSet;
+use rustc_span::Symbol;
+
+use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
+use crate::spec::{RelocModel, Target};
 
 def_reg_class! {
     X86 X86InlineAsmRegClass {
@@ -14,8 +15,10 @@ def_reg_class! {
         ymm_reg,
         zmm_reg,
         kreg,
+        kreg0,
         mmx_reg,
         x87_reg,
+        tmm_reg,
     }
 }
 
@@ -38,8 +41,9 @@ impl X86InlineAsmRegClass {
             }
             Self::reg_byte => &[],
             Self::xmm_reg | Self::ymm_reg | Self::zmm_reg => &['x', 'y', 'z'],
-            Self::kreg => &[],
+            Self::kreg | Self::kreg0 => &[],
             Self::mmx_reg | Self::x87_reg => &[],
+            Self::tmm_reg => &[],
         }
     }
 
@@ -50,53 +54,51 @@ impl X86InlineAsmRegClass {
         }
     }
 
-    pub fn suggest_modifier(
-        self,
-        arch: InlineAsmArch,
-        ty: InlineAsmType,
-    ) -> Option<(char, &'static str)> {
+    pub fn suggest_modifier(self, arch: InlineAsmArch, ty: InlineAsmType) -> Option<ModifierInfo> {
         match self {
             Self::reg => match ty.size().bits() {
-                16 => Some(('x', "ax")),
-                32 if arch == InlineAsmArch::X86_64 => Some(('e', "eax")),
+                16 => Some(('x', "ax", 16).into()),
+                32 if arch == InlineAsmArch::X86_64 => Some(('e', "eax", 32).into()),
                 _ => None,
             },
             Self::reg_abcd => match ty.size().bits() {
-                16 => Some(('x', "ax")),
-                32 if arch == InlineAsmArch::X86_64 => Some(('e', "eax")),
+                16 => Some(('x', "ax", 16).into()),
+                32 if arch == InlineAsmArch::X86_64 => Some(('e', "eax", 32).into()),
                 _ => None,
             },
             Self::reg_byte => None,
             Self::xmm_reg => None,
             Self::ymm_reg => match ty.size().bits() {
                 256 => None,
-                _ => Some(('x', "xmm0")),
+                _ => Some(('x', "xmm0", 128).into()),
             },
             Self::zmm_reg => match ty.size().bits() {
                 512 => None,
-                256 => Some(('y', "ymm0")),
-                _ => Some(('x', "xmm0")),
+                256 => Some(('y', "ymm0", 256).into()),
+                _ => Some(('x', "xmm0", 128).into()),
             },
-            Self::kreg => None,
+            Self::kreg | Self::kreg0 => None,
             Self::mmx_reg | Self::x87_reg => None,
+            Self::tmm_reg => None,
         }
     }
 
-    pub fn default_modifier(self, arch: InlineAsmArch) -> Option<(char, &'static str)> {
+    pub fn default_modifier(self, arch: InlineAsmArch) -> Option<ModifierInfo> {
         match self {
             Self::reg | Self::reg_abcd => {
                 if arch == InlineAsmArch::X86_64 {
-                    Some(('r', "rax"))
+                    Some(('r', "rax", 64).into())
                 } else {
-                    Some(('e', "eax"))
+                    Some(('e', "eax", 32).into())
                 }
             }
             Self::reg_byte => None,
-            Self::xmm_reg => Some(('x', "xmm0")),
-            Self::ymm_reg => Some(('y', "ymm0")),
-            Self::zmm_reg => Some(('z', "zmm0")),
-            Self::kreg => None,
+            Self::xmm_reg => Some(('x', "xmm0", 128).into()),
+            Self::ymm_reg => Some(('y', "ymm0", 256).into()),
+            Self::zmm_reg => Some(('z', "zmm0", 512).into()),
+            Self::kreg | Self::kreg0 => None,
             Self::mmx_reg | Self::x87_reg => None,
+            Self::tmm_reg => None,
         }
     }
 
@@ -107,32 +109,34 @@ impl X86InlineAsmRegClass {
         match self {
             Self::reg | Self::reg_abcd => {
                 if arch == InlineAsmArch::X86_64 {
-                    types! { _: I16, I32, I64, F32, F64; }
+                    types! { _: I16, I32, I64, F16, F32, F64; }
                 } else {
-                    types! { _: I16, I32, F32; }
+                    types! { _: I16, I32, F16, F32; }
                 }
             }
             Self::reg_byte => types! { _: I8; },
             Self::xmm_reg => types! {
-                sse: I32, I64, F32, F64,
-                  VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2);
+                sse: I32, I64, F16, F32, F64, F128,
+                  VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF16(8), VecF32(4), VecF64(2);
             },
             Self::ymm_reg => types! {
-                avx: I32, I64, F32, F64,
-                    VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2),
-                    VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF32(8), VecF64(4);
+                avx: I32, I64, F16, F32, F64, F128,
+                    VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF16(8), VecF32(4), VecF64(2),
+                    VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF16(16), VecF32(8), VecF64(4);
             },
             Self::zmm_reg => types! {
-                avx512f: I32, I64, F32, F64,
-                    VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2),
-                    VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF32(8), VecF64(4),
-                    VecI8(64), VecI16(32), VecI32(16), VecI64(8), VecF32(16), VecF64(8);
+                avx512f: I32, I64, F16, F32, F64, F128,
+                    VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF16(8), VecF32(4), VecF64(2),
+                    VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF16(16), VecF32(8), VecF64(4),
+                    VecI8(64), VecI16(32), VecI32(16), VecI64(8), VecF16(32), VecF32(16), VecF64(8);
             },
             Self::kreg => types! {
                 avx512f: I8, I16;
                 avx512bw: I32, I64;
             },
+            Self::kreg0 => &[],
             Self::mmx_reg | Self::x87_reg => &[],
+            Self::tmm_reg => &[],
         }
     }
 }
@@ -140,7 +144,7 @@ impl X86InlineAsmRegClass {
 fn x86_64_only(
     arch: InlineAsmArch,
     _reloc_model: RelocModel,
-    _target_features: &FxHashSet<Symbol>,
+    _target_features: &FxIndexSet<Symbol>,
     _target: &Target,
     _is_clobber: bool,
 ) -> Result<(), &'static str> {
@@ -154,7 +158,7 @@ fn x86_64_only(
 fn high_byte(
     arch: InlineAsmArch,
     _reloc_model: RelocModel,
-    _target_features: &FxHashSet<Symbol>,
+    _target_features: &FxIndexSet<Symbol>,
     _target: &Target,
     _is_clobber: bool,
 ) -> Result<(), &'static str> {
@@ -167,7 +171,7 @@ fn high_byte(
 fn rbx_reserved(
     arch: InlineAsmArch,
     _reloc_model: RelocModel,
-    _target_features: &FxHashSet<Symbol>,
+    _target_features: &FxIndexSet<Symbol>,
     _target: &Target,
     _is_clobber: bool,
 ) -> Result<(), &'static str> {
@@ -183,7 +187,7 @@ fn rbx_reserved(
 fn esi_reserved(
     arch: InlineAsmArch,
     _reloc_model: RelocModel,
-    _target_features: &FxHashSet<Symbol>,
+    _target_features: &FxIndexSet<Symbol>,
     _target: &Target,
     _is_clobber: bool,
 ) -> Result<(), &'static str> {
@@ -294,6 +298,7 @@ def_regs! {
         zmm29: zmm_reg = ["zmm29", "xmm29", "ymm29"] % x86_64_only,
         zmm30: zmm_reg = ["zmm30", "xmm30", "ymm30"] % x86_64_only,
         zmm31: zmm_reg = ["zmm31", "xmm31", "ymm31"] % x86_64_only,
+        k0: kreg0 = ["k0"],
         k1: kreg = ["k1"],
         k2: kreg = ["k2"],
         k3: kreg = ["k3"],
@@ -317,14 +322,20 @@ def_regs! {
         st5: x87_reg = ["st(5)"],
         st6: x87_reg = ["st(6)"],
         st7: x87_reg = ["st(7)"],
+        tmm0: tmm_reg = ["tmm0"] % x86_64_only,
+        tmm1: tmm_reg = ["tmm1"] % x86_64_only,
+        tmm2: tmm_reg = ["tmm2"] % x86_64_only,
+        tmm3: tmm_reg = ["tmm3"] % x86_64_only,
+        tmm4: tmm_reg = ["tmm4"] % x86_64_only,
+        tmm5: tmm_reg = ["tmm5"] % x86_64_only,
+        tmm6: tmm_reg = ["tmm6"] % x86_64_only,
+        tmm7: tmm_reg = ["tmm7"] % x86_64_only,
         #error = ["bp", "bpl", "ebp", "rbp"] =>
             "the frame pointer cannot be used as an operand for inline asm",
         #error = ["sp", "spl", "esp", "rsp"] =>
             "the stack pointer cannot be used as an operand for inline asm",
         #error = ["ip", "eip", "rip"] =>
             "the instruction pointer cannot be used as an operand for inline asm",
-        #error = ["k0"] =>
-            "the k0 AVX mask register cannot be used as an operand for inline asm",
     }
 }
 
@@ -343,28 +354,28 @@ impl X86InlineAsmReg {
         if self as u32 <= Self::dx as u32 {
             let root = ['a', 'b', 'c', 'd'][self as usize - Self::ax as usize];
             match modifier.unwrap_or(reg_default_modifier) {
-                'l' => write!(out, "{}l", root),
-                'h' => write!(out, "{}h", root),
-                'x' => write!(out, "{}x", root),
-                'e' => write!(out, "e{}x", root),
-                'r' => write!(out, "r{}x", root),
+                'l' => write!(out, "{root}l"),
+                'h' => write!(out, "{root}h"),
+                'x' => write!(out, "{root}x"),
+                'e' => write!(out, "e{root}x"),
+                'r' => write!(out, "r{root}x"),
                 _ => unreachable!(),
             }
         } else if self as u32 <= Self::di as u32 {
             let root = self.name();
             match modifier.unwrap_or(reg_default_modifier) {
-                'l' => write!(out, "{}l", root),
-                'x' => write!(out, "{}", root),
-                'e' => write!(out, "e{}", root),
-                'r' => write!(out, "r{}", root),
+                'l' => write!(out, "{root}l"),
+                'x' => write!(out, "{root}"),
+                'e' => write!(out, "e{root}"),
+                'r' => write!(out, "r{root}"),
                 _ => unreachable!(),
             }
         } else if self as u32 <= Self::r15 as u32 {
             let root = self.name();
             match modifier.unwrap_or(reg_default_modifier) {
-                'l' => write!(out, "{}b", root),
-                'x' => write!(out, "{}w", root),
-                'e' => write!(out, "{}d", root),
+                'l' => write!(out, "{root}b"),
+                'x' => write!(out, "{root}w"),
+                'e' => write!(out, "{root}d"),
                 'r' => out.write_str(root),
                 _ => unreachable!(),
             }
@@ -373,15 +384,15 @@ impl X86InlineAsmReg {
         } else if self as u32 <= Self::xmm15 as u32 {
             let prefix = modifier.unwrap_or('x');
             let index = self as u32 - Self::xmm0 as u32;
-            write!(out, "{}{}", prefix, index)
+            write!(out, "{prefix}{index}")
         } else if self as u32 <= Self::ymm15 as u32 {
             let prefix = modifier.unwrap_or('y');
             let index = self as u32 - Self::ymm0 as u32;
-            write!(out, "{}{}", prefix, index)
+            write!(out, "{prefix}{index}")
         } else if self as u32 <= Self::zmm31 as u32 {
             let prefix = modifier.unwrap_or('z');
             let index = self as u32 - Self::zmm0 as u32;
-            write!(out, "{}{}", prefix, index)
+            write!(out, "{prefix}{index}")
         } else {
             out.write_str(self.name())
         }

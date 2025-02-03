@@ -1,17 +1,23 @@
-//! Related to out filenames of compilation (e.g. save analysis, binaries).
-use crate::config::{CrateType, Input, OutputFilenames, OutputType};
+//! Related to out filenames of compilation (e.g. binaries).
+
+use std::path::Path;
+
+use rustc_ast::{self as ast, attr};
+use rustc_span::{Span, Symbol, sym};
+
 use crate::Session;
-use rustc_ast as ast;
-use rustc_span::symbol::sym;
-use rustc_span::Span;
-use std::path::{Path, PathBuf};
+use crate::config::{self, CrateType, Input, OutFileName, OutputFilenames, OutputType};
+use crate::errors::{
+    self, CrateNameDoesNotMatch, CrateNameEmpty, CrateNameInvalid, FileIsNotWriteable,
+    InvalidCharacterInCrateName, InvalidCrateNameHelp,
+};
 
 pub fn out_filename(
     sess: &Session,
     crate_type: CrateType,
     outputs: &OutputFilenames,
-    crate_name: &str,
-) -> PathBuf {
+    crate_name: Symbol,
+) -> OutFileName {
     let default_filename = filename_for_input(sess, crate_type, crate_name, outputs);
     let out_filename = outputs
         .outputs
@@ -20,21 +26,19 @@ pub fn out_filename(
         .or_else(|| outputs.single_output_file.clone())
         .unwrap_or(default_filename);
 
-    check_file_is_writeable(&out_filename, sess);
+    if let OutFileName::Real(ref path) = out_filename {
+        check_file_is_writeable(path, sess);
+    }
 
     out_filename
 }
 
-/// Make sure files are writeable.  Mac, FreeBSD, and Windows system linkers
+/// Make sure files are writeable. Mac, FreeBSD, and Windows system linkers
 /// check this already -- however, the Linux linker will happily overwrite a
-/// read-only file.  We should be consistent.
+/// read-only file. We should be consistent.
 pub fn check_file_is_writeable(file: &Path, sess: &Session) {
     if !is_writeable(file) {
-        sess.fatal(&format!(
-            "output file {} is not writeable -- check its \
-                            permissions",
-            file.display()
-        ));
+        sess.dcx().emit_fatal(FileIsNotWriteable { file });
     }
 }
 
@@ -45,9 +49,9 @@ fn is_writeable(p: &Path) -> bool {
     }
 }
 
-pub fn find_crate_name(sess: &Session, attrs: &[ast::Attribute], input: &Input) -> String {
-    let validate = |s: String, span: Option<Span>| {
-        validate_crate_name(sess, &s, span);
+pub fn find_crate_name(sess: &Session, attrs: &[ast::Attribute]) -> Symbol {
+    let validate = |s: Symbol, span: Option<Span>| {
+        validate_crate_name(sess, s, span);
         s
     };
 
@@ -56,116 +60,105 @@ pub fn find_crate_name(sess: &Session, attrs: &[ast::Attribute], input: &Input) 
     // the command line over one found in the #[crate_name] attribute. If we
     // find both we ensure that they're the same later on as well.
     let attr_crate_name =
-        sess.find_by_name(attrs, sym::crate_name).and_then(|at| at.value_str().map(|s| (at, s)));
+        attr::find_by_name(attrs, sym::crate_name).and_then(|at| at.value_str().map(|s| (at, s)));
 
     if let Some(ref s) = sess.opts.crate_name {
+        let s = Symbol::intern(s);
         if let Some((attr, name)) = attr_crate_name {
-            if name.as_str() != s {
-                let msg = format!(
-                    "`--crate-name` and `#[crate_name]` are \
-                                   required to match, but `{}` != `{}`",
-                    s, name
-                );
-                sess.span_err(attr.span, &msg);
+            if name != s {
+                sess.dcx().emit_err(CrateNameDoesNotMatch { span: attr.span, s, name });
             }
         }
-        return validate(s.clone(), None);
+        return validate(s, None);
     }
 
     if let Some((attr, s)) = attr_crate_name {
-        return validate(s.to_string(), Some(attr.span));
+        return validate(s, Some(attr.span));
     }
-    if let Input::File(ref path) = *input {
+    if let Input::File(ref path) = sess.io.input {
         if let Some(s) = path.file_stem().and_then(|s| s.to_str()) {
             if s.starts_with('-') {
-                let msg = format!(
-                    "crate names cannot start with a `-`, but \
-                                   `{}` has a leading hyphen",
-                    s
-                );
-                sess.err(&msg);
+                sess.dcx().emit_err(CrateNameInvalid { s });
             } else {
-                return validate(s.replace('-', "_"), None);
+                return validate(Symbol::intern(&s.replace('-', "_")), None);
             }
         }
     }
 
-    "rust_out".to_string()
+    sym::rust_out
 }
 
-pub fn validate_crate_name(sess: &Session, s: &str, sp: Option<Span>) {
-    let mut err_count = 0;
+pub fn validate_crate_name(sess: &Session, s: Symbol, sp: Option<Span>) {
+    let mut guar = None;
     {
-        let mut say = |s: &str| {
-            match sp {
-                Some(sp) => sess.span_err(sp, s),
-                None => sess.err(s),
-            }
-            err_count += 1;
-        };
         if s.is_empty() {
-            say("crate name must not be empty");
+            guar = Some(sess.dcx().emit_err(CrateNameEmpty { span: sp }));
         }
-        for c in s.chars() {
+        for c in s.as_str().chars() {
             if c.is_alphanumeric() {
                 continue;
             }
             if c == '_' {
                 continue;
             }
-            say(&format!("invalid character `{}` in crate name: `{}`", c, s));
+            guar = Some(sess.dcx().emit_err(InvalidCharacterInCrateName {
+                span: sp,
+                character: c,
+                crate_name: s,
+                crate_name_help: if sp.is_none() {
+                    Some(InvalidCrateNameHelp::AddCrateName)
+                } else {
+                    None
+                },
+            }));
         }
     }
 
-    if err_count > 0 {
-        sess.abort_if_errors();
+    if let Some(guar) = guar {
+        guar.raise_fatal();
     }
 }
 
-pub fn filename_for_metadata(
-    sess: &Session,
-    crate_name: &str,
-    outputs: &OutputFilenames,
-) -> PathBuf {
-    // If the command-line specified the path, use that directly.
-    if let Some(Some(out_filename)) = sess.opts.output_types.get(&OutputType::Metadata) {
-        return out_filename.clone();
+pub fn filename_for_metadata(sess: &Session, outputs: &OutputFilenames) -> OutFileName {
+    let out_filename = outputs.path(OutputType::Metadata);
+    if let OutFileName::Real(ref path) = out_filename {
+        check_file_is_writeable(path, sess);
     }
-
-    let libname = format!("{}{}", crate_name, sess.opts.cg.extra_filename);
-
-    let out_filename = outputs
-        .single_output_file
-        .clone()
-        .unwrap_or_else(|| outputs.out_directory.join(&format!("lib{}.rmeta", libname)));
-
-    check_file_is_writeable(&out_filename, sess);
-
     out_filename
 }
 
 pub fn filename_for_input(
     sess: &Session,
     crate_type: CrateType,
-    crate_name: &str,
+    crate_name: Symbol,
     outputs: &OutputFilenames,
-) -> PathBuf {
+) -> OutFileName {
     let libname = format!("{}{}", crate_name, sess.opts.cg.extra_filename);
 
     match crate_type {
-        CrateType::Rlib => outputs.out_directory.join(&format!("lib{}.rlib", libname)),
+        CrateType::Rlib => {
+            OutFileName::Real(outputs.out_directory.join(&format!("lib{libname}.rlib")))
+        }
         CrateType::Cdylib | CrateType::ProcMacro | CrateType::Dylib => {
             let (prefix, suffix) = (&sess.target.dll_prefix, &sess.target.dll_suffix);
-            outputs.out_directory.join(&format!("{}{}{}", prefix, libname, suffix))
+            OutFileName::Real(outputs.out_directory.join(&format!("{prefix}{libname}{suffix}")))
         }
         CrateType::Staticlib => {
             let (prefix, suffix) = (&sess.target.staticlib_prefix, &sess.target.staticlib_suffix);
-            outputs.out_directory.join(&format!("{}{}{}", prefix, libname, suffix))
+            OutFileName::Real(outputs.out_directory.join(&format!("{prefix}{libname}{suffix}")))
         }
         CrateType::Executable => {
             let suffix = &sess.target.exe_suffix;
             let out_filename = outputs.path(OutputType::Exe);
-            if suffix.is_empty() { out_filename } else { out_filename.with_extension(&suffix[1..]) }
+            if let OutFileName::Real(ref path) = out_filename {
+                if suffix.is_empty() {
+                    out_filename
+                } else {
+                    OutFileName::Real(path.with_extension(&suffix[1..]))
+                }
+            } else {
+                out_filename
+            }
         }
     }
 }
@@ -185,26 +178,85 @@ pub fn default_output_for_target(sess: &Session) -> CrateType {
 
 /// Checks if target supports crate_type as output
 pub fn invalid_output_for_target(sess: &Session, crate_type: CrateType) -> bool {
-    match crate_type {
-        CrateType::Cdylib | CrateType::Dylib | CrateType::ProcMacro => {
-            if !sess.target.dynamic_linking {
-                return true;
-            }
-            if sess.crt_static(Some(crate_type)) && !sess.target.crt_static_allows_dylibs {
-                return true;
-            }
+    if let CrateType::Cdylib | CrateType::Dylib | CrateType::ProcMacro = crate_type {
+        if !sess.target.dynamic_linking {
+            return true;
         }
-        _ => {}
-    }
-    if sess.target.only_cdylib {
-        match crate_type {
-            CrateType::ProcMacro | CrateType::Dylib => return true,
-            _ => {}
+        if sess.crt_static(Some(crate_type)) && !sess.target.crt_static_allows_dylibs {
+            return true;
         }
     }
-    if !sess.target.executables && crate_type == CrateType::Executable {
+    if let CrateType::ProcMacro | CrateType::Dylib = crate_type
+        && sess.target.only_cdylib
+    {
+        return true;
+    }
+    if let CrateType::Executable = crate_type
+        && !sess.target.executables
+    {
         return true;
     }
 
     false
+}
+
+pub const CRATE_TYPES: &[(Symbol, CrateType)] = &[
+    (sym::rlib, CrateType::Rlib),
+    (sym::dylib, CrateType::Dylib),
+    (sym::cdylib, CrateType::Cdylib),
+    (sym::lib, config::default_lib_output()),
+    (sym::staticlib, CrateType::Staticlib),
+    (sym::proc_dash_macro, CrateType::ProcMacro),
+    (sym::bin, CrateType::Executable),
+];
+
+pub fn categorize_crate_type(s: Symbol) -> Option<CrateType> {
+    Some(CRATE_TYPES.iter().find(|(key, _)| *key == s)?.1)
+}
+
+pub fn collect_crate_types(session: &Session, attrs: &[ast::Attribute]) -> Vec<CrateType> {
+    // If we're generating a test executable, then ignore all other output
+    // styles at all other locations
+    if session.opts.test {
+        return vec![CrateType::Executable];
+    }
+
+    // Only check command line flags if present. If no types are specified by
+    // command line, then reuse the empty `base` Vec to hold the types that
+    // will be found in crate attributes.
+    // JUSTIFICATION: before wrapper fn is available
+    #[allow(rustc::bad_opt_access)]
+    let mut base = session.opts.crate_types.clone();
+    if base.is_empty() {
+        let attr_types = attrs.iter().filter_map(|a| {
+            if a.has_name(sym::crate_type)
+                && let Some(s) = a.value_str()
+            {
+                categorize_crate_type(s)
+            } else {
+                None
+            }
+        });
+        base.extend(attr_types);
+        if base.is_empty() {
+            base.push(default_output_for_target(session));
+        } else {
+            base.sort();
+            base.dedup();
+        }
+    }
+
+    base.retain(|crate_type| {
+        if invalid_output_for_target(session, *crate_type) {
+            session.dcx().emit_warn(errors::UnsupportedCrateTypeForTarget {
+                crate_type: *crate_type,
+                target_triple: &session.opts.target_triple,
+            });
+            false
+        } else {
+            true
+        }
+    });
+
+    base
 }

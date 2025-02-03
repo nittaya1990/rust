@@ -1,18 +1,16 @@
 //! Benchmarking module.
-use super::{
-    event::CompletedTest,
-    options::BenchMode,
-    test_result::TestResult,
-    types::{TestDesc, TestId},
-    Sender,
-};
 
-use crate::stats;
-use std::cmp;
-use std::io;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{cmp, io};
+
+use super::Sender;
+use super::event::CompletedTest;
+use super::options::BenchMode;
+use super::test_result::TestResult;
+use super::types::{TestDesc, TestId};
+use crate::stats;
 
 /// An identity function that *__hints__* to the compiler to be maximally pessimistic about what
 /// `black_box` could do.
@@ -49,12 +47,12 @@ impl Bencher {
         self.summary = Some(iter(&mut inner));
     }
 
-    pub fn bench<F>(&mut self, mut f: F) -> Option<stats::Summary>
+    pub fn bench<F>(&mut self, mut f: F) -> Result<Option<stats::Summary>, String>
     where
-        F: FnMut(&mut Bencher),
+        F: FnMut(&mut Bencher) -> Result<(), String>,
     {
-        f(self);
-        self.summary
+        let result = f(self);
+        result.map(|_| self.summary)
     }
 }
 
@@ -68,12 +66,12 @@ pub fn fmt_bench_samples(bs: &BenchSamples) -> String {
     use std::fmt::Write;
     let mut output = String::new();
 
-    let median = bs.ns_iter_summ.median as usize;
-    let deviation = (bs.ns_iter_summ.max - bs.ns_iter_summ.min) as usize;
+    let median = bs.ns_iter_summ.median;
+    let deviation = bs.ns_iter_summ.max - bs.ns_iter_summ.min;
 
     write!(
         output,
-        "{:>11} ns/iter (+/- {})",
+        "{:>14} ns/iter (+/- {})",
         fmt_thousands_sep(median, ','),
         fmt_thousands_sep(deviation, ',')
     )
@@ -85,24 +83,27 @@ pub fn fmt_bench_samples(bs: &BenchSamples) -> String {
 }
 
 // Format a number with thousands separators
-fn fmt_thousands_sep(mut n: usize, sep: char) -> String {
+fn fmt_thousands_sep(mut n: f64, sep: char) -> String {
     use std::fmt::Write;
     let mut output = String::new();
     let mut trailing = false;
     for &pow in &[9, 6, 3, 0] {
         let base = 10_usize.pow(pow);
-        if pow == 0 || trailing || n / base != 0 {
-            if !trailing {
-                write!(output, "{}", n / base).unwrap();
-            } else {
-                write!(output, "{:03}", n / base).unwrap();
+        if pow == 0 || trailing || n / base as f64 >= 1.0 {
+            match (pow, trailing) {
+                // modern CPUs can execute multiple instructions per nanosecond
+                // e.g. benching an ADD takes about 0.25ns.
+                (0, true) => write!(output, "{:06.2}", n / base as f64).unwrap(),
+                (0, false) => write!(output, "{:.2}", n / base as f64).unwrap(),
+                (_, true) => write!(output, "{:03}", n as usize / base).unwrap(),
+                _ => write!(output, "{}", n as usize / base).unwrap(),
             }
             if pow != 0 {
                 output.push(sep);
             }
             trailing = true;
         }
-        n %= base;
+        n %= base as f64;
     }
 
     output
@@ -195,7 +196,7 @@ pub fn benchmark<F>(
     nocapture: bool,
     f: F,
 ) where
-    F: FnMut(&mut Bencher),
+    F: FnMut(&mut Bencher) -> Result<(), String>,
 {
     let mut bs = Bencher { mode: BenchMode::Auto, summary: None, bytes: 0 };
 
@@ -211,14 +212,14 @@ pub fn benchmark<F>(
 
     let test_result = match result {
         //bs.bench(f) {
-        Ok(Some(ns_iter_summ)) => {
+        Ok(Ok(Some(ns_iter_summ))) => {
             let ns_iter = cmp::max(ns_iter_summ.median as u64, 1);
             let mb_s = bs.bytes * 1000 / ns_iter;
 
             let bs = BenchSamples { ns_iter_summ, mb_s: mb_s as usize };
             TestResult::TrBench(bs)
         }
-        Ok(None) => {
+        Ok(Ok(None)) => {
             // iter not called, so no data.
             // FIXME: error in this case?
             let samples: &mut [f64] = &mut [0.0_f64; 1];
@@ -226,6 +227,7 @@ pub fn benchmark<F>(
             TestResult::TrBench(bs)
         }
         Err(_) => TestResult::TrFailed,
+        Ok(Err(_)) => TestResult::TrFailed,
     };
 
     let stdout = data.lock().unwrap().to_vec();
@@ -233,10 +235,10 @@ pub fn benchmark<F>(
     monitor_ch.send(message).unwrap();
 }
 
-pub fn run_once<F>(f: F)
+pub fn run_once<F>(f: F) -> Result<(), String>
 where
-    F: FnMut(&mut Bencher),
+    F: FnMut(&mut Bencher) -> Result<(), String>,
 {
     let mut bs = Bencher { mode: BenchMode::Single, summary: None, bytes: 0 };
-    bs.bench(f);
+    bs.bench(f).map(|_| ())
 }

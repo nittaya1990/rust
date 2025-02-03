@@ -1,6 +1,6 @@
 # Configuring Rustfmt
 
-Rustfmt is designed to be very configurable. You can create a TOML file called `rustfmt.toml` or `.rustfmt.toml`, place it in the project or any other parent directory and it will apply the options in that file. If none of these directories contain such a file, both your home directory and a directory called `rustfmt` in your [global config directory](https://docs.rs/dirs/1.0.4/dirs/fn.config_dir.html) (e.g. `.config/rustfmt/`) are checked as well.
+Rustfmt is designed to be very configurable. You can create a TOML file called `rustfmt.toml` or `.rustfmt.toml`, place it in the project or any other parent directory and it will apply the options in that file. If none of these directories contain such a file, both your home directory and a directory called `rustfmt` in your [global config directory](https://docs.rs/dirs/5.0.1/dirs/fn.config_dir.html) (e.g. `.config/rustfmt/`) are checked as well.
 
 A possible content of `rustfmt.toml` or `.rustfmt.toml` might look like this:
 
@@ -10,7 +10,7 @@ reorder_imports = false
 ```
 
 Each configuration option is either stable or unstable.
-Stable options can be used directly, while unstable options are opt-in.
+Stable options can always be used, while unstable options are only available on a nightly toolchain and must be opted into.
 To enable unstable options, set `unstable_features = true` in `rustfmt.toml` or pass `--unstable-features` to rustfmt.
 
 # Configuration Options
@@ -425,7 +425,7 @@ fn example() {
 
 ## `comment_width`
 
-Maximum length of comments. No effect unless`wrap_comments = true`.
+Maximum length of comments. No effect unless `wrap_comments = true`.
 
 - **Default value**: `80`
 - **Possible values**: any positive integer
@@ -534,7 +534,7 @@ Note that this option may be soft-deprecated in the future once the [ignore](#ig
 Specifies which edition is used by the parser.
 
 - **Default value**: `"2015"`
-- **Possible values**: `"2015"`, `"2018"`, `"2021"`
+- **Possible values**: `"2015"`, `"2018"`, `"2021"`, `"2024"`
 - **Stable**: Yes
 
 Rustfmt is able to pick up the edition used by reading the `Cargo.toml` file if executed
@@ -589,7 +589,7 @@ doesn't get ignored when aligning.
 #### `0` (default):
 
 ```rust
-enum Bar {
+enum Foo {
     A = 0,
     Bb = 1,
     RandomLongVariantGoesHere = 10,
@@ -645,7 +645,8 @@ trailing whitespaces.
 
 ## `fn_args_layout`
 
-Control the layout of arguments in a function
+This option is deprecated and has been renamed to `fn_params_layout` to better communicate that
+it affects the layout of parameters in function signatures.
 
 - **Default value**: `"Tall"`
 - **Possible values**: `"Compressed"`, `"Tall"`, `"Vertical"`
@@ -753,6 +754,8 @@ trait Lorem {
 }
 ```
 
+See also [`fn_params_layout`](#fn_params_layout)
+
 ## `fn_call_width`
 
 Maximum width of the args of a function call before falling back to vertical formatting.
@@ -764,6 +767,117 @@ Maximum width of the args of a function call before falling back to vertical for
 By default this option is set as a percentage of [`max_width`](#max_width) provided by [`use_small_heuristics`](#use_small_heuristics), but a value set directly for `fn_call_width` will take precedence.
 
 See also [`max_width`](#max_width) and [`use_small_heuristics`](#use_small_heuristics)
+
+## `fn_params_layout`
+
+Control the layout of parameters in function signatures.
+
+- **Default value**: `"Tall"`
+- **Possible values**: `"Compressed"`, `"Tall"`, `"Vertical"`
+- **Stable**: Yes
+
+#### `"Tall"` (default):
+
+```rust
+trait Lorem {
+    fn lorem(ipsum: Ipsum, dolor: Dolor, sit: Sit, amet: Amet);
+
+    fn lorem(ipsum: Ipsum, dolor: Dolor, sit: Sit, amet: Amet) {
+        // body
+    }
+
+    fn lorem(
+        ipsum: Ipsum,
+        dolor: Dolor,
+        sit: Sit,
+        amet: Amet,
+        consectetur: Consectetur,
+        adipiscing: Adipiscing,
+        elit: Elit,
+    );
+
+    fn lorem(
+        ipsum: Ipsum,
+        dolor: Dolor,
+        sit: Sit,
+        amet: Amet,
+        consectetur: Consectetur,
+        adipiscing: Adipiscing,
+        elit: Elit,
+    ) {
+        // body
+    }
+}
+```
+
+#### `"Compressed"`:
+
+```rust
+trait Lorem {
+    fn lorem(ipsum: Ipsum, dolor: Dolor, sit: Sit, amet: Amet);
+
+    fn lorem(ipsum: Ipsum, dolor: Dolor, sit: Sit, amet: Amet) {
+        // body
+    }
+
+    fn lorem(
+        ipsum: Ipsum, dolor: Dolor, sit: Sit, amet: Amet, consectetur: Consectetur,
+        adipiscing: Adipiscing, elit: Elit,
+    );
+
+    fn lorem(
+        ipsum: Ipsum, dolor: Dolor, sit: Sit, amet: Amet, consectetur: Consectetur,
+        adipiscing: Adipiscing, elit: Elit,
+    ) {
+        // body
+    }
+}
+```
+
+#### `"Vertical"`:
+
+```rust
+trait Lorem {
+    fn lorem(
+        ipsum: Ipsum,
+        dolor: Dolor,
+        sit: Sit,
+        amet: Amet,
+    );
+
+    fn lorem(
+        ipsum: Ipsum,
+        dolor: Dolor,
+        sit: Sit,
+        amet: Amet,
+    ) {
+        // body
+    }
+
+    fn lorem(
+        ipsum: Ipsum,
+        dolor: Dolor,
+        sit: Sit,
+        amet: Amet,
+        consectetur: Consectetur,
+        adipiscing: Adipiscing,
+        elit: Elit,
+    );
+
+    fn lorem(
+        ipsum: Ipsum,
+        dolor: Dolor,
+        sit: Sit,
+        amet: Amet,
+        consectetur: Consectetur,
+        adipiscing: Adipiscing,
+        elit: Elit,
+    ) {
+        // body
+    }
+}
+```
+
 
 ## `fn_single_line`
 
@@ -926,14 +1040,34 @@ fn add_one(x: i32) -> i32 {
 }
 ```
 
+## `doc_comment_code_block_width`
+
+Max width for code snippets included in doc comments. Only used if [`format_code_in_doc_comments`](#format_code_in_doc_comments) is true.
+
+- **Default value**: `100`
+- **Possible values**: any positive integer that is less than or equal to the value specified for [`max_width`](#max_width)
+- **Stable**: No (tracking issue: [#5359](https://github.com/rust-lang/rustfmt/issues/5359))
+
 ## `format_generated_files`
 
-Format generated files. A file is considered generated
-if any of the first five lines contain a `@generated` comment marker.
+Format generated files. A file is considered generated if any of the first several lines contain a `@generated` comment marker. The number of lines to check is configured by `generated_marker_line_search_limit`.
+
+By default, generated files are reformatted, i. e. `@generated` marker is ignored.
+This option is currently ignored for stdin (`@generated` in stdin is ignored.)
 
 - **Default value**: `true`
 - **Possible values**: `true`, `false`
 - **Stable**: No (tracking issue: [#5080](https://github.com/rust-lang/rustfmt/issues/5080))
+
+## `generated_marker_line_search_limit`
+
+Number of lines to check for a `@generated` pragma header, starting from the top of the file. Setting this value to `0` will treat all files as non-generated. When`format_generated_files` is `true`, this option has no effect.
+
+- **Default value**: `5`
+- **Possible values**: any positive integer
+- **Stable**: No (tracking issue: [#5080](https://github.com/rust-lang/rustfmt/issues/5080))
+
+See also [format_generated_files](#format_generated_files) link here.
 
 ## `format_macro_matchers`
 
@@ -974,7 +1108,7 @@ See also [`format_macro_bodies`](#format_macro_bodies).
 
 ## `format_macro_bodies`
 
-Format the bodies of macros.
+Format the bodies of declarative macro definitions.
 
 - **Default value**: `true`
 - **Possible values**: `true`, `false`
@@ -1004,6 +1138,62 @@ macro_rules! foo {
 
 See also [`format_macro_matchers`](#format_macro_matchers).
 
+## `skip_macro_invocations`
+
+Skip formatting the bodies of macro invocations with the following names.
+
+rustfmt will not format any macro invocation for macros with names set in this list.
+Including the special value "*" will prevent any macro invocations from being formatted.
+
+Note: This option does not have any impact on how rustfmt formats macro definitions.
+
+- **Default value**: `[]`
+- **Possible values**: a list of macro name idents, `["name_0", "name_1", ..., "*"]`
+- **Stable**: No (tracking issue: [#5346](https://github.com/rust-lang/rustfmt/issues/5346))
+
+#### `[]` (default):
+
+rustfmt will follow its standard approach to formatting macro invocations.
+
+No macro invocations will be skipped based on their name. More information about rustfmt's standard macro invocation formatting behavior can be found in [#5437](https://github.com/rust-lang/rustfmt/discussions/5437).
+
+```rust
+lorem!(
+    const _: u8 = 0;
+);
+
+ipsum!(
+    const _: u8 = 0;
+);
+```
+
+#### `["lorem"]`:
+
+The named macro invocations will be skipped.
+
+```rust
+lorem!(
+        const _: u8 = 0;
+);
+
+ipsum!(
+    const _: u8 = 0;
+);
+```
+
+#### `["*"]`:
+
+The special selector `*` will skip all macro invocations.
+
+```rust
+lorem!(
+        const _: u8 = 0;
+);
+
+ipsum!(
+        const _: u8 = 0;
+);
+```
 
 ## `format_strings`
 
@@ -1063,16 +1253,24 @@ See also: [`tab_spaces`](#tab_spaces).
 Control the case of the letters in hexadecimal literal values
 
 - **Default value**: `Preserve`
-- **Possible values**: `Upper`, `Lower`
+- **Possible values**: `Preserve`, `Upper`, `Lower`
 - **Stable**: No (tracking issue: [#5081](https://github.com/rust-lang/rustfmt/issues/5081))
 
 ## `hide_parse_errors`
 
-Do not show parse errors if the parser failed to parse files.
+This option is deprecated and has been renamed to `show_parse_errors` to avoid confusion around the double negative default of `hide_parse_errors=false`.
 
 - **Default value**: `false`
 - **Possible values**: `true`, `false`
 - **Stable**: No (tracking issue: [#3390](https://github.com/rust-lang/rustfmt/issues/3390))
+
+## `show_parse_errors`
+
+Show parse errors if the parser failed to parse files.
+
+- **Default value**: `true`
+- **Possible values**: `true`, `false`
+- **Stable**: No (tracking issue: [#5977](https://github.com/rust-lang/rustfmt/issues/5977))
 
 ## `ignore`
 
@@ -1107,6 +1305,15 @@ If you want to ignore every file under the directory where you put your rustfmt.
 ```toml
 ignore = ["/"]
 ```
+
+If you want to allow specific paths that would otherwise be ignored, prefix those paths with a `!`:
+
+```toml
+ignore = ["bar_dir/*", "!bar_dir/*/what.rs"]
+```
+
+In this case, all files under `bar_dir` will be ignored, except files like `bar_dir/sub/what.rs`
+or `bar_dir/another/what.rs`.
 
 ## `imports_indent`
 
@@ -1471,31 +1678,11 @@ use core::slice;
 #[cfg(feature = "alloc")] use core::slice;
 ```
 
-## `license_template_path`
-
-Check whether beginnings of files match a license template.
-
-- **Default value**: `""`
-- **Possible values**: path to a license template file
-- **Stable**: No (tracking issue: [#3352](https://github.com/rust-lang/rustfmt/issues/3352))
-
-A license template is a plain text file which is matched literally against the
-beginning of each source file, except for `{}`-delimited blocks, which are
-matched as regular expressions. The following license template therefore
-matches strings like `// Copyright 2017 The Rust Project Developers.`, `//
-Copyright 2018 The Rust Project Developers.`, etc.:
-
-```
-// Copyright {\d+} The Rust Project Developers.
-```
-
-`\{`, `\}` and `\\` match literal braces / backslashes.
-
 ## `match_arm_blocks`
 
 Controls whether arm bodies are wrapped in cases where the first line of the body cannot fit on the same line as the `=>` operator.
 
-The Style Guide requires that bodies are block wrapped by default if a line break is required after the `=>`, but this option can be used to disable that behavior to prevent wrapping arm bodies in that event, so long as the body does not contain multiple statements nor line comments.
+The Style Guide requires that bodies are block wrapped by default if a line break is required after the `=>`, but this option can be used to disable that behavior to prevent wrapping arm bodies in that event, so long as the body contains neither multiple statements nor line comments.
 
 - **Default value**: `true`
 - **Possible values**: `true`, `false`
@@ -1697,11 +1884,16 @@ pub enum Foo {}
 
 ## `imports_granularity`
 
-How imports should be grouped into `use` statements. Imports will be merged or split to the configured level of granularity.
+Controls how imports are structured in `use` statements. Imports will be merged or split to the configured level of granularity.
+
+Similar to other `import` related configuration options, this option operates within the bounds of user-defined groups of imports. See [`group_imports`](#group_imports) for more information on import groups.
+
+Note that rustfmt will not modify the granularity of imports containing comments if doing so could potentially lose or misplace said comments.
 
 - **Default value**: `Preserve`
 - **Possible values**: `Preserve`, `Crate`, `Module`, `Item`, `One`
 - **Stable**: No (tracking issue: [#4991](https://github.com/rust-lang/rustfmt/issues/4991))
+
 
 #### `Preserve` (default):
 
@@ -2059,11 +2251,15 @@ use sit;
 
 ## `group_imports`
 
-Controls the strategy for how imports are grouped together.
+Controls the strategy for how consecutive imports are grouped together.
+
+Controls the strategy for grouping sets of consecutive imports. Imports may contain newlines between imports and still be grouped together as a single set, but other statements between imports will result in different grouping sets.
 
 - **Default value**: `Preserve`
 - **Possible values**: `Preserve`, `StdExternalCrate`, `One`
 - **Stable**: No (tracking issue: [#5083](https://github.com/rust-lang/rustfmt/issues/5083))
+
+Each set of imports (one or more `use` statements, optionally separated by newlines) will be formatted independently. Other statements such as `mod ...` or `extern crate ...` will cause imports to not be grouped together.
 
 #### `Preserve` (default):
 
@@ -2160,35 +2356,6 @@ mod sit;
 **Note** `mod` with `#[macro_export]` will not be reordered since that could change the semantics
 of the original source code.
 
-## `report_fixme`
-
-Report `FIXME` items in comments.
-
-- **Default value**: `"Never"`
-- **Possible values**: `"Always"`, `"Unnumbered"`, `"Never"`
-- **Stable**: No (tracking issue: [#3394](https://github.com/rust-lang/rustfmt/issues/3394))
-
-Warns about any comments containing `FIXME` in them when set to `"Always"`. If
-it contains a `#X` (with `X` being a number) in parentheses following the
-`FIXME`, `"Unnumbered"` will ignore it.
-
-See also [`report_todo`](#report_todo).
-
-
-## `report_todo`
-
-Report `TODO` items in comments.
-
-- **Default value**: `"Never"`
-- **Possible values**: `"Always"`, `"Unnumbered"`, `"Never"`
-- **Stable**: No (tracking issue: [#3393](https://github.com/rust-lang/rustfmt/issues/3393))
-
-Warns about any comments containing `TODO` in them when set to `"Always"`. If
-it contains a `#X` (with `X` being a number) in parentheses following the
-`TODO`, `"Unnumbered"` will ignore it.
-
-See also [`report_fixme`](#report_fixme).
-
 ## `required_version`
 
 Require a specific version of rustfmt. If you want to make sure that the
@@ -2198,13 +2365,47 @@ specific version of rustfmt is used in your CI, use this option.
 - **Possible values**: any published version (e.g. `"0.3.8"`)
 - **Stable**: No (tracking issue: [#3386](https://github.com/rust-lang/rustfmt/issues/3386))
 
+## `short_array_element_width_threshold`
+
+The width threshold for an array element to be considered "short".
+
+The layout of an array is dependent on the length of each of its elements. 
+If the length of every element in an array is below this threshold (all elements are "short") then the array can be formatted in the mixed/compressed style, but if any one element has a length that exceeds this threshold then the array elements will have to be formatted vertically.
+
+- **Default value**: `10`
+- **Possible values**: any positive integer that is less than or equal to the value specified for [`max_width`](#max_width)
+- **Stable**: Yes
+
+#### `10` (default):
+```rust
+fn main() {
+    pub const FORMAT_TEST: [u64; 5] = [
+        0x0000000000000000,
+        0xaaaaaaaaaaaaaaaa,
+        0xbbbbbbbbbbbbbbbb,
+        0xcccccccccccccccc,
+        0xdddddddddddddddd,
+    ];
+}
+```
+#### `20`:
+```rust
+fn main() {
+    pub const FORMAT_TEST: [u64; 5] = [
+        0x0000000000000000, 0xaaaaaaaaaaaaaaaa, 0xbbbbbbbbbbbbbbbb, 0xcccccccccccccccc,
+        0xdddddddddddddddd,
+    ];
+}
+```
+See also [`max_width`](#max_width).
+
 ## `skip_children`
 
 Don't reformat out of line modules
 
 - **Default value**: `false`
 - **Possible values**: `true`, `false`
-- **Stable**: No (tracking issue: [#3389](https://github.com/rust-lang/rustfmt/issues/3386))
+- **Stable**: No (tracking issue: [#3389](https://github.com/rust-lang/rustfmt/issues/3389))
 
 ## `single_line_if_else_max_width`
 
@@ -2217,6 +2418,78 @@ Maximum line length for single line if-else expressions. A value of `0` (zero) r
 By default this option is set as a percentage of [`max_width`](#max_width) provided by [`use_small_heuristics`](#use_small_heuristics), but a value set directly for `single_line_if_else_max_width` will take precedence.
 
 See also [`max_width`](#max_width) and [`use_small_heuristics`](#use_small_heuristics)
+
+## `single_line_let_else_max_width`
+
+Maximum line length for single line let-else statements.
+See the [let-else statement section of the Rust Style Guide](https://github.com/rust-lang/rust/blob/master/src/doc/style-guide/src/statements.md#else-blocks-let-else-statements) for more details on when a let-else statement may be written on a single line.
+A value of `0` (zero) means the divergent `else` block will always be formatted over multiple lines.
+Note this occurs when `use_small_heuristics` is set to `Off`.
+
+By default this option is set as a percentage of [`max_width`](#max_width) provided by [`use_small_heuristics`](#use_small_heuristics), but a value set directly for `single_line_let_else_max_width` will take precedence.
+
+- **Default value**: `50`
+- **Possible values**: any positive integer that is less than or equal to the value specified for [`max_width`](#max_width)
+- **Stable**: Yes
+
+#### `50` (default):
+
+```rust
+fn main() {
+    let Some(w) = opt else { return Ok(()) };
+
+    let Some(x) = opt else { return };
+
+    let Some(y) = opt else {
+        return;
+    };
+
+    let Some(z) = some_very_very_very_very_long_name else {
+        return;
+    };
+}
+```
+
+#### `0`:
+
+```rust
+fn main() {
+    let Some(w) = opt else {
+        return Ok(());
+    };
+
+    let Some(x) = opt else {
+        return;
+    };
+
+    let Some(y) = opt else {
+        return;
+    };
+
+    let Some(z) = some_very_very_very_very_long_name else {
+        return;
+    };
+}
+```
+
+#### `100`:
+
+```rust
+fn main() {
+    let Some(w) = opt else { return Ok(()) };
+
+    let Some(x) = opt else { return };
+
+    let Some(y) = opt else {
+        return;
+    };
+
+    let Some(z) = some_very_very_very_very_long_name else { return };
+}
+```
+
+See also [`max_width`](#max_width) and [`use_small_heuristics`](#use_small_heuristics)
+
 
 ## `space_after_colon`
 
@@ -2418,6 +2691,17 @@ Maximum width in the body of a struct variant before falling back to vertical fo
 By default this option is set as a percentage of [`max_width`](#max_width) provided by [`use_small_heuristics`](#use_small_heuristics), but a value set directly for `struct_variant_width` will take precedence.
 
 See also [`max_width`](#max_width) and [`use_small_heuristics`](#use_small_heuristics)
+
+## `style_edition`
+
+Controls the edition of the [Rust Style Guide] to use for formatting ([RFC 3338])
+
+- **Default value**: `"2015"`
+- **Possible values**: `"2015"`, `"2018"`, `"2021"`, `"2024"` (unstable variant)
+- **Stable**: No
+
+[Rust Style Guide]: https://doc.rust-lang.org/nightly/style-guide/
+[RFC 3338]: https://rust-lang.github.io/rfcs/3338-style-evolution.html
 
 ## `tab_spaces`
 
@@ -2630,6 +2914,7 @@ The ratios are:
 * [`array_width`](#array_width) - `60%`
 * [`chain_width`](#chain_width) - `60%`
 * [`single_line_if_else_max_width`](#single_line_if_else_max_width) - `50%`
+* [`single_line_let_else_max_width`](#single_line_let_else_max_width) - `50%`
 
 For example when `max_width` is set to `100`, the width settings are:
 * `fn_call_width=60`
@@ -2639,6 +2924,7 @@ For example when `max_width` is set to `100`, the width settings are:
 * `array_width=60`
 * `chain_width=60`
 * `single_line_if_else_max_width=50`
+* `single_line_let_else_max_width=50`
 
 and when `max_width` is set to `200`:
 * `fn_call_width=120`
@@ -2648,6 +2934,7 @@ and when `max_width` is set to `200`:
 * `array_width=120`
 * `chain_width=120`
 * `single_line_if_else_max_width=100`
+* `single_line_let_else_max_width=100`
 
 ```rust
 enum Lorem {
@@ -2717,6 +3004,7 @@ So if `max_width` is set to `200`, then all the width settings are also set to `
 * `array_width=200`
 * `chain_width=200`
 * `single_line_if_else_max_width=200`
+* `single_line_let_else_max_width=200`
 
 ```rust
 enum Lorem {
@@ -2744,6 +3032,7 @@ See also:
 * [`array_width`](#array_width)
 * [`chain_width`](#chain_width)
 * [`single_line_if_else_max_width`](#single_line_if_else_max_width)
+* [`single_line_let_else_max_width`](#single_line_let_else_max_width)
 
 ## `use_try_shorthand`
 
@@ -2773,9 +3062,7 @@ fn main() {
 
 ## `version`
 
-Which version of the formatting rules to use. `Version::One` is backwards-compatible
-with Rustfmt 1.0. Other versions are only backwards compatible within a major
-version number.
+This option is deprecated and has been replaced by [`style_edition`](#style_edition)
 
 - **Default value**: `One`
 - **Possible values**: `One`, `Two`
@@ -2823,6 +3110,10 @@ See also [`brace_style`](#brace_style), [`control_brace_style`](#control_brace_s
 
 Break comments to fit on the line
 
+Note that no wrapping will happen if:
+1. The comment is the start of a markdown header doc comment
+2. An URL was found in the comment
+
 - **Default value**: `false`
 - **Possible values**: `true`, `false`
 - **Stable**: No (tracking issue: [#3347](https://github.com/rust-lang/rustfmt/issues/3347))
@@ -2837,6 +3128,11 @@ Break comments to fit on the line
 // commodo consequat.
 
 // Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+// Information on the lorem ipsum can be found at the following url: https://en.wikipedia.org/wiki/Lorem_ipsum. Its text is: lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+/// # This doc comment is a very long header (it starts with a '#'). Had it not been a header it would have been wrapped. But because it is a header, it will not be. That is because wrapping a markdown header breaks it.
+struct Foo {}
 ```
 
 #### `true`:
@@ -2847,6 +3143,17 @@ Break comments to fit on the line
 // magna aliqua. Ut enim ad minim veniam, quis nostrud
 // exercitation ullamco laboris nisi ut aliquip ex ea
 // commodo consequat.
+
+// Lorem ipsum dolor sit amet, consectetur adipiscing elit,
+// sed do eiusmod tempor incididunt ut labore et dolore
+// magna aliqua. Ut enim ad minim veniam, quis nostrud
+// exercitation ullamco laboris nisi ut aliquip ex ea
+// commodo consequat.
+
+// Information on the lorem ipsum can be found at the following url: https://en.wikipedia.org/wiki/Lorem_ipsum. Its text is: lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+
+/// # This doc comment is a very long header (it starts with a '#'). Had it not been a header it would have been wrapped. But because it is a header, it will not be. That is because wrapping a markdown header breaks it.
+struct Foo {}
 ```
 
 # Internal Options

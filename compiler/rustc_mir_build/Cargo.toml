@@ -3,24 +3,28 @@ name = "rustc_mir_build"
 version = "0.0.0"
 edition = "2021"
 
-[lib]
-doctest = false
-
 [dependencies]
+# tidy-alphabetical-start
+either = "1.5.0"
+itertools = "0.12"
+
+rustc_abi = { path = "../rustc_abi" }
+rustc_apfloat = "0.2.0"
 rustc_arena = { path = "../rustc_arena" }
-tracing = "0.1"
-rustc_middle = { path = "../rustc_middle" }
-rustc_apfloat = { path = "../rustc_apfloat" }
-rustc_attr = { path = "../rustc_attr" }
+rustc_ast = { path = "../rustc_ast" }
+rustc_attr_parsing = { path = "../rustc_attr_parsing" }
 rustc_data_structures = { path = "../rustc_data_structures" }
-rustc_index = { path = "../rustc_index" }
 rustc_errors = { path = "../rustc_errors" }
+rustc_fluent_macro = { path = "../rustc_fluent_macro" }
 rustc_hir = { path = "../rustc_hir" }
+rustc_index = { path = "../rustc_index" }
 rustc_infer = { path = "../rustc_infer" }
-rustc_serialize = { path = "../rustc_serialize" }
+rustc_lint = { path = "../rustc_lint" }
+rustc_macros = { path = "../rustc_macros" }
+rustc_middle = { path = "../rustc_middle" }
+rustc_pattern_analysis = { path = "../rustc_pattern_analysis" }
 rustc_session = { path = "../rustc_session" }
 rustc_span = { path = "../rustc_span" }
-rustc_target = { path = "../rustc_target" }
 rustc_trait_selection = { path = "../rustc_trait_selection" }
-rustc_ast = { path = "../rustc_ast" }
-smallvec = { version = "1.6.1", features = ["union", "may_dangle"] }
+tracing = "0.1"
+# tidy-alphabetical-end

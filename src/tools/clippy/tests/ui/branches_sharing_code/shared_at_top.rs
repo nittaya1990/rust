@@ -1,6 +1,7 @@
-#![allow(dead_code, clippy::eval_order_dependence)]
-#![deny(clippy::if_same_then_else, clippy::branches_sharing_code)]
-
+#![deny(clippy::branches_sharing_code, clippy::if_same_then_else)]
+#![allow(dead_code)]
+#![allow(clippy::mixed_read_write_in_expression, clippy::uninlined_format_args)]
+//@no-rustfix
 // This tests the branches_sharing_code lint at the start of blocks
 
 fn simple_examples() {
@@ -14,6 +15,7 @@ fn simple_examples() {
         println!("Hello World!");
         println!("I'm branch nr: 2");
     }
+    //~^^^^^^^ ERROR: all if blocks contain the same code at the start
 
     // Else if
     if x == 0 {
@@ -35,9 +37,11 @@ fn simple_examples() {
 
         println!("Ha, Pascal allows you to start the array where you want")
     }
+    //~^^^^^^^^^^^^^^^^^^^ ERROR: all if blocks contain the same code at the start
 
     // Return a value
     let _ = if x == 7 {
+        //~^ ERROR: all if blocks contain the same code at the start
         let y = 16;
         println!("What can I say except: \"you're welcome?\"");
         let _ = y;
@@ -64,12 +68,14 @@ fn simple_but_suggestion_is_invalid() {
         println!("Str: {}", used_value_name);
         let _ = 2;
     }
+    //~^^^^^^^^^ ERROR: all if blocks contain the same code at the start
     let _ = used_value_name;
 
     // This can be automatically moved as `can_be_overridden` is not used again
     let can_be_overridden = 8;
     let _ = can_be_overridden;
     if x == 11 {
+        //~^ ERROR: all if blocks contain the same code at the start
         let can_be_overridden = "Move me";
         println!("I'm also moveable");
         let _ = 111;
@@ -86,6 +92,7 @@ fn check_if_same_than_else_mask() {
 
     #[allow(clippy::if_same_then_else)]
     if x == 2020 {
+        //~^ ERROR: all if blocks contain the same code at the start
         println!("This should trigger the `SHARED_CODE_IN_IF_BLOCKS` lint.");
         println!("Because `IF_SAME_THEN_ELSE` is allowed here");
     } else {
@@ -98,6 +105,7 @@ fn check_if_same_than_else_mask() {
     } else {
         println!("This should trigger `IS_SAME_THAN_ELSE` as usual");
     }
+    //~^^^^^ ERROR: this `if` has identical blocks
 }
 
 #[allow(clippy::vec_init_then_push)]

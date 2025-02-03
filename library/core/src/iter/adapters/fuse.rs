@@ -1,8 +1,8 @@
 use crate::intrinsics;
+use crate::iter::adapters::SourceIter;
 use crate::iter::adapters::zip::try_get_unchecked;
 use crate::iter::{
-    DoubleEndedIterator, ExactSizeIterator, FusedIterator, TrustedLen, TrustedRandomAccess,
-    TrustedRandomAccessNoCoerce,
+    FusedIterator, TrustedFused, TrustedLen, TrustedRandomAccess, TrustedRandomAccessNoCoerce,
 };
 use crate::ops::Try;
 
@@ -24,37 +24,17 @@ impl<I> Fuse<I> {
     pub(in crate::iter) fn new(iter: I) -> Fuse<I> {
         Fuse { iter: Some(iter) }
     }
+
+    pub(crate) fn into_inner(self) -> Option<I> {
+        self.iter
+    }
 }
 
 #[stable(feature = "fused", since = "1.26.0")]
 impl<I> FusedIterator for Fuse<I> where I: Iterator {}
 
-/// Fuse the iterator if the expression is `None`.
-macro_rules! fuse {
-    ($self:ident . iter . $($call:tt)+) => {
-        match $self.iter {
-            Some(ref mut iter) => match iter.$($call)+ {
-                None => {
-                    $self.iter = None;
-                    None
-                }
-                item => item,
-            },
-            None => None,
-        }
-    };
-}
-
-/// Specialized macro that doesn't check if the expression is `None`.
-/// (We trust that a `FusedIterator` will fuse itself.)
-macro_rules! spec {
-    ($self:ident . iter . $($call:tt)+) => {
-        match $self.iter {
-            Some(ref mut iter) => iter.$($call)+,
-            None => None,
-        }
-    };
-}
+#[unstable(issue = "none", feature = "trusted_fused")]
+unsafe impl<I> TrustedFused for Fuse<I> where I: TrustedFused {}
 
 // Any specialized implementation here is made internal
 // to avoid exposing default fns outside this trait.
@@ -129,7 +109,6 @@ where
     }
 
     #[inline]
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item
     where
         Self: TrustedRandomAccessNoCoerce,
@@ -209,6 +188,21 @@ where
     }
 }
 
+#[stable(feature = "default_iters", since = "1.70.0")]
+impl<I: Default> Default for Fuse<I> {
+    /// Creates a `Fuse` iterator from the default value of `I`.
+    ///
+    /// ```
+    /// # use core::slice;
+    /// # use std::iter::Fuse;
+    /// let iter: Fuse<slice::Iter<'_, u8>> = Default::default();
+    /// assert_eq!(iter.len(), 0);
+    /// ```
+    fn default() -> Self {
+        Fuse { iter: Default::default() }
+    }
+}
+
 #[unstable(feature = "trusted_len", issue = "37572")]
 // SAFETY: `TrustedLen` requires that an accurate length is reported via `size_hint()`. As `Fuse`
 // is just forwarding this to the wrapped iterator `I` this property is preserved and it is safe to
@@ -282,12 +276,12 @@ where
 
     #[inline]
     default fn next(&mut self) -> Option<<I as Iterator>::Item> {
-        fuse!(self.iter.next())
+        and_then_or_clear(&mut self.iter, Iterator::next)
     }
 
     #[inline]
     default fn nth(&mut self, n: usize) -> Option<I::Item> {
-        fuse!(self.iter.nth(n))
+        and_then_or_clear(&mut self.iter, |iter| iter.nth(n))
     }
 
     #[inline]
@@ -309,7 +303,7 @@ where
     where
         P: FnMut(&Self::Item) -> bool,
     {
-        fuse!(self.iter.find(predicate))
+        and_then_or_clear(&mut self.iter, |iter| iter.find(predicate))
     }
 
     #[inline]
@@ -317,7 +311,7 @@ where
     where
         I: DoubleEndedIterator,
     {
-        fuse!(self.iter.next_back())
+        and_then_or_clear(&mut self.iter, |iter| iter.next_back())
     }
 
     #[inline]
@@ -325,7 +319,7 @@ where
     where
         I: DoubleEndedIterator,
     {
-        fuse!(self.iter.nth_back(n))
+        and_then_or_clear(&mut self.iter, |iter| iter.nth_back(n))
     }
 
     #[inline]
@@ -349,7 +343,7 @@ where
         P: FnMut(&Self::Item) -> bool,
         I: DoubleEndedIterator,
     {
-        fuse!(self.iter.rfind(predicate))
+        and_then_or_clear(&mut self.iter, |iter| iter.rfind(predicate))
     }
 }
 
@@ -362,12 +356,12 @@ where
 {
     #[inline]
     fn next(&mut self) -> Option<<I as Iterator>::Item> {
-        spec!(self.iter.next())
+        self.iter.as_mut()?.next()
     }
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<I::Item> {
-        spec!(self.iter.nth(n))
+        self.iter.as_mut()?.nth(n)
     }
 
     #[inline]
@@ -388,7 +382,7 @@ where
     where
         P: FnMut(&Self::Item) -> bool,
     {
-        spec!(self.iter.find(predicate))
+        self.iter.as_mut()?.find(predicate)
     }
 
     #[inline]
@@ -396,7 +390,7 @@ where
     where
         I: DoubleEndedIterator,
     {
-        spec!(self.iter.next_back())
+        self.iter.as_mut()?.next_back()
     }
 
     #[inline]
@@ -404,7 +398,7 @@ where
     where
         I: DoubleEndedIterator,
     {
-        spec!(self.iter.nth_back(n))
+        self.iter.as_mut()?.nth_back(n)
     }
 
     #[inline]
@@ -427,6 +421,32 @@ where
         P: FnMut(&Self::Item) -> bool,
         I: DoubleEndedIterator,
     {
-        spec!(self.iter.rfind(predicate))
+        self.iter.as_mut()?.rfind(predicate)
     }
+}
+
+// This is used by Flatten's SourceIter impl
+#[unstable(issue = "none", feature = "inplace_iteration")]
+unsafe impl<I> SourceIter for Fuse<I>
+where
+    I: SourceIter + TrustedFused,
+{
+    type Source = I::Source;
+
+    #[inline]
+    unsafe fn as_inner(&mut self) -> &mut I::Source {
+        // SAFETY: unsafe function forwarding to unsafe function with the same requirements.
+        // TrustedFused guarantees that we'll never encounter a case where `self.iter` would
+        // be set to None.
+        unsafe { SourceIter::as_inner(self.iter.as_mut().unwrap_unchecked()) }
+    }
+}
+
+#[inline]
+fn and_then_or_clear<T, U>(opt: &mut Option<T>, f: impl FnOnce(&mut T) -> Option<U>) -> Option<U> {
+    let x = f(opt.as_mut()?);
+    if x.is_none() {
+        *opt = None;
+    }
+    x
 }

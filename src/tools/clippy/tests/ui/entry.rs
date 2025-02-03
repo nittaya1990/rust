@@ -1,4 +1,4 @@
-// run-rustfix
+//@needs-asm-support
 
 #![allow(unused, clippy::needless_pass_by_value, clippy::collapsible_if)]
 #![warn(clippy::map_entry)]
@@ -153,6 +153,41 @@ fn hash_map<K: Eq + Hash + Copy, V: Copy>(m: &mut HashMap<K, V>, m2: &mut HashMa
         let _ = x.0;
         m.insert(k, v);
     }
+}
+
+// Issue 10331
+// do not suggest a bad expansion because the compiler unrolls the first
+// occurrence of the loop
+pub fn issue_10331() {
+    let mut m = HashMap::new();
+    let mut i = 0;
+    let mut x = 0;
+    while !m.contains_key(&x) {
+        m.insert(x, i);
+        i += 1;
+        x += 1;
+    }
+}
+
+/// Issue 11935
+/// Do not suggest using entries if the map is used inside the `insert` expression.
+pub fn issue_11935() {
+    let mut counts: HashMap<u64, u64> = HashMap::new();
+    if !counts.contains_key(&1) {
+        counts.insert(1, 1);
+    } else {
+        counts.insert(1, counts.get(&1).unwrap() + 1);
+    }
+}
+
+fn issue12489(map: &mut HashMap<u64, u64>) -> Option<()> {
+    if !map.contains_key(&1) {
+        let Some(1) = Some(2) else {
+            return None;
+        };
+        map.insert(1, 42);
+    }
+    Some(())
 }
 
 fn main() {}

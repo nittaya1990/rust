@@ -5,18 +5,49 @@
 use std::borrow::Cow;
 use std::io::{self, Write};
 
-use super::*;
-use crate::constraints::OutlivesConstraint;
+use itertools::Itertools;
 use rustc_graphviz as dot;
+use rustc_middle::ty::UniverseIndex;
+
+use super::*;
+
+fn render_outlives_constraint(constraint: &OutlivesConstraint<'_>) -> String {
+    match constraint.locations {
+        Locations::All(_) => "All(...)".to_string(),
+        Locations::Single(loc) => format!("{loc:?}"),
+    }
+}
+
+fn render_universe(u: UniverseIndex) -> String {
+    if u.is_root() {
+        return "".to_string();
+    }
+
+    format!("/{:?}", u)
+}
+
+fn render_region_vid(rvid: RegionVid, regioncx: &RegionInferenceContext<'_>) -> String {
+    let universe_str = render_universe(regioncx.region_definition(rvid).universe);
+
+    let external_name_str = if let Some(external_name) =
+        regioncx.region_definition(rvid).external_name.and_then(|e| e.get_name())
+    {
+        format!(" ({external_name})")
+    } else {
+        "".to_string()
+    };
+
+    format!("{:?}{universe_str}{external_name_str}", rvid)
+}
 
 impl<'tcx> RegionInferenceContext<'tcx> {
     /// Write out the region constraint graph.
-    crate fn dump_graphviz_raw_constraints(&self, mut w: &mut dyn Write) -> io::Result<()> {
+    pub(crate) fn dump_graphviz_raw_constraints(&self, mut w: &mut dyn Write) -> io::Result<()> {
         dot::render(&RawConstraints { regioncx: self }, &mut w)
     }
 
-    /// Write out the region constraint graph.
-    crate fn dump_graphviz_scc_constraints(&self, mut w: &mut dyn Write) -> io::Result<()> {
+    /// Write out the region constraint SCC graph.
+    pub(crate) fn dump_graphviz_scc_constraints(&self, mut w: &mut dyn Write) -> io::Result<()> {
         let mut nodes_per_scc: IndexVec<ConstraintSccIndex, _> =
             self.constraint_sccs.all_sccs().map(|_| Vec::new()).collect();
 
@@ -47,10 +78,10 @@ impl<'a, 'this, 'tcx> dot::Labeller<'this> for RawConstraints<'a, 'tcx> {
         Some(dot::LabelText::LabelStr(Cow::Borrowed("box")))
     }
     fn node_label(&'this self, n: &RegionVid) -> dot::LabelText<'this> {
-        dot::LabelText::LabelStr(format!("{:?}", n).into())
+        dot::LabelText::LabelStr(render_region_vid(*n, self.regioncx).into())
     }
     fn edge_label(&'this self, e: &OutlivesConstraint<'tcx>) -> dot::LabelText<'this> {
-        dot::LabelText::LabelStr(format!("{:?}", e.locations).into())
+        dot::LabelText::LabelStr(render_outlives_constraint(e).into())
     }
 }
 
@@ -97,8 +128,9 @@ impl<'a, 'this, 'tcx> dot::Labeller<'this> for SccConstraints<'a, 'tcx> {
         Some(dot::LabelText::LabelStr(Cow::Borrowed("box")))
     }
     fn node_label(&'this self, n: &ConstraintSccIndex) -> dot::LabelText<'this> {
-        let nodes = &self.nodes_per_scc[*n];
-        dot::LabelText::LabelStr(format!("{:?} = {:?}", n, nodes).into())
+        let nodes_str =
+            self.nodes_per_scc[*n].iter().map(|n| render_region_vid(*n, self.regioncx)).join(", ");
+        dot::LabelText::LabelStr(format!("SCC({n}) = {{{nodes_str}}}", n = n.as_usize()).into())
     }
 }
 

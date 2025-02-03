@@ -2,12 +2,12 @@ use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, IntTy, UintTy};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::Span;
 
 use clippy_utils::comparisons;
 use clippy_utils::comparisons::Rel;
-use clippy_utils::consts::{constant_full_int, FullInt};
+use clippy_utils::consts::{ConstEvalCtxt, FullInt};
 use clippy_utils::diagnostics::span_lint;
 use clippy_utils::source::snippet;
 
@@ -26,7 +26,7 @@ declare_clippy_lint! {
     /// https://github.com/rust-lang/rust-clippy/issues/886
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x: u8 = 1;
     /// (x as u32) > 300;
     /// ```
@@ -38,7 +38,7 @@ declare_clippy_lint! {
 
 declare_lint_pass!(InvalidUpcastComparisons => [INVALID_UPCAST_COMPARISONS]);
 
-fn numeric_cast_precast_bounds<'a>(cx: &LateContext<'_>, expr: &'a Expr<'_>) -> Option<(FullInt, FullInt)> {
+fn numeric_cast_precast_bounds(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<(FullInt, FullInt)> {
     if let ExprKind::Cast(cast_exp, _) = expr.kind {
         let pre_cast_ty = cx.typeck_results().expr_ty(cast_exp);
         let cast_ty = cx.typeck_results().expr_ty(expr);
@@ -76,7 +76,7 @@ fn err_upcast_comparison(cx: &LateContext<'_>, span: Span, expr: &Expr<'_>, alwa
             cx,
             INVALID_UPCAST_COMPARISONS,
             span,
-            &format!(
+            format!(
                 "because of the numeric bounds on `{}` prior to casting, this expression is always {}",
                 snippet(cx, cast_val.span, "the expression"),
                 if always { "true" } else { "false" },
@@ -88,14 +88,14 @@ fn err_upcast_comparison(cx: &LateContext<'_>, span: Span, expr: &Expr<'_>, alwa
 fn upcast_comparison_bounds_err<'tcx>(
     cx: &LateContext<'tcx>,
     span: Span,
-    rel: comparisons::Rel,
+    rel: Rel,
     lhs_bounds: Option<(FullInt, FullInt)>,
     lhs: &'tcx Expr<'_>,
     rhs: &'tcx Expr<'_>,
     invert: bool,
 ) {
     if let Some((lb, ub)) = lhs_bounds {
-        if let Some(norm_rhs_val) = constant_full_int(cx, cx.typeck_results(), rhs) {
+        if let Some(norm_rhs_val) = ConstEvalCtxt::new(cx).eval_full_int(rhs) {
             if rel == Rel::Eq || rel == Rel::Ne {
                 if norm_rhs_val < lb || norm_rhs_val > ub {
                     err_upcast_comparison(cx, span, lhs, rel == Rel::Ne);
@@ -145,9 +145,7 @@ impl<'tcx> LateLintPass<'tcx> for InvalidUpcastComparisons {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if let ExprKind::Binary(ref cmp, lhs, rhs) = expr.kind {
             let normalized = comparisons::normalize_comparison(cmp.node, lhs, rhs);
-            let (rel, normalized_lhs, normalized_rhs) = if let Some(val) = normalized {
-                val
-            } else {
+            let Some((rel, normalized_lhs, normalized_rhs)) = normalized else {
                 return;
             };
 

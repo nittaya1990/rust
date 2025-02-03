@@ -2,6 +2,8 @@ use std::env;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use rayon::iter::{ParallelBridge, ParallelIterator};
+
 fn check_html_file(file: &Path) -> usize {
     let to_mute = &[
         // "disabled" on <link> or "autocomplete" on <select> emit this warning
@@ -28,6 +30,8 @@ fn check_html_file(file: &Path) -> usize {
         .arg("-quiet")
         .arg("--mute-id") // this option is useful in case we want to mute more warnings
         .arg("yes")
+        .arg("--new-blocklevel-tags")
+        .arg("rustdoc-search,rustdoc-toolbar") // custom elements
         .arg("--mute")
         .arg(&to_mute_s)
         .arg(file);
@@ -56,27 +60,30 @@ const DOCS_TO_CHECK: &[&str] =
 
 // Returns the number of files read and the number of errors.
 fn find_all_html_files(dir: &Path) -> (usize, usize) {
-    let mut files_read = 0;
-    let mut errors = 0;
-
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_entry(|e| {
-        e.depth() != 1
-            || e.file_name()
-                .to_str()
-                .map(|s| DOCS_TO_CHECK.into_iter().any(|d| *d == s))
-                .unwrap_or(false)
-    }) {
-        let entry = entry.expect("failed to read file");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let entry = entry.path();
-        if entry.extension().and_then(|s| s.to_str()) == Some("html") {
-            errors += check_html_file(&entry);
-            files_read += 1;
-        }
-    }
-    (files_read, errors)
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_entry(|e| {
+            e.depth() != 1
+                || e.file_name()
+                    .to_str()
+                    .map(|s| DOCS_TO_CHECK.into_iter().any(|d| *d == s))
+                    .unwrap_or(false)
+        })
+        .par_bridge()
+        .map(|entry| {
+            let entry = entry.expect("failed to read file");
+            if !entry.file_type().is_file() {
+                return (0, 0);
+            }
+            let entry = entry.path();
+            // (Number of files processed, number of errors)
+            if entry.extension().and_then(|s| s.to_str()) == Some("html") {
+                (1, check_html_file(&entry))
+            } else {
+                (0, 0)
+            }
+        })
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
 
 /// Default `tidy` command for macOS is too old that it does not have `mute-id` and `mute` options.

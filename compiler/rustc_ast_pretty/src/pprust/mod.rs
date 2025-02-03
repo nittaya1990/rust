@@ -2,13 +2,12 @@
 mod tests;
 
 pub mod state;
-pub use state::{print_crate, AnnNode, Comments, PpAnn, PrintState, State};
+use std::borrow::Cow;
 
 use rustc_ast as ast;
 use rustc_ast::token::{Nonterminal, Token, TokenKind};
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
-
-use std::borrow::Cow;
+pub use state::{AnnNode, Comments, PpAnn, PrintState, State, print_crate};
 
 pub fn nonterminal_to_string(nt: &Nonterminal) -> String {
     State::new().nonterminal_to_string(nt)
@@ -30,6 +29,10 @@ pub fn ty_to_string(ty: &ast::Ty) -> String {
 
 pub fn bounds_to_string(bounds: &[ast::GenericBound]) -> String {
     State::new().bounds_to_string(bounds)
+}
+
+pub fn where_bound_predicate_to_string(where_bound_predicate: &ast::WhereBoundPredicate) -> String {
+    State::new().where_bound_predicate_to_string(where_bound_predicate)
 }
 
 pub fn pat_to_string(pat: &ast::Pat) -> String {
@@ -64,7 +67,7 @@ pub fn vis_to_string(v: &ast::Visibility) -> String {
     State::new().vis_to_string(v)
 }
 
-pub fn meta_list_item_to_string(li: &ast::NestedMetaItem) -> String {
+pub fn meta_list_item_to_string(li: &ast::MetaItemInner) -> String {
     State::new().meta_list_item_to_string(li)
 }
 

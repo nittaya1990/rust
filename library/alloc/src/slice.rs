@@ -1,82 +1,12 @@
-//! A dynamically-sized view into a contiguous sequence, `[T]`.
+//! Utilities for the slice primitive type.
 //!
 //! *[See also the slice primitive type](slice).*
 //!
-//! Slices are a view into a block of memory represented as a pointer and a
-//! length.
+//! Most of the structs in this module are iterator types which can only be created
+//! using a certain function. For example, `slice.iter()` yields an [`Iter`].
 //!
-//! ```
-//! // slicing a Vec
-//! let vec = vec![1, 2, 3];
-//! let int_slice = &vec[..];
-//! // coercing an array to a slice
-//! let str_slice: &[&str] = &["one", "two", "three"];
-//! ```
-//!
-//! Slices are either mutable or shared. The shared slice type is `&[T]`,
-//! while the mutable slice type is `&mut [T]`, where `T` represents the element
-//! type. For example, you can mutate the block of memory that a mutable slice
-//! points to:
-//!
-//! ```
-//! let x = &mut [1, 2, 3];
-//! x[1] = 7;
-//! assert_eq!(x, &[1, 7, 3]);
-//! ```
-//!
-//! Here are some of the things this module contains:
-//!
-//! ## Structs
-//!
-//! There are several structs that are useful for slices, such as [`Iter`], which
-//! represents iteration over a slice.
-//!
-//! ## Trait Implementations
-//!
-//! There are several implementations of common traits for slices. Some examples
-//! include:
-//!
-//! * [`Clone`]
-//! * [`Eq`], [`Ord`] - for slices whose element type are [`Eq`] or [`Ord`].
-//! * [`Hash`] - for slices whose element type is [`Hash`].
-//!
-//! ## Iteration
-//!
-//! The slices implement `IntoIterator`. The iterator yields references to the
-//! slice elements.
-//!
-//! ```
-//! let numbers = &[0, 1, 2];
-//! for n in numbers {
-//!     println!("{n} is a number!");
-//! }
-//! ```
-//!
-//! The mutable slice yields mutable references to the elements:
-//!
-//! ```
-//! let mut scores = [7, 8, 9];
-//! for score in &mut scores[..] {
-//!     *score += 1;
-//! }
-//! ```
-//!
-//! This iterator yields mutable references to the slice's elements, so while
-//! the element type of the slice is `i32`, the element type of the iterator is
-//! `&mut i32`.
-//!
-//! * [`.iter`] and [`.iter_mut`] are the explicit methods to return the default
-//!   iterators.
-//! * Further methods that return iterators are [`.split`], [`.splitn`],
-//!   [`.chunks`], [`.windows`] and more.
-//!
-//! [`Hash`]: core::hash::Hash
-//! [`.iter`]: slice::iter
-//! [`.iter_mut`]: slice::iter_mut
-//! [`.split`]: slice::split
-//! [`.splitn`]: slice::splitn
-//! [`.chunks`]: slice::chunks
-//! [`.windows`]: slice::windows
+//! A few functions are provided to create a slice from a value reference
+//! or from a raw pointer.
 #![stable(feature = "rust1", since = "1.0.0")]
 // Many of the usings in this module are only used in the test configuration.
 // It's cleaner to just turn off the unused_imports warning than to fix them.
@@ -86,22 +16,9 @@ use core::borrow::{Borrow, BorrowMut};
 #[cfg(not(no_global_oom_handling))]
 use core::cmp::Ordering::{self, Less};
 #[cfg(not(no_global_oom_handling))]
-use core::mem;
-#[cfg(not(no_global_oom_handling))]
-use core::mem::size_of;
+use core::mem::{self, MaybeUninit};
 #[cfg(not(no_global_oom_handling))]
 use core::ptr;
-
-use crate::alloc::Allocator;
-#[cfg(not(no_global_oom_handling))]
-use crate::alloc::Global;
-#[cfg(not(no_global_oom_handling))]
-use crate::borrow::ToOwned;
-use crate::boxed::Box;
-use crate::vec::Vec;
-
-#[unstable(feature = "slice_range", issue = "76393")]
-pub use core::slice::range;
 #[unstable(feature = "array_chunks", issue = "74985")]
 pub use core::slice::ArrayChunks;
 #[unstable(feature = "array_chunks", issue = "74985")]
@@ -110,20 +27,20 @@ pub use core::slice::ArrayChunksMut;
 pub use core::slice::ArrayWindows;
 #[stable(feature = "inherent_ascii_escape", since = "1.60.0")]
 pub use core::slice::EscapeAscii;
+#[unstable(feature = "get_many_mut", issue = "104642")]
+pub use core::slice::GetManyMutError;
 #[stable(feature = "slice_get_slice", since = "1.28.0")]
 pub use core::slice::SliceIndex;
-#[stable(feature = "from_ref", since = "1.28.0")]
-pub use core::slice::{from_mut, from_ref};
-#[stable(feature = "rust1", since = "1.0.0")]
-pub use core::slice::{from_raw_parts, from_raw_parts_mut};
+#[cfg(not(no_global_oom_handling))]
+use core::slice::sort;
+#[stable(feature = "slice_group_by", since = "1.77.0")]
+pub use core::slice::{ChunkBy, ChunkByMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{Chunks, Windows};
 #[stable(feature = "chunks_exact", since = "1.31.0")]
 pub use core::slice::{ChunksExact, ChunksExactMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{ChunksMut, Split, SplitMut};
-#[unstable(feature = "slice_group_by", issue = "80552")]
-pub use core::slice::{GroupBy, GroupByMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{Iter, IterMut};
 #[stable(feature = "rchunks", since = "1.31.0")]
@@ -134,6 +51,14 @@ pub use core::slice::{RSplit, RSplitMut};
 pub use core::slice::{RSplitN, RSplitNMut, SplitN, SplitNMut};
 #[stable(feature = "split_inclusive", since = "1.51.0")]
 pub use core::slice::{SplitInclusive, SplitInclusiveMut};
+#[stable(feature = "from_ref", since = "1.28.0")]
+pub use core::slice::{from_mut, from_ref};
+#[unstable(feature = "slice_from_ptr_range", issue = "89792")]
+pub use core::slice::{from_mut_ptr_range, from_ptr_range};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::slice::{from_raw_parts, from_raw_parts_mut};
+#[unstable(feature = "slice_range", issue = "76393")]
+pub use core::slice::{range, try_range};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Basic slice extension methods
@@ -143,17 +68,25 @@ pub use core::slice::{SplitInclusive, SplitInclusiveMut};
 // N.B., see the `hack` module in this file for more details.
 #[cfg(test)]
 pub use hack::into_vec;
-
 // HACK(japaric) needed for the implementation of `Vec::clone` during testing
 // N.B., see the `hack` module in this file for more details.
 #[cfg(test)]
 pub use hack::to_vec;
 
+use crate::alloc::Allocator;
+#[cfg(not(no_global_oom_handling))]
+use crate::alloc::Global;
+#[cfg(not(no_global_oom_handling))]
+use crate::borrow::ToOwned;
+use crate::boxed::Box;
+use crate::vec::Vec;
+
 // HACK(japaric): With cfg(test) `impl [T]` is not available, these three
 // functions are actually methods that are in `impl [T]` but not in
 // `core::slice::SliceExt` - we need to supply these functions for the
 // `test_permutations` test
-mod hack {
+#[allow(unreachable_pub)] // cfg(test) pub above
+pub(crate) mod hack {
     use core::alloc::Allocator;
 
     use crate::boxed::Box;
@@ -162,6 +95,7 @@ mod hack {
     // We shouldn't add inline attribute to this since this is used in
     // `vec!` macro mostly and causes perf regression. See #71204 for
     // discussion and perf results.
+    #[allow(missing_docs)]
     pub fn into_vec<T, A: Allocator>(b: Box<[T], A>) -> Vec<T, A> {
         unsafe {
             let len = b.len();
@@ -171,6 +105,7 @@ mod hack {
     }
 
     #[cfg(not(no_global_oom_handling))]
+    #[allow(missing_docs)]
     #[inline]
     pub fn to_vec<T: ConvertVec, A: Allocator>(s: &[T], alloc: A) -> Vec<T, A> {
         T::to_vec(s, alloc)
@@ -237,132 +172,181 @@ mod hack {
     }
 }
 
-#[lang = "slice_alloc"]
 #[cfg(not(test))]
 impl<T> [T] {
-    /// Sorts the slice.
+    /// Sorts the slice, preserving initial order of equal elements.
     ///
-    /// This sort is stable (i.e., does not reorder equal elements) and *O*(*n* \* log(*n*)) worst-case.
+    /// This sort is stable (i.e., does not reorder equal elements) and *O*(*n* \* log(*n*))
+    /// worst-case.
+    ///
+    /// If the implementation of [`Ord`] for `T` does not implement a [total order], the function
+    /// may panic; even if the function exits normally, the resulting order of elements in the slice
+    /// is unspecified. See also the note on panicking below.
     ///
     /// When applicable, unstable sorting is preferred because it is generally faster than stable
-    /// sorting and it doesn't allocate auxiliary memory.
-    /// See [`sort_unstable`](slice::sort_unstable).
+    /// sorting and it doesn't allocate auxiliary memory. See
+    /// [`sort_unstable`](slice::sort_unstable). The exception are partially sorted slices, which
+    /// may be better served with `slice::sort`.
+    ///
+    /// Sorting types that only implement [`PartialOrd`] such as [`f32`] and [`f64`] require
+    /// additional precautions. For example, `f32::NAN != f32::NAN`, which doesn't fulfill the
+    /// reflexivity requirement of [`Ord`]. By using an alternative comparison function with
+    /// `slice::sort_by` such as [`f32::total_cmp`] or [`f64::total_cmp`] that defines a [total
+    /// order] users can sort slices containing floating-point values. Alternatively, if all values
+    /// in the slice are guaranteed to be in a subset for which [`PartialOrd::partial_cmp`] forms a
+    /// [total order], it's possible to sort the slice with `sort_by(|a, b|
+    /// a.partial_cmp(b).unwrap())`.
     ///
     /// # Current implementation
     ///
-    /// The current algorithm is an adaptive, iterative merge sort inspired by
-    /// [timsort](https://en.wikipedia.org/wiki/Timsort).
-    /// It is designed to be very fast in cases where the slice is nearly sorted, or consists of
-    /// two or more sorted sequences concatenated one after another.
+    /// The current implementation is based on [driftsort] by Orson Peters and Lukas Bergdoll, which
+    /// combines the fast average case of quicksort with the fast worst case and partial run
+    /// detection of mergesort, achieving linear time on fully sorted and reversed inputs. On inputs
+    /// with k distinct elements, the expected time to sort the data is *O*(*n* \* log(*k*)).
     ///
-    /// Also, it allocates temporary storage half the size of `self`, but for short slices a
-    /// non-allocating insertion sort is used instead.
+    /// The auxiliary memory allocation behavior depends on the input length. Short slices are
+    /// handled without allocation, medium sized slices allocate `self.len()` and beyond that it
+    /// clamps at `self.len() / 2`.
+    ///
+    /// # Panics
+    ///
+    /// May panic if the implementation of [`Ord`] for `T` does not implement a [total order], or if
+    /// the [`Ord`] implementation itself panics.
+    ///
+    /// All safe functions on slices preserve the invariant that even if the function panics, all
+    /// original elements will remain in the slice and any possible modifications via interior
+    /// mutability are observed in the input. This ensures that recovery code (for instance inside
+    /// of a `Drop` or following a `catch_unwind`) will still have access to all the original
+    /// elements. For instance, if the slice belongs to a `Vec`, the `Vec::drop` method will be able
+    /// to dispose of all contained elements.
     ///
     /// # Examples
     ///
     /// ```
-    /// let mut v = [-5, 4, 1, -3, 2];
+    /// let mut v = [4, -5, 1, -3, 2];
     ///
     /// v.sort();
-    /// assert!(v == [-5, -3, 1, 2, 4]);
+    /// assert_eq!(v, [-5, -3, 1, 2, 4]);
     /// ```
+    ///
+    /// [driftsort]: https://github.com/Voultapher/driftsort
+    /// [total order]: https://en.wikipedia.org/wiki/Total_order
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn sort(&mut self)
     where
         T: Ord,
     {
-        merge_sort(self, |a, b| a.lt(b));
+        stable_sort(self, T::lt);
     }
 
-    /// Sorts the slice with a comparator function.
+    /// Sorts the slice with a comparison function, preserving initial order of equal elements.
     ///
-    /// This sort is stable (i.e., does not reorder equal elements) and *O*(*n* \* log(*n*)) worst-case.
+    /// This sort is stable (i.e., does not reorder equal elements) and *O*(*n* \* log(*n*))
+    /// worst-case.
     ///
-    /// The comparator function must define a total ordering for the elements in the slice. If
-    /// the ordering is not total, the order of the elements is unspecified. An order is a
-    /// total order if it is (for all `a`, `b` and `c`):
+    /// If the comparison function `compare` does not implement a [total order], the function may
+    /// panic; even if the function exits normally, the resulting order of elements in the slice is
+    /// unspecified. See also the note on panicking below.
     ///
-    /// * total and antisymmetric: exactly one of `a < b`, `a == b` or `a > b` is true, and
-    /// * transitive, `a < b` and `b < c` implies `a < c`. The same must hold for both `==` and `>`.
-    ///
-    /// For example, while [`f64`] doesn't implement [`Ord`] because `NaN != NaN`, we can use
-    /// `partial_cmp` as our sort function when we know the slice doesn't contain a `NaN`.
-    ///
-    /// ```
-    /// let mut floats = [5f64, 4.0, 1.0, 3.0, 2.0];
-    /// floats.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    /// assert_eq!(floats, [1.0, 2.0, 3.0, 4.0, 5.0]);
-    /// ```
-    ///
-    /// When applicable, unstable sorting is preferred because it is generally faster than stable
-    /// sorting and it doesn't allocate auxiliary memory.
-    /// See [`sort_unstable_by`](slice::sort_unstable_by).
+    /// For example `|a, b| (a - b).cmp(a)` is a comparison function that is neither transitive nor
+    /// reflexive nor total, `a < b < c < a` with `a = 1, b = 2, c = 3`. For more information and
+    /// examples see the [`Ord`] documentation.
     ///
     /// # Current implementation
     ///
-    /// The current algorithm is an adaptive, iterative merge sort inspired by
-    /// [timsort](https://en.wikipedia.org/wiki/Timsort).
-    /// It is designed to be very fast in cases where the slice is nearly sorted, or consists of
-    /// two or more sorted sequences concatenated one after another.
+    /// The current implementation is based on [driftsort] by Orson Peters and Lukas Bergdoll, which
+    /// combines the fast average case of quicksort with the fast worst case and partial run
+    /// detection of mergesort, achieving linear time on fully sorted and reversed inputs. On inputs
+    /// with k distinct elements, the expected time to sort the data is *O*(*n* \* log(*k*)).
     ///
-    /// Also, it allocates temporary storage half the size of `self`, but for short slices a
-    /// non-allocating insertion sort is used instead.
+    /// The auxiliary memory allocation behavior depends on the input length. Short slices are
+    /// handled without allocation, medium sized slices allocate `self.len()` and beyond that it
+    /// clamps at `self.len() / 2`.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `compare` does not implement a [total order], or if `compare` itself panics.
+    ///
+    /// All safe functions on slices preserve the invariant that even if the function panics, all
+    /// original elements will remain in the slice and any possible modifications via interior
+    /// mutability are observed in the input. This ensures that recovery code (for instance inside
+    /// of a `Drop` or following a `catch_unwind`) will still have access to all the original
+    /// elements. For instance, if the slice belongs to a `Vec`, the `Vec::drop` method will be able
+    /// to dispose of all contained elements.
     ///
     /// # Examples
     ///
     /// ```
-    /// let mut v = [5, 4, 1, 3, 2];
+    /// let mut v = [4, -5, 1, -3, 2];
     /// v.sort_by(|a, b| a.cmp(b));
-    /// assert!(v == [1, 2, 3, 4, 5]);
+    /// assert_eq!(v, [-5, -3, 1, 2, 4]);
     ///
     /// // reverse sorting
     /// v.sort_by(|a, b| b.cmp(a));
-    /// assert!(v == [5, 4, 3, 2, 1]);
+    /// assert_eq!(v, [4, 2, 1, -3, -5]);
     /// ```
+    ///
+    /// [driftsort]: https://github.com/Voultapher/driftsort
+    /// [total order]: https://en.wikipedia.org/wiki/Total_order
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn sort_by<F>(&mut self, mut compare: F)
     where
         F: FnMut(&T, &T) -> Ordering,
     {
-        merge_sort(self, |a, b| compare(a, b) == Less);
+        stable_sort(self, |a, b| compare(a, b) == Less);
     }
 
-    /// Sorts the slice with a key extraction function.
+    /// Sorts the slice with a key extraction function, preserving initial order of equal elements.
     ///
     /// This sort is stable (i.e., does not reorder equal elements) and *O*(*m* \* *n* \* log(*n*))
     /// worst-case, where the key function is *O*(*m*).
     ///
-    /// For expensive key functions (e.g. functions that are not simple property accesses or
-    /// basic operations), [`sort_by_cached_key`](slice::sort_by_cached_key) is likely to be
-    /// significantly faster, as it does not recompute element keys.
-    ///
-    /// When applicable, unstable sorting is preferred because it is generally faster than stable
-    /// sorting and it doesn't allocate auxiliary memory.
-    /// See [`sort_unstable_by_key`](slice::sort_unstable_by_key).
+    /// If the implementation of [`Ord`] for `K` does not implement a [total order], the function
+    /// may panic; even if the function exits normally, the resulting order of elements in the slice
+    /// is unspecified. See also the note on panicking below.
     ///
     /// # Current implementation
     ///
-    /// The current algorithm is an adaptive, iterative merge sort inspired by
-    /// [timsort](https://en.wikipedia.org/wiki/Timsort).
-    /// It is designed to be very fast in cases where the slice is nearly sorted, or consists of
-    /// two or more sorted sequences concatenated one after another.
+    /// The current implementation is based on [driftsort] by Orson Peters and Lukas Bergdoll, which
+    /// combines the fast average case of quicksort with the fast worst case and partial run
+    /// detection of mergesort, achieving linear time on fully sorted and reversed inputs. On inputs
+    /// with k distinct elements, the expected time to sort the data is *O*(*n* \* log(*k*)).
     ///
-    /// Also, it allocates temporary storage half the size of `self`, but for short slices a
-    /// non-allocating insertion sort is used instead.
+    /// The auxiliary memory allocation behavior depends on the input length. Short slices are
+    /// handled without allocation, medium sized slices allocate `self.len()` and beyond that it
+    /// clamps at `self.len() / 2`.
+    ///
+    /// # Panics
+    ///
+    /// May panic if the implementation of [`Ord`] for `K` does not implement a [total order], or if
+    /// the [`Ord`] implementation or the key-function `f` panics.
+    ///
+    /// All safe functions on slices preserve the invariant that even if the function panics, all
+    /// original elements will remain in the slice and any possible modifications via interior
+    /// mutability are observed in the input. This ensures that recovery code (for instance inside
+    /// of a `Drop` or following a `catch_unwind`) will still have access to all the original
+    /// elements. For instance, if the slice belongs to a `Vec`, the `Vec::drop` method will be able
+    /// to dispose of all contained elements.
     ///
     /// # Examples
     ///
     /// ```
-    /// let mut v = [-5i32, 4, 1, -3, 2];
+    /// let mut v = [4i32, -5, 1, -3, 2];
     ///
     /// v.sort_by_key(|k| k.abs());
-    /// assert!(v == [1, 2, -3, 4, -5]);
+    /// assert_eq!(v, [1, 2, -3, 4, -5]);
     /// ```
+    ///
+    /// [driftsort]: https://github.com/Voultapher/driftsort
+    /// [total order]: https://en.wikipedia.org/wiki/Total_order
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "slice_sort_by_key", since = "1.7.0")]
     #[inline]
     pub fn sort_by_key<K, F>(&mut self, mut f: F)
@@ -370,45 +354,63 @@ impl<T> [T] {
         F: FnMut(&T) -> K,
         K: Ord,
     {
-        merge_sort(self, |a, b| f(a).lt(&f(b)));
+        stable_sort(self, |a, b| f(a).lt(&f(b)));
     }
 
-    /// Sorts the slice with a key extraction function.
+    /// Sorts the slice with a key extraction function, preserving initial order of equal elements.
     ///
-    /// During sorting, the key function is called at most once per element, by using
-    /// temporary storage to remember the results of key evaluation.
-    /// The order of calls to the key function is unspecified and may change in future versions
-    /// of the standard library.
+    /// This sort is stable (i.e., does not reorder equal elements) and *O*(*m* \* *n* + *n* \*
+    /// log(*n*)) worst-case, where the key function is *O*(*m*).
     ///
-    /// This sort is stable (i.e., does not reorder equal elements) and *O*(*m* \* *n* + *n* \* log(*n*))
-    /// worst-case, where the key function is *O*(*m*).
+    /// During sorting, the key function is called at most once per element, by using temporary
+    /// storage to remember the results of key evaluation. The order of calls to the key function is
+    /// unspecified and may change in future versions of the standard library.
     ///
-    /// For simple key functions (e.g., functions that are property accesses or
-    /// basic operations), [`sort_by_key`](slice::sort_by_key) is likely to be
-    /// faster.
+    /// If the implementation of [`Ord`] for `K` does not implement a [total order], the function
+    /// may panic; even if the function exits normally, the resulting order of elements in the slice
+    /// is unspecified. See also the note on panicking below.
+    ///
+    /// For simple key functions (e.g., functions that are property accesses or basic operations),
+    /// [`sort_by_key`](slice::sort_by_key) is likely to be faster.
     ///
     /// # Current implementation
     ///
-    /// The current algorithm is based on [pattern-defeating quicksort][pdqsort] by Orson Peters,
-    /// which combines the fast average case of randomized quicksort with the fast worst case of
-    /// heapsort, while achieving linear time on slices with certain patterns. It uses some
-    /// randomization to avoid degenerate cases, but with a fixed seed to always provide
-    /// deterministic behavior.
+    /// The current implementation is based on [instruction-parallel-network sort][ipnsort] by Lukas
+    /// Bergdoll, which combines the fast average case of randomized quicksort with the fast worst
+    /// case of heapsort, while achieving linear time on fully sorted and reversed inputs. And
+    /// *O*(*k* \* log(*n*)) where *k* is the number of distinct elements in the input. It leverages
+    /// superscalar out-of-order execution capabilities commonly found in CPUs, to efficiently
+    /// perform the operation.
     ///
     /// In the worst case, the algorithm allocates temporary storage in a `Vec<(K, usize)>` the
     /// length of the slice.
     ///
+    /// # Panics
+    ///
+    /// May panic if the implementation of [`Ord`] for `K` does not implement a [total order], or if
+    /// the [`Ord`] implementation panics.
+    ///
+    /// All safe functions on slices preserve the invariant that even if the function panics, all
+    /// original elements will remain in the slice and any possible modifications via interior
+    /// mutability are observed in the input. This ensures that recovery code (for instance inside
+    /// of a `Drop` or following a `catch_unwind`) will still have access to all the original
+    /// elements. For instance, if the slice belongs to a `Vec`, the `Vec::drop` method will be able
+    /// to dispose of all contained elements.
+    ///
     /// # Examples
     ///
     /// ```
-    /// let mut v = [-5i32, 4, 32, -3, 2];
+    /// let mut v = [4i32, -5, 1, -3, 2, 10];
     ///
+    /// // Strings are sorted by lexicographical order.
     /// v.sort_by_cached_key(|k| k.to_string());
-    /// assert!(v == [-3, -5, 2, 32, 4]);
+    /// assert_eq!(v, [-3, -5, 1, 10, 2, 4]);
     /// ```
     ///
-    /// [pdqsort]: https://github.com/orlp/pdqsort
+    /// [ipnsort]: https://github.com/Voultapher/sort-research-rs/tree/main/ipnsort
+    /// [total order]: https://en.wikipedia.org/wiki/Total_order
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "slice_sort_by_cached_key", since = "1.34.0")]
     #[inline]
     pub fn sort_by_cached_key<K, F>(&mut self, f: F)
@@ -423,7 +425,7 @@ impl<T> [T] {
                     $slice.iter().map($f).enumerate().map(|(i, k)| (k, i as $t)).collect();
                 // The elements of `indices` are unique, as they are indexed, so any sort will be
                 // stable with respect to the original slice. We use `sort_unstable` here because
-                // it requires less memory allocation.
+                // it requires no memory allocation.
                 indices.sort_unstable();
                 for i in 0..$slice.len() {
                     let mut index = indices[i].1;
@@ -436,24 +438,24 @@ impl<T> [T] {
             }};
         }
 
-        let sz_u8 = mem::size_of::<(K, u8)>();
-        let sz_u16 = mem::size_of::<(K, u16)>();
-        let sz_u32 = mem::size_of::<(K, u32)>();
-        let sz_usize = mem::size_of::<(K, usize)>();
-
         let len = self.len();
         if len < 2 {
             return;
         }
-        if sz_u8 < sz_u16 && len <= (u8::MAX as usize) {
-            return sort_by_key!(u8, self, f);
-        }
-        if sz_u16 < sz_u32 && len <= (u16::MAX as usize) {
-            return sort_by_key!(u16, self, f);
-        }
-        if sz_u32 < sz_usize && len <= (u32::MAX as usize) {
+
+        // Avoids binary-size usage in cases where the alignment doesn't work out to make this
+        // beneficial or on 32-bit platforms.
+        let is_using_u32_as_idx_type_helpful =
+            const { mem::size_of::<(K, u32)>() < mem::size_of::<(K, usize)>() };
+
+        // It's possible to instantiate this for u8 and u16 but, doing so is very wasteful in terms
+        // of compile-times and binary-size, the peak saved heap memory for u16 is (u8 + u16) -> 4
+        // bytes * u16::MAX vs (u8 + u32) -> 8 bytes * u16::MAX, the saved heap memory is at peak
+        // ~262KB.
+        if is_using_u32_as_idx_type_helpful && len <= (u32::MAX as usize) {
             return sort_by_key!(u32, self, f);
         }
+
         sort_by_key!(usize, self, f)
     }
 
@@ -467,6 +469,7 @@ impl<T> [T] {
     /// // Here, `s` and `x` can be modified independently.
     /// ```
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[rustc_conversion_suggestion]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -491,6 +494,7 @@ impl<T> [T] {
     /// // Here, `s` and `x` can be modified independently.
     /// ```
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[inline]
     #[unstable(feature = "allocator_api", issue = "32838")]
     pub fn to_vec_in<A: Allocator>(&self, alloc: A) -> Vec<T, A>
@@ -515,14 +519,16 @@ impl<T> [T] {
     ///
     /// assert_eq!(x, vec![10, 40, 30]);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "slice_into_vec")]
     pub fn into_vec<A: Allocator>(self: Box<Self, A>) -> Vec<T, A> {
         // N.B., see the `hack` module in this file for more details.
         hack::into_vec(self)
     }
 
-    /// Creates a vector by repeating a slice `n` times.
+    /// Creates a vector by copying a slice `n` times.
     ///
     /// # Panics
     ///
@@ -542,6 +548,7 @@ impl<T> [T] {
     /// // this will panic at runtime
     /// b"0123456789abcdef".repeat(usize::MAX);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[cfg(not(no_global_oom_handling))]
     #[stable(feature = "repeat_generic_slice", since = "1.40.0")]
     pub fn repeat(&self, n: usize) -> Vec<T>
@@ -569,9 +576,9 @@ impl<T> [T] {
             while m > 0 {
                 // `buf.extend(buf)`:
                 unsafe {
-                    ptr::copy_nonoverlapping(
+                    ptr::copy_nonoverlapping::<T>(
                         buf.as_ptr(),
-                        (buf.as_mut_ptr() as *mut T).add(buf.len()),
+                        (buf.as_mut_ptr()).add(buf.len()),
                         buf.len(),
                     );
                     // `buf` has capacity of `self.len() * n`.
@@ -590,9 +597,9 @@ impl<T> [T] {
             // `buf.extend(buf[0 .. rem_len])`:
             unsafe {
                 // This is non-overlapping since `2^expn > rem`.
-                ptr::copy_nonoverlapping(
+                ptr::copy_nonoverlapping::<T>(
                     buf.as_ptr(),
-                    (buf.as_mut_ptr() as *mut T).add(buf.len()),
+                    (buf.as_mut_ptr()).add(buf.len()),
                     rem_len,
                 );
                 // `buf.len() + rem_len` equals to `buf.capacity()` (`= self.len() * n`).
@@ -610,6 +617,7 @@ impl<T> [T] {
     /// assert_eq!(["hello", "world"].concat(), "helloworld");
     /// assert_eq!([[1, 2], [3, 4]].concat(), [1, 2, 3, 4]);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn concat<Item: ?Sized>(&self) -> <Self as Concat<Item>>::Output
     where
@@ -628,6 +636,7 @@ impl<T> [T] {
     /// assert_eq!([[1, 2], [3, 4]].join(&0), [1, 2, 0, 3, 4]);
     /// assert_eq!([[1, 2], [3, 4]].join(&[0, 0][..]), [1, 2, 0, 0, 3, 4]);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rename_connect_to_join", since = "1.3.0")]
     pub fn join<Separator>(&self, sep: Separator) -> <Self as Join<Separator>>::Output
     where
@@ -646,8 +655,9 @@ impl<T> [T] {
     /// assert_eq!(["hello", "world"].connect(" "), "hello world");
     /// assert_eq!([[1, 2], [3, 4]].connect(&0), [1, 2, 0, 3, 4]);
     /// ```
+    #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(since = "1.3.0", reason = "renamed to join")]
+    #[deprecated(since = "1.3.0", note = "renamed to join", suggestion = "join")]
     pub fn connect<Separator>(&self, sep: Separator) -> <Self as Join<Separator>>::Output
     where
         Self: Join<Separator>,
@@ -656,7 +666,6 @@ impl<T> [T] {
     }
 }
 
-#[lang = "slice_u8_alloc"]
 #[cfg(not(test))]
 impl [u8] {
     /// Returns a vector containing a copy of this slice where each byte
@@ -669,6 +678,7 @@ impl [u8] {
     ///
     /// [`make_ascii_uppercase`]: slice::make_ascii_uppercase
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "this returns the uppercase bytes as a new Vec, \
                   without modifying the original"]
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
@@ -689,6 +699,7 @@ impl [u8] {
     ///
     /// [`make_ascii_lowercase`]: slice::make_ascii_lowercase
     #[cfg(not(no_global_oom_handling))]
+    #[rustc_allow_incoherent_impl]
     #[must_use = "this returns the lowercase bytes as a new Vec, \
                   without modifying the original"]
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
@@ -712,7 +723,7 @@ impl [u8] {
 ///
 /// ```error
 /// error[E0207]: the type parameter `T` is not constrained by the impl trait, self type, or predica
-///    --> src/liballoc/slice.rs:608:6
+///    --> library/alloc/src/slice.rs:608:6
 ///     |
 /// 608 | impl<T: Clone, V: Borrow<[T]>> Concat for [V] {
 ///     |      ^ unconstrained type parameter
@@ -823,16 +834,48 @@ impl<T: Clone, V: Borrow<[T]>> Join<&[T]> for [V] {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Borrow<[T]> for Vec<T> {
+impl<T, A: Allocator> Borrow<[T]> for Vec<T, A> {
     fn borrow(&self) -> &[T] {
         &self[..]
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T> BorrowMut<[T]> for Vec<T> {
+impl<T, A: Allocator> BorrowMut<[T]> for Vec<T, A> {
     fn borrow_mut(&mut self) -> &mut [T] {
         &mut self[..]
+    }
+}
+
+// Specializable trait for implementing ToOwned::clone_into. This is
+// public in the crate and has the Allocator parameter so that
+// vec::clone_from use it too.
+#[cfg(not(no_global_oom_handling))]
+pub(crate) trait SpecCloneIntoVec<T, A: Allocator> {
+    fn clone_into(&self, target: &mut Vec<T, A>);
+}
+
+#[cfg(not(no_global_oom_handling))]
+impl<T: Clone, A: Allocator> SpecCloneIntoVec<T, A> for [T] {
+    default fn clone_into(&self, target: &mut Vec<T, A>) {
+        // drop anything in target that will not be overwritten
+        target.truncate(self.len());
+
+        // target.len <= self.len due to the truncate above, so the
+        // slices here are always in-bounds.
+        let (init, tail) = self.split_at(target.len());
+
+        // reuse the contained values' allocations/resources.
+        target.clone_from_slice(init);
+        target.extend_from_slice(tail);
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+impl<T: Copy, A: Allocator> SpecCloneIntoVec<T, A> for [T] {
+    fn clone_into(&self, target: &mut Vec<T, A>) {
+        target.clear();
+        target.extend_from_slice(self);
     }
 }
 
@@ -851,16 +894,7 @@ impl<T: Clone> ToOwned for [T] {
     }
 
     fn clone_into(&self, target: &mut Vec<T>) {
-        // drop anything in target that will not be overwritten
-        target.truncate(self.len());
-
-        // target.len <= self.len due to the truncate above, so the
-        // slices here are always in-bounds.
-        let (init, tail) = self.split_at(target.len());
-
-        // reuse the contained values' allocations/resources.
-        target.clone_from_slice(init);
-        target.extend_from_slice(tail);
+        SpecCloneIntoVec::clone_into(self, target);
     }
 }
 
@@ -868,324 +902,23 @@ impl<T: Clone> ToOwned for [T] {
 // Sorting
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Inserts `v[0]` into pre-sorted sequence `v[1..]` so that whole `v[..]` becomes sorted.
-///
-/// This is the integral subroutine of insertion sort.
+#[inline]
 #[cfg(not(no_global_oom_handling))]
-fn insert_head<T, F>(v: &mut [T], is_less: &mut F)
+fn stable_sort<T, F>(v: &mut [T], mut is_less: F)
 where
     F: FnMut(&T, &T) -> bool,
 {
-    if v.len() >= 2 && is_less(&v[1], &v[0]) {
-        unsafe {
-            // There are three ways to implement insertion here:
-            //
-            // 1. Swap adjacent elements until the first one gets to its final destination.
-            //    However, this way we copy data around more than is necessary. If elements are big
-            //    structures (costly to copy), this method will be slow.
-            //
-            // 2. Iterate until the right place for the first element is found. Then shift the
-            //    elements succeeding it to make room for it and finally place it into the
-            //    remaining hole. This is a good method.
-            //
-            // 3. Copy the first element into a temporary variable. Iterate until the right place
-            //    for it is found. As we go along, copy every traversed element into the slot
-            //    preceding it. Finally, copy data from the temporary variable into the remaining
-            //    hole. This method is very good. Benchmarks demonstrated slightly better
-            //    performance than with the 2nd method.
-            //
-            // All methods were benchmarked, and the 3rd showed best results. So we chose that one.
-            let tmp = mem::ManuallyDrop::new(ptr::read(&v[0]));
-
-            // Intermediate state of the insertion process is always tracked by `hole`, which
-            // serves two purposes:
-            // 1. Protects integrity of `v` from panics in `is_less`.
-            // 2. Fills the remaining hole in `v` in the end.
-            //
-            // Panic safety:
-            //
-            // If `is_less` panics at any point during the process, `hole` will get dropped and
-            // fill the hole in `v` with `tmp`, thus ensuring that `v` still holds every object it
-            // initially held exactly once.
-            let mut hole = InsertionHole { src: &*tmp, dest: &mut v[1] };
-            ptr::copy_nonoverlapping(&v[1], &mut v[0], 1);
-
-            for i in 2..v.len() {
-                if !is_less(&v[i], &*tmp) {
-                    break;
-                }
-                ptr::copy_nonoverlapping(&v[i], &mut v[i - 1], 1);
-                hole.dest = &mut v[i];
-            }
-            // `hole` gets dropped and thus copies `tmp` into the remaining hole in `v`.
-        }
-    }
-
-    // When dropped, copies from `src` into `dest`.
-    struct InsertionHole<T> {
-        src: *const T,
-        dest: *mut T,
-    }
-
-    impl<T> Drop for InsertionHole<T> {
-        fn drop(&mut self) {
-            unsafe {
-                ptr::copy_nonoverlapping(self.src, self.dest, 1);
-            }
-        }
-    }
+    sort::stable::sort::<T, F, Vec<T>>(v, &mut is_less);
 }
 
-/// Merges non-decreasing runs `v[..mid]` and `v[mid..]` using `buf` as temporary storage, and
-/// stores the result into `v[..]`.
-///
-/// # Safety
-///
-/// The two slices must be non-empty and `mid` must be in bounds. Buffer `buf` must be long enough
-/// to hold a copy of the shorter slice. Also, `T` must not be a zero-sized type.
 #[cfg(not(no_global_oom_handling))]
-unsafe fn merge<T, F>(v: &mut [T], mid: usize, buf: *mut T, is_less: &mut F)
-where
-    F: FnMut(&T, &T) -> bool,
-{
-    let len = v.len();
-    let v = v.as_mut_ptr();
-    let (v_mid, v_end) = unsafe { (v.add(mid), v.add(len)) };
-
-    // The merge process first copies the shorter run into `buf`. Then it traces the newly copied
-    // run and the longer run forwards (or backwards), comparing their next unconsumed elements and
-    // copying the lesser (or greater) one into `v`.
-    //
-    // As soon as the shorter run is fully consumed, the process is done. If the longer run gets
-    // consumed first, then we must copy whatever is left of the shorter run into the remaining
-    // hole in `v`.
-    //
-    // Intermediate state of the process is always tracked by `hole`, which serves two purposes:
-    // 1. Protects integrity of `v` from panics in `is_less`.
-    // 2. Fills the remaining hole in `v` if the longer run gets consumed first.
-    //
-    // Panic safety:
-    //
-    // If `is_less` panics at any point during the process, `hole` will get dropped and fill the
-    // hole in `v` with the unconsumed range in `buf`, thus ensuring that `v` still holds every
-    // object it initially held exactly once.
-    let mut hole;
-
-    if mid <= len - mid {
-        // The left run is shorter.
-        unsafe {
-            ptr::copy_nonoverlapping(v, buf, mid);
-            hole = MergeHole { start: buf, end: buf.add(mid), dest: v };
-        }
-
-        // Initially, these pointers point to the beginnings of their arrays.
-        let left = &mut hole.start;
-        let mut right = v_mid;
-        let out = &mut hole.dest;
-
-        while *left < hole.end && right < v_end {
-            // Consume the lesser side.
-            // If equal, prefer the left run to maintain stability.
-            unsafe {
-                let to_copy = if is_less(&*right, &**left) {
-                    get_and_increment(&mut right)
-                } else {
-                    get_and_increment(left)
-                };
-                ptr::copy_nonoverlapping(to_copy, get_and_increment(out), 1);
-            }
-        }
-    } else {
-        // The right run is shorter.
-        unsafe {
-            ptr::copy_nonoverlapping(v_mid, buf, len - mid);
-            hole = MergeHole { start: buf, end: buf.add(len - mid), dest: v_mid };
-        }
-
-        // Initially, these pointers point past the ends of their arrays.
-        let left = &mut hole.dest;
-        let right = &mut hole.end;
-        let mut out = v_end;
-
-        while v < *left && buf < *right {
-            // Consume the greater side.
-            // If equal, prefer the right run to maintain stability.
-            unsafe {
-                let to_copy = if is_less(&*right.offset(-1), &*left.offset(-1)) {
-                    decrement_and_get(left)
-                } else {
-                    decrement_and_get(right)
-                };
-                ptr::copy_nonoverlapping(to_copy, decrement_and_get(&mut out), 1);
-            }
-        }
-    }
-    // Finally, `hole` gets dropped. If the shorter run was not fully consumed, whatever remains of
-    // it will now be copied into the hole in `v`.
-
-    unsafe fn get_and_increment<T>(ptr: &mut *mut T) -> *mut T {
-        let old = *ptr;
-        *ptr = unsafe { ptr.offset(1) };
-        old
+#[unstable(issue = "none", feature = "std_internals")]
+impl<T> sort::stable::BufGuard<T> for Vec<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        Vec::with_capacity(capacity)
     }
 
-    unsafe fn decrement_and_get<T>(ptr: &mut *mut T) -> *mut T {
-        *ptr = unsafe { ptr.offset(-1) };
-        *ptr
-    }
-
-    // When dropped, copies the range `start..end` into `dest..`.
-    struct MergeHole<T> {
-        start: *mut T,
-        end: *mut T,
-        dest: *mut T,
-    }
-
-    impl<T> Drop for MergeHole<T> {
-        fn drop(&mut self) {
-            // `T` is not a zero-sized type, so it's okay to divide by its size.
-            let len = (self.end as usize - self.start as usize) / mem::size_of::<T>();
-            unsafe {
-                ptr::copy_nonoverlapping(self.start, self.dest, len);
-            }
-        }
-    }
-}
-
-/// This merge sort borrows some (but not all) ideas from TimSort, which is described in detail
-/// [here](https://github.com/python/cpython/blob/main/Objects/listsort.txt).
-///
-/// The algorithm identifies strictly descending and non-descending subsequences, which are called
-/// natural runs. There is a stack of pending runs yet to be merged. Each newly found run is pushed
-/// onto the stack, and then some pairs of adjacent runs are merged until these two invariants are
-/// satisfied:
-///
-/// 1. for every `i` in `1..runs.len()`: `runs[i - 1].len > runs[i].len`
-/// 2. for every `i` in `2..runs.len()`: `runs[i - 2].len > runs[i - 1].len + runs[i].len`
-///
-/// The invariants ensure that the total running time is *O*(*n* \* log(*n*)) worst-case.
-#[cfg(not(no_global_oom_handling))]
-fn merge_sort<T, F>(v: &mut [T], mut is_less: F)
-where
-    F: FnMut(&T, &T) -> bool,
-{
-    // Slices of up to this length get sorted using insertion sort.
-    const MAX_INSERTION: usize = 20;
-    // Very short runs are extended using insertion sort to span at least this many elements.
-    const MIN_RUN: usize = 10;
-
-    // Sorting has no meaningful behavior on zero-sized types.
-    if size_of::<T>() == 0 {
-        return;
-    }
-
-    let len = v.len();
-
-    // Short arrays get sorted in-place via insertion sort to avoid allocations.
-    if len <= MAX_INSERTION {
-        if len >= 2 {
-            for i in (0..len - 1).rev() {
-                insert_head(&mut v[i..], &mut is_less);
-            }
-        }
-        return;
-    }
-
-    // Allocate a buffer to use as scratch memory. We keep the length 0 so we can keep in it
-    // shallow copies of the contents of `v` without risking the dtors running on copies if
-    // `is_less` panics. When merging two sorted runs, this buffer holds a copy of the shorter run,
-    // which will always have length at most `len / 2`.
-    let mut buf = Vec::with_capacity(len / 2);
-
-    // In order to identify natural runs in `v`, we traverse it backwards. That might seem like a
-    // strange decision, but consider the fact that merges more often go in the opposite direction
-    // (forwards). According to benchmarks, merging forwards is slightly faster than merging
-    // backwards. To conclude, identifying runs by traversing backwards improves performance.
-    let mut runs = vec![];
-    let mut end = len;
-    while end > 0 {
-        // Find the next natural run, and reverse it if it's strictly descending.
-        let mut start = end - 1;
-        if start > 0 {
-            start -= 1;
-            unsafe {
-                if is_less(v.get_unchecked(start + 1), v.get_unchecked(start)) {
-                    while start > 0 && is_less(v.get_unchecked(start), v.get_unchecked(start - 1)) {
-                        start -= 1;
-                    }
-                    v[start..end].reverse();
-                } else {
-                    while start > 0 && !is_less(v.get_unchecked(start), v.get_unchecked(start - 1))
-                    {
-                        start -= 1;
-                    }
-                }
-            }
-        }
-
-        // Insert some more elements into the run if it's too short. Insertion sort is faster than
-        // merge sort on short sequences, so this significantly improves performance.
-        while start > 0 && end - start < MIN_RUN {
-            start -= 1;
-            insert_head(&mut v[start..end], &mut is_less);
-        }
-
-        // Push this run onto the stack.
-        runs.push(Run { start, len: end - start });
-        end = start;
-
-        // Merge some pairs of adjacent runs to satisfy the invariants.
-        while let Some(r) = collapse(&runs) {
-            let left = runs[r + 1];
-            let right = runs[r];
-            unsafe {
-                merge(
-                    &mut v[left.start..right.start + right.len],
-                    left.len,
-                    buf.as_mut_ptr(),
-                    &mut is_less,
-                );
-            }
-            runs[r] = Run { start: left.start, len: left.len + right.len };
-            runs.remove(r + 1);
-        }
-    }
-
-    // Finally, exactly one run must remain in the stack.
-    debug_assert!(runs.len() == 1 && runs[0].start == 0 && runs[0].len == len);
-
-    // Examines the stack of runs and identifies the next pair of runs to merge. More specifically,
-    // if `Some(r)` is returned, that means `runs[r]` and `runs[r + 1]` must be merged next. If the
-    // algorithm should continue building a new run instead, `None` is returned.
-    //
-    // TimSort is infamous for its buggy implementations, as described here:
-    // http://envisage-project.eu/timsort-specification-and-verification/
-    //
-    // The gist of the story is: we must enforce the invariants on the top four runs on the stack.
-    // Enforcing them on just top three is not sufficient to ensure that the invariants will still
-    // hold for *all* runs in the stack.
-    //
-    // This function correctly checks invariants for the top four runs. Additionally, if the top
-    // run starts at index 0, it will always demand a merge operation until the stack is fully
-    // collapsed, in order to complete the sort.
-    #[inline]
-    fn collapse(runs: &[Run]) -> Option<usize> {
-        let n = runs.len();
-        if n >= 2
-            && (runs[n - 1].start == 0
-                || runs[n - 2].len <= runs[n - 1].len
-                || (n >= 3 && runs[n - 3].len <= runs[n - 2].len + runs[n - 1].len)
-                || (n >= 4 && runs[n - 4].len <= runs[n - 3].len + runs[n - 2].len))
-        {
-            if n >= 3 && runs[n - 3].len < runs[n - 1].len { Some(n - 3) } else { Some(n - 2) }
-        } else {
-            None
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    struct Run {
-        start: usize,
-        len: usize,
+    fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        self.spare_capacity_mut()
     }
 }

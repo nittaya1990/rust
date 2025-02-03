@@ -1,142 +1,155 @@
-use std::convert::TryFrom;
-
-use rustc_middle::mir::interpret::{InterpResult, Pointer, PointerArithmetic};
-use rustc_middle::ty::{
-    self, Ty, COMMON_VTABLE_ENTRIES, COMMON_VTABLE_ENTRIES_ALIGN,
-    COMMON_VTABLE_ENTRIES_DROPINPLACE, COMMON_VTABLE_ENTRIES_SIZE,
-};
-use rustc_target::abi::{Align, Size};
+use rustc_abi::{Align, Size};
+use rustc_middle::mir::interpret::{InterpResult, Pointer};
+use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::{self, ExistentialPredicateStableCmpExt, Ty, TyCtxt, VtblEntry};
+use tracing::trace;
 
 use super::util::ensure_monomorphic_enough;
-use super::{FnVal, InterpCx, Machine};
+use super::{
+    InterpCx, MPlaceTy, Machine, MemPlaceMeta, OffsetMode, Projectable, interp_ok, throw_ub,
+};
 
-impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
+impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     /// Creates a dynamic vtable for the given type and vtable origin. This is used only for
     /// objects.
     ///
-    /// The `trait_ref` encodes the erased self type. Hence, if we are
-    /// making an object `Foo<Trait>` from a value of type `Foo<T>`, then
-    /// `trait_ref` would map `T: Trait`.
-    pub fn get_vtable(
-        &mut self,
+    /// The `dyn_ty` encodes the erased self type. Hence, if we are making an object
+    /// `Foo<dyn Trait<Assoc = A> + Send>` from a value of type `Foo<T>`, then `dyn_ty`
+    /// would be `Trait<Assoc = A> + Send`. If this list doesn't have a principal trait ref,
+    /// we only need the basic vtable prefix (drop, size, align).
+    pub fn get_vtable_ptr(
+        &self,
         ty: Ty<'tcx>,
-        poly_trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>,
-    ) -> InterpResult<'tcx, Pointer<Option<M::PointerTag>>> {
-        trace!("get_vtable(trait_ref={:?})", poly_trait_ref);
+        dyn_ty: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
+    ) -> InterpResult<'tcx, Pointer<Option<M::Provenance>>> {
+        trace!("get_vtable(ty={ty:?}, dyn_ty={dyn_ty:?})");
 
-        let (ty, poly_trait_ref) = self.tcx.erase_regions((ty, poly_trait_ref));
+        let (ty, dyn_ty) = self.tcx.erase_regions((ty, dyn_ty));
 
         // All vtables must be monomorphic, bail out otherwise.
         ensure_monomorphic_enough(*self.tcx, ty)?;
-        ensure_monomorphic_enough(*self.tcx, poly_trait_ref)?;
+        ensure_monomorphic_enough(*self.tcx, dyn_ty)?;
 
-        let vtable_allocation = self.tcx.vtable_allocation((ty, poly_trait_ref));
-
-        let vtable_ptr = self.memory.global_base_pointer(Pointer::from(vtable_allocation))?;
-
-        Ok(vtable_ptr.into())
+        let salt = M::get_global_alloc_salt(self, None);
+        let vtable_symbolic_allocation = self.tcx.reserve_and_set_vtable_alloc(ty, dyn_ty, salt);
+        let vtable_ptr = self.global_root_pointer(Pointer::from(vtable_symbolic_allocation))?;
+        interp_ok(vtable_ptr.into())
     }
 
-    /// Resolves the function at the specified slot in the provided
-    /// vtable. Currently an index of '3' (`COMMON_VTABLE_ENTRIES.len()`)
-    /// corresponds to the first method declared in the trait of the provided vtable.
-    pub fn get_vtable_slot(
+    pub fn get_vtable_size_and_align(
         &self,
-        vtable: Pointer<Option<M::PointerTag>>,
-        idx: u64,
-    ) -> InterpResult<'tcx, FnVal<'tcx, M::ExtraFnVal>> {
-        let ptr_size = self.pointer_size();
-        let vtable_slot = vtable.offset(ptr_size * idx, self)?;
-        let vtable_slot = self
-            .memory
-            .get(vtable_slot, ptr_size, self.tcx.data_layout.pointer_align.abi)?
-            .expect("cannot be a ZST");
-        let fn_ptr = self.scalar_to_ptr(vtable_slot.read_ptr_sized(Size::ZERO)?.check_init()?);
-        self.memory.get_fn(fn_ptr)
-    }
-
-    /// Returns the drop fn instance as well as the actual dynamic type.
-    pub fn read_drop_type_from_vtable(
-        &self,
-        vtable: Pointer<Option<M::PointerTag>>,
-    ) -> InterpResult<'tcx, (ty::Instance<'tcx>, Ty<'tcx>)> {
-        let pointer_size = self.pointer_size();
-        // We don't care about the pointee type; we just want a pointer.
-        let vtable = self
-            .memory
-            .get(
-                vtable,
-                pointer_size * u64::try_from(COMMON_VTABLE_ENTRIES.len()).unwrap(),
-                self.tcx.data_layout.pointer_align.abi,
-            )?
-            .expect("cannot be a ZST");
-        let drop_fn = vtable
-            .read_ptr_sized(
-                pointer_size * u64::try_from(COMMON_VTABLE_ENTRIES_DROPINPLACE).unwrap(),
-            )?
-            .check_init()?;
-        // We *need* an instance here, no other kind of function value, to be able
-        // to determine the type.
-        let drop_instance = self.memory.get_fn(self.scalar_to_ptr(drop_fn))?.as_instance()?;
-        trace!("Found drop fn: {:?}", drop_instance);
-        let fn_sig = drop_instance.ty(*self.tcx, self.param_env).fn_sig(*self.tcx);
-        let fn_sig = self.tcx.normalize_erasing_late_bound_regions(self.param_env, fn_sig);
-        // The drop function takes `*mut T` where `T` is the type being dropped, so get that.
-        let args = fn_sig.inputs();
-        if args.len() != 1 {
-            throw_ub!(InvalidVtableDropFn(fn_sig));
-        }
-        let ty =
-            args[0].builtin_deref(true).ok_or_else(|| err_ub!(InvalidVtableDropFn(fn_sig)))?.ty;
-        Ok((drop_instance, ty))
-    }
-
-    pub fn read_size_and_align_from_vtable(
-        &self,
-        vtable: Pointer<Option<M::PointerTag>>,
+        vtable: Pointer<Option<M::Provenance>>,
+        expected_trait: Option<&'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>>,
     ) -> InterpResult<'tcx, (Size, Align)> {
-        let pointer_size = self.pointer_size();
-        // We check for `size = 3 * ptr_size`, which covers the drop fn (unused here),
-        // the size, and the align (which we read below).
-        let vtable = self
-            .memory
-            .get(
-                vtable,
-                pointer_size * u64::try_from(COMMON_VTABLE_ENTRIES.len()).unwrap(),
-                self.tcx.data_layout.pointer_align.abi,
-            )?
-            .expect("cannot be a ZST");
-        let size = vtable
-            .read_ptr_sized(pointer_size * u64::try_from(COMMON_VTABLE_ENTRIES_SIZE).unwrap())?
-            .check_init()?;
-        let size = size.to_machine_usize(self)?;
-        let align = vtable
-            .read_ptr_sized(pointer_size * u64::try_from(COMMON_VTABLE_ENTRIES_ALIGN).unwrap())?
-            .check_init()?;
-        let align = align.to_machine_usize(self)?;
-        let align = Align::from_bytes(align).map_err(|e| err_ub!(InvalidVtableAlignment(e)))?;
-
-        if size >= self.tcx.data_layout.obj_size_bound() {
-            throw_ub!(InvalidVtableSize);
-        }
-        Ok((Size::from_bytes(size), align))
+        let ty = self.get_ptr_vtable_ty(vtable, expected_trait)?;
+        let layout = self.layout_of(ty)?;
+        assert!(layout.is_sized(), "there are no vtables for unsized types");
+        interp_ok((layout.size, layout.align.abi))
     }
 
-    pub fn read_new_vtable_after_trait_upcasting_from_vtable(
+    pub(super) fn vtable_entries(
         &self,
-        vtable: Pointer<Option<M::PointerTag>>,
-        idx: u64,
-    ) -> InterpResult<'tcx, Pointer<Option<M::PointerTag>>> {
-        let pointer_size = self.pointer_size();
+        trait_: Option<ty::PolyExistentialTraitRef<'tcx>>,
+        dyn_ty: Ty<'tcx>,
+    ) -> &'tcx [VtblEntry<'tcx>] {
+        if let Some(trait_) = trait_ {
+            let trait_ref = trait_.with_self_ty(*self.tcx, dyn_ty);
+            let trait_ref =
+                self.tcx.erase_regions(self.tcx.instantiate_bound_regions_with_erased(trait_ref));
+            self.tcx.vtable_entries(trait_ref)
+        } else {
+            TyCtxt::COMMON_VTABLE_ENTRIES
+        }
+    }
 
-        let vtable_slot = vtable.offset(pointer_size * idx, self)?;
-        let new_vtable = self
-            .memory
-            .get(vtable_slot, pointer_size, self.tcx.data_layout.pointer_align.abi)?
-            .expect("cannot be a ZST");
+    /// Check that the given vtable trait is valid for a pointer/reference/place with the given
+    /// expected trait type.
+    pub(super) fn check_vtable_for_type(
+        &self,
+        vtable_dyn_type: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
+        expected_dyn_type: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
+    ) -> InterpResult<'tcx> {
+        // We check validity by comparing the lists of predicates for equality. We *could* instead
+        // check that the dynamic type to which the vtable belongs satisfies all the expected
+        // predicates, but that would likely be a lot slower and seems unnecessarily permissive.
 
-        let new_vtable = self.scalar_to_ptr(new_vtable.read_ptr_sized(Size::ZERO)?.check_init()?);
+        // FIXME: we are skipping auto traits for now, but might revisit this in the future.
+        let mut sorted_vtable: Vec<_> = vtable_dyn_type.without_auto_traits().collect();
+        let mut sorted_expected: Vec<_> = expected_dyn_type.without_auto_traits().collect();
+        // `skip_binder` here is okay because `stable_cmp` doesn't look at binders
+        sorted_vtable.sort_by(|a, b| a.skip_binder().stable_cmp(*self.tcx, &b.skip_binder()));
+        sorted_vtable.dedup();
+        sorted_expected.sort_by(|a, b| a.skip_binder().stable_cmp(*self.tcx, &b.skip_binder()));
+        sorted_expected.dedup();
 
-        Ok(new_vtable)
+        if sorted_vtable.len() != sorted_expected.len() {
+            throw_ub!(InvalidVTableTrait { vtable_dyn_type, expected_dyn_type });
+        }
+
+        for (a_pred, b_pred) in std::iter::zip(sorted_vtable, sorted_expected) {
+            let is_eq = match (a_pred.skip_binder(), b_pred.skip_binder()) {
+                (
+                    ty::ExistentialPredicate::Trait(a_data),
+                    ty::ExistentialPredicate::Trait(b_data),
+                ) => self.eq_in_param_env(a_pred.rebind(a_data), b_pred.rebind(b_data)),
+
+                (
+                    ty::ExistentialPredicate::Projection(a_data),
+                    ty::ExistentialPredicate::Projection(b_data),
+                ) => self.eq_in_param_env(a_pred.rebind(a_data), b_pred.rebind(b_data)),
+
+                _ => false,
+            };
+            if !is_eq {
+                throw_ub!(InvalidVTableTrait { vtable_dyn_type, expected_dyn_type });
+            }
+        }
+
+        interp_ok(())
+    }
+
+    /// Turn a place with a `dyn Trait` type into a place with the actual dynamic type.
+    pub(super) fn unpack_dyn_trait(
+        &self,
+        mplace: &MPlaceTy<'tcx, M::Provenance>,
+        expected_trait: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
+    ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::Provenance>> {
+        assert!(
+            matches!(mplace.layout.ty.kind(), ty::Dynamic(_, _, ty::Dyn)),
+            "`unpack_dyn_trait` only makes sense on `dyn*` types"
+        );
+        let vtable = mplace.meta().unwrap_meta().to_pointer(self)?;
+        let ty = self.get_ptr_vtable_ty(vtable, Some(expected_trait))?;
+        // This is a kind of transmute, from a place with unsized type and metadata to
+        // a place with sized type and no metadata.
+        let layout = self.layout_of(ty)?;
+        let mplace = mplace.offset_with_meta(
+            Size::ZERO,
+            OffsetMode::Wrapping,
+            MemPlaceMeta::None,
+            layout,
+            self,
+        )?;
+        interp_ok(mplace)
+    }
+
+    /// Turn a `dyn* Trait` type into an value with the actual dynamic type.
+    pub(super) fn unpack_dyn_star<P: Projectable<'tcx, M::Provenance>>(
+        &self,
+        val: &P,
+        expected_trait: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
+    ) -> InterpResult<'tcx, P> {
+        assert!(
+            matches!(val.layout().ty.kind(), ty::Dynamic(_, _, ty::DynStar)),
+            "`unpack_dyn_star` only makes sense on `dyn*` types"
+        );
+        let data = self.project_field(val, 0)?;
+        let vtable = self.project_field(val, 1)?;
+        let vtable = self.read_pointer(&vtable.to_op(self)?)?;
+        let ty = self.get_ptr_vtable_ty(vtable, Some(expected_trait))?;
+        // `data` is already the right thing but has the wrong type. So we transmute it.
+        let layout = self.layout_of(ty)?;
+        let data = data.transmute(layout, self)?;
+        interp_ok(data)
     }
 }

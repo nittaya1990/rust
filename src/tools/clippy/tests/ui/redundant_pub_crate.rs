@@ -1,4 +1,4 @@
-// run-rustfix
+//@aux-build:proc_macros.rs
 #![allow(dead_code)]
 #![warn(clippy::redundant_pub_crate)]
 
@@ -14,7 +14,7 @@ mod m1 {
     }
 
     pub(crate) mod m1_2 {
-        // ^ private due to m1
+        //:^ private due to m1
         fn f() {}
         pub(crate) fn g() {} // private due to m1_2 and m1
         pub fn h() {}
@@ -39,7 +39,7 @@ pub(crate) mod m2 {
     }
 
     pub(crate) mod m2_2 {
-        // ^ already crate visible due to m2
+        //:^ already crate visible due to m2
         fn f() {}
         pub(crate) fn g() {} // already crate visible due to m2_2 and m2
         pub fn h() {}
@@ -64,7 +64,7 @@ pub mod m3 {
     }
 
     pub(crate) mod m3_2 {
-        // ^ ok
+        //:^ ok
         fn f() {}
         pub(crate) fn g() {} // already crate visible due to m3_2
         pub fn h() {}
@@ -89,7 +89,7 @@ mod m4 {
     }
 
     pub(crate) mod m4_2 {
-        // ^ private: not re-exported by `pub use m4::*`
+        //:^ private: not re-exported by `pub use m4::*`
         fn f() {}
         pub(crate) fn g() {} // private due to m4_2
         pub fn h() {}
@@ -103,5 +103,21 @@ mod m4 {
 }
 
 pub use m4::*;
+
+mod issue_8732 {
+    #[allow(unused_macros)]
+    macro_rules! some_macro {
+        () => {};
+    }
+
+    #[allow(unused_imports)]
+    pub(crate) use some_macro; // ok: macro exports are exempt
+}
+
+proc_macros::external! {
+    mod priv_mod {
+        pub(crate) fn dummy() {}
+    }
+}
 
 fn main() {}

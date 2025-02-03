@@ -1,5 +1,7 @@
 use crate::fmt;
-use crate::iter::{adapters::SourceIter, InPlaceIterable};
+use crate::iter::InPlaceIterable;
+use crate::iter::adapters::SourceIter;
+use crate::num::NonZero;
 use crate::ops::{ControlFlow, Try};
 
 /// An iterator to maintain state while iterating another iterator.
@@ -74,19 +76,7 @@ where
         self.iter.try_fold(init, scan(state, f, fold)).into_try()
     }
 
-    #[inline]
-    fn fold<Acc, Fold>(mut self, init: Acc, fold: Fold) -> Acc
-    where
-        Self: Sized,
-        Fold: FnMut(Acc, Self::Item) -> Acc,
-    {
-        #[inline]
-        fn ok<B, T>(mut f: impl FnMut(B, T) -> B) -> impl FnMut(B, T) -> Result<B, !> {
-            move |acc, x| Ok(f(acc, x))
-        }
-
-        self.try_fold(init, ok(fold)).unwrap()
-    }
+    impl_fold_via_try_fold! { fold -> try_fold }
 }
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
@@ -104,7 +94,7 @@ where
 }
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
-unsafe impl<St, F, B, I: InPlaceIterable> InPlaceIterable for Scan<I, St, F> where
-    F: FnMut(&mut St, I::Item) -> Option<B>
-{
+unsafe impl<St, F, I: InPlaceIterable> InPlaceIterable for Scan<I, St, F> {
+    const EXPAND_BY: Option<NonZero<usize>> = I::EXPAND_BY;
+    const MERGE_BY: Option<NonZero<usize>> = I::MERGE_BY;
 }

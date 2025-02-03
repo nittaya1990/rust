@@ -5,20 +5,29 @@ mod unused_self {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
-    struct A {}
+    struct A;
 
     impl A {
         fn unused_self_move(self) {}
+        //~^ ERROR: unused `self` argument
         fn unused_self_ref(&self) {}
+        //~^ ERROR: unused `self` argument
         fn unused_self_mut_ref(&mut self) {}
+        //~^ ERROR: unused `self` argument
         fn unused_self_pin_ref(self: Pin<&Self>) {}
+        //~^ ERROR: unused `self` argument
         fn unused_self_pin_mut_ref(self: Pin<&mut Self>) {}
+        //~^ ERROR: unused `self` argument
         fn unused_self_pin_nested(self: Pin<Arc<Self>>) {}
+        //~^ ERROR: unused `self` argument
         fn unused_self_box(self: Box<Self>) {}
+        //~^ ERROR: unused `self` argument
         fn unused_with_other_used_args(&self, x: u8, y: u8) -> u8 {
+            //~^ ERROR: unused `self` argument
             x + y
         }
         fn unused_self_class_method(&self) {
+            //~^ ERROR: unused `self` argument
             Self::static_method();
         }
 
@@ -27,7 +36,7 @@ mod unused_self {
 }
 
 mod unused_self_allow {
-    struct A {}
+    struct A;
 
     impl A {
         // shouldn't trigger
@@ -35,7 +44,7 @@ mod unused_self_allow {
         fn unused_self_move(self) {}
     }
 
-    struct B {}
+    struct B;
 
     // shouldn't trigger
     #[allow(clippy::unused_self)]
@@ -43,7 +52,7 @@ mod unused_self_allow {
         fn unused_self_move(self) {}
     }
 
-    struct C {}
+    struct C;
 
     #[allow(clippy::unused_self)]
     impl C {
@@ -53,7 +62,26 @@ mod unused_self_allow {
         // shouldn't trigger
         fn unused_self_move(self) {}
     }
+
+    pub struct D;
+
+    impl D {
+        // shouldn't trigger for public methods
+        pub fn unused_self_move(self) {}
+    }
+
+    pub struct E;
+
+    impl E {
+        // shouldn't trigger if body contains todo!()
+        pub fn unused_self_todo(self) {
+            let x = 42;
+            todo!()
+        }
+    }
 }
+
+pub use unused_self_allow::D;
 
 mod used_self {
     use std::pin::Pin;
@@ -120,7 +148,7 @@ mod used_self {
 mod not_applicable {
     use std::fmt;
 
-    struct A {}
+    struct A;
 
     impl fmt::Debug for A {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

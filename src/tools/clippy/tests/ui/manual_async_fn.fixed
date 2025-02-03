@@ -1,6 +1,5 @@
-// run-rustfix
 #![warn(clippy::manual_async_fn)]
-#![allow(unused)]
+#![allow(clippy::needless_pub_self, unused)]
 
 use std::future::Future;
 
@@ -38,7 +37,7 @@ async fn already_async() -> impl Future<Output = i32> {
     async { 42 }
 }
 
-struct S {}
+struct S;
 impl S {
     async fn inh_fut() -> i32 {
         // NOTE: this code is here just to check that the indentation is correct in the suggested fix
@@ -80,6 +79,7 @@ fn elided_not_bound(_: &i32) -> impl Future<Output = i32> {
     async { 42 }
 }
 
+#[allow(clippy::needless_lifetimes)]
 async fn explicit<'a, 'b>(_: &'a i32, _: &'b i32) -> i32 { 42 }
 
 // should be ignored
@@ -106,5 +106,11 @@ mod issue_5765 {
         };
     }
 }
+
+pub async fn issue_10450() -> i32 { 42 }
+
+pub(crate) async fn issue_10450_2() -> i32 { 42 }
+
+pub(self) async fn issue_10450_3() -> i32 { 42 }
 
 fn main() {}

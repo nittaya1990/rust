@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,7 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   gdb \
   libssl-dev \
   pkg-config \
-  xz-utils
+  xz-utils \
+  mingw-w64 \
+  zlib1g-dev \
+  libzstd-dev \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
@@ -24,5 +28,6 @@ ENV RUST_CONFIGURE_ARGS \
  --build=x86_64-unknown-linux-gnu \
  --enable-sanitizers \
  --enable-profiler \
- --enable-compiler-docs
+ --enable-compiler-docs \
+ --set llvm.libzstd=true
 ENV SCRIPT python3 ../x.py --stage 2 test

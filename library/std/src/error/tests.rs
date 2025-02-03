@@ -1,3 +1,5 @@
+use core::error::Request;
+
 use super::Error;
 use crate::fmt;
 
@@ -198,8 +200,8 @@ where
         self.source.as_deref()
     }
 
-    fn backtrace(&self) -> Option<&Backtrace> {
-        self.backtrace.as_ref()
+    fn provide<'a>(&'a self, req: &mut Request<'a>) {
+        self.backtrace.as_ref().map(|bt| req.provide_ref::<Backtrace>(bt));
     }
 }
 

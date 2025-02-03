@@ -2,7 +2,7 @@
 //!
 //! - **Type inference.** The type inference code can be found in the `infer` module;
 //!   this code handles low-level equality and subtyping operations. The
-//!   type check pass in the compiler is found in the `rustc_typeck` crate.
+//!   type check pass in the compiler is found in the `rustc_hir_analysis` crate.
 //!
 //! For more information about how rustc works, see the [rustc dev guide].
 //!
@@ -12,29 +12,23 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![allow(rustc::potential_query_instability)]
+// tidy-alphabetical-start
+#![allow(internal_features)]
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(bool_to_option)]
-#![feature(box_patterns)]
-#![feature(control_flow_enum)]
-#![feature(derive_default_enum)]
+#![doc(rust_logo)]
+#![feature(assert_matches)]
 #![feature(extend_one)]
-#![feature(label_break_value)]
+#![feature(iterator_try_collect)]
 #![feature(let_chains)]
-#![feature(let_else)]
-#![feature(min_specialization)]
-#![feature(never_type)]
+#![feature(rustdoc_internals)]
 #![recursion_limit = "512"] // For rustdoc
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate rustc_macros;
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-#[macro_use]
-extern crate rustc_data_structures;
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
-
+mod errors;
 pub mod infer;
 pub mod traits;
+
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

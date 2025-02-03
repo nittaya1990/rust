@@ -1,10 +1,11 @@
 #![warn(clippy::if_same_then_else)]
 #![allow(
-    clippy::blacklisted_name,
+    clippy::disallowed_names,
     clippy::collapsible_else_if,
     clippy::equatable_if_let,
     clippy::collapsible_if,
     clippy::ifs_same_cond,
+    clippy::needless_if,
     clippy::needless_return,
     clippy::single_element_loop,
     clippy::branches_sharing_code
@@ -21,7 +22,6 @@ fn if_same_then_else2() -> Result<&'static str, ()> {
             }
         }
     } else {
-        //~ ERROR same body as `if` block
         for _ in &[42] {
             let bar: &Option<_> = &Some::<u8>(42);
             if bar.is_some() {
@@ -31,20 +31,21 @@ fn if_same_then_else2() -> Result<&'static str, ()> {
             }
         }
     }
+    //~^^^^^^^^^^^^^^^^^^^ ERROR: this `if` has identical blocks
 
     if true {
         if let Some(a) = Some(42) {}
     } else {
-        //~ ERROR same body as `if` block
         if let Some(a) = Some(42) {}
     }
+    //~^^^^^ ERROR: this `if` has identical blocks
 
     if true {
         if let (1, .., 3) = (1, 2, 3) {}
     } else {
-        //~ ERROR same body as `if` block
         if let (1, .., 3) = (1, 2, 3) {}
     }
+    //~^^^^^ ERROR: this `if` has identical blocks
 
     if true {
         if let (1, .., 3) = (1, 2, 3) {}
@@ -89,19 +90,15 @@ fn if_same_then_else2() -> Result<&'static str, ()> {
     }
 
     // Same NaNs
-    let _ = if true {
-        f32::NAN
-    } else {
-        //~ ERROR same body as `if` block
-        f32::NAN
-    };
+    let _ = if true { f32::NAN } else { f32::NAN };
+    //~^ ERROR: this `if` has identical blocks
 
     if true {
         Ok("foo")?;
     } else {
-        //~ ERROR same body as `if` block
         Ok("foo")?;
     }
+    //~^^^^^ ERROR: this `if` has identical blocks
 
     if true {
         let foo = "";
@@ -127,6 +124,7 @@ fn if_same_then_else2() -> Result<&'static str, ()> {
         let foo = "";
         return Ok(&foo[0..]);
     }
+    //~^^^^^^^ ERROR: this `if` has identical blocks
 
     // False positive `if_same_then_else`: `let (x, y)` vs. `let (y, x)`; see issue #3559.
     if true {

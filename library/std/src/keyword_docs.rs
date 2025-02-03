@@ -48,7 +48,7 @@ mod as_keyword {}
 
 #[doc(keyword = "break")]
 //
-/// Exit early from a loop.
+/// Exit early from a loop or labelled block.
 ///
 /// When `break` is encountered, execution of the associated loop body is
 /// immediately terminated.
@@ -70,7 +70,7 @@ mod as_keyword {}
 /// A break expression is normally associated with the innermost loop enclosing the
 /// `break` but a label can be used to specify which enclosing loop is affected.
 ///
-///```rust
+/// ```rust
 /// 'outer: for i in 1..=5 {
 ///     println!("outer iteration (i): {i}");
 ///
@@ -87,7 +87,7 @@ mod as_keyword {}
 ///     }
 /// }
 /// println!("Bye.");
-///```
+/// ```
 ///
 /// When associated with `loop`, a break expression may be used to return a value from that loop.
 /// This is only valid with `loop` and not with any other type of loop.
@@ -155,7 +155,7 @@ mod break_keyword {}
 /// const WORDS: &str = "hello convenience!";
 /// ```
 ///
-/// `const` items looks remarkably similar to `static` items, which introduces some confusion as
+/// `const` items look remarkably similar to `static` items, which introduces some confusion as
 /// to which one should be used at which times. To put it simply, constants are inlined wherever
 /// they're used, making using them identical to simply replacing the name of the `const` with its
 /// value. Static variables, on the other hand, point to a single location in memory, which all
@@ -194,7 +194,7 @@ mod const_keyword {}
 /// When `continue` is encountered, the current iteration is terminated, returning control to the
 /// loop head, typically continuing with the next iteration.
 ///
-///```rust
+/// ```rust
 /// // Printing odd numbers by skipping even ones
 /// for number in 1..=10 {
 ///     if number % 2 == 0 {
@@ -202,12 +202,12 @@ mod const_keyword {}
 ///     }
 ///     println!("{number}");
 /// }
-///```
+/// ```
 ///
 /// Like `break`, `continue` is normally associated with the innermost enclosing loop, but labels
 /// may be used to specify the affected loop.
 ///
-///```rust
+/// ```rust
 /// // Print Odd numbers under 30 with unit <= 5
 /// 'tens: for ten in 0..3 {
 ///     '_units: for unit in 0..=9 {
@@ -220,7 +220,7 @@ mod const_keyword {}
 ///         println!("{}", ten * 10 + unit);
 ///     }
 /// }
-///```
+/// ```
 ///
 /// See [continue expressions] from the reference for more details.
 ///
@@ -728,6 +728,20 @@ mod impl_keyword {}
 /// [`IntoIterator`]: ../book/ch13-04-performance.html
 /// [range patterns]: ../reference/patterns.html?highlight=range#range-patterns
 /// [`for`]: keyword.for.html
+///
+/// The other use of `in` is with the keyword `pub`. It allows users to declare an item as visible
+/// only within a given scope.
+///
+/// ## Literal Example:
+///
+///    * `pub(in crate::outer_mod) fn outer_mod_visible_fn() {}` - fn is visible in `outer_mod`
+///
+/// Starting with the 2018 edition, paths for `pub(in path)` must start with `crate`, `self` or
+/// `super`. The 2015 edition may also use paths starting with `::` or modules from the crate root.
+///
+/// For more information, see the [Reference].
+///
+/// [Reference]: ../reference/visibility-and-privacy.html#pubin-path-pubcrate-pubsuper-and-pubself
 mod in_keyword {}
 
 #[doc(keyword = "let")]
@@ -792,64 +806,6 @@ mod in_keyword {}
 /// [book2]: ../book/ch18-01-all-the-places-for-patterns.html#let-statements
 /// [Reference]: ../reference/statements.html#let-statements
 mod let_keyword {}
-
-#[doc(keyword = "while")]
-//
-/// Loop while a condition is upheld.
-///
-/// A `while` expression is used for predicate loops. The `while` expression runs the conditional
-/// expression before running the loop body, then runs the loop body if the conditional
-/// expression evaluates to `true`, or exits the loop otherwise.
-///
-/// ```rust
-/// let mut counter = 0;
-///
-/// while counter < 10 {
-///     println!("{counter}");
-///     counter += 1;
-/// }
-/// ```
-///
-/// Like the [`for`] expression, we can use `break` and `continue`. A `while` expression
-/// cannot break with a value and always evaluates to `()` unlike [`loop`].
-///
-/// ```rust
-/// let mut i = 1;
-///
-/// while i < 100 {
-///     i *= 2;
-///     if i == 64 {
-///         break; // Exit when `i` is 64.
-///     }
-/// }
-/// ```
-///
-/// As `if` expressions have their pattern matching variant in `if let`, so too do `while`
-/// expressions with `while let`. The `while let` expression matches the pattern against the
-/// expression, then runs the loop body if pattern matching succeeds, or exits the loop otherwise.
-/// We can use `break` and `continue` in `while let` expressions just like in `while`.
-///
-/// ```rust
-/// let mut counter = Some(0);
-///
-/// while let Some(i) = counter {
-///     if i == 10 {
-///         counter = None;
-///     } else {
-///         println!("{i}");
-///         counter = Some (i + 1);
-///     }
-/// }
-/// ```
-///
-/// For more information on `while` and loops in general, see the [reference].
-///
-/// See also, [`for`], [`loop`].
-///
-/// [`for`]: keyword.for.html
-/// [`loop`]: keyword.loop.html
-/// [reference]: ../reference/expressions/loop-expr.html#predicate-loops
-mod while_keyword {}
 
 #[doc(keyword = "loop")]
 //
@@ -1161,7 +1117,7 @@ mod ref_keyword {}
 
 #[doc(keyword = "return")]
 //
-/// Return a value from a function.
+/// Returns a value from a function.
 ///
 /// A `return` marks the end of an execution path in a function:
 ///
@@ -1307,10 +1263,10 @@ mod return_keyword {}
 /// [Reference]: ../reference/items/associated-items.html#methods
 mod self_keyword {}
 
-// FIXME: Once rustdoc can handle URL conflicts on case insensitive file systems, we can remove the
-// three next lines and put back: `#[doc(keyword = "Self")]`.
+// FIXME: Once rustdoc can handle URL conflicts on case insensitive file systems, we can replace
+// these two lines with `#[doc(keyword = "Self")]` and update `is_doc_keyword` in
+// `CheckAttrVisitor`.
 #[doc(alias = "Self")]
-#[allow(rustc::existing_doc_keyword)]
 #[doc(keyword = "SelfTy")]
 //
 /// The implementing type within a [`trait`] or [`impl`] block, or the current type within a type
@@ -1434,6 +1390,9 @@ mod self_upper_keyword {}
 /// in a multithreaded context. As such, all accesses to mutable `static`s
 /// require an [`unsafe`] block.
 ///
+/// When possible, it's often better to use a non-mutable `static` with an
+/// interior mutable type such as [`Mutex`], [`OnceLock`], or an [atomic].
+///
 /// Despite their unsafety, mutable `static`s are necessary in many contexts:
 /// they can be used to represent global state shared by the whole program or in
 /// [`extern`] blocks to bind to variables from C libraries.
@@ -1454,7 +1413,10 @@ mod self_upper_keyword {}
 /// [`extern`]: keyword.extern.html
 /// [`mut`]: keyword.mut.html
 /// [`unsafe`]: keyword.unsafe.html
+/// [`Mutex`]: sync::Mutex
+/// [`OnceLock`]: sync::OnceLock
 /// [`RefCell`]: cell::RefCell
+/// [atomic]: sync::atomic
 /// [Reference]: ../reference/items/static-items.html
 mod static_keyword {}
 
@@ -1554,7 +1516,7 @@ mod static_keyword {}
 ///
 /// # Style conventions
 ///
-/// Structs are always written in CamelCase, with few exceptions. While the trailing comma on a
+/// Structs are always written in UpperCamelCase, with few exceptions. While the trailing comma on a
 /// struct's list of fields can be omitted, it's usually kept for convenience in adding and
 /// removing fields down the line.
 ///
@@ -1664,7 +1626,7 @@ mod super_keyword {}
 /// below `Iterator` is a **supertrait** and `ThreeIterator` is a **subtrait**:
 ///
 /// ```rust
-/// trait ThreeIterator: std::iter::Iterator {
+/// trait ThreeIterator: Iterator {
 ///     fn next_three(&mut self) -> Option<[Self::Item; 3]>;
 /// }
 /// ```
@@ -1806,7 +1768,7 @@ mod true_keyword {}
 
 #[doc(keyword = "type")]
 //
-/// Define an alias for an existing type.
+/// Define an [alias] for an existing type.
 ///
 /// The syntax is `type Name = ExistingType;`.
 ///
@@ -1822,6 +1784,13 @@ mod true_keyword {}
 /// let k: Kilograms = 3;
 ///
 /// assert_eq!(m, k);
+/// ```
+///
+/// A type can be generic:
+///
+/// ```rust
+/// # use std::sync::{Arc, Mutex};
+/// type ArcMutex<T> = Arc<Mutex<T>>;
 /// ```
 ///
 /// In traits, `type` is used to declare an [associated type]:
@@ -1846,6 +1815,7 @@ mod true_keyword {}
 ///
 /// [`trait`]: keyword.trait.html
 /// [associated type]: ../reference/items/associated-items.html#associated-types
+/// [alias]: ../reference/items/type-aliases.html
 mod type_keyword {}
 
 #[doc(keyword = "unsafe")]
@@ -1853,11 +1823,15 @@ mod type_keyword {}
 /// Code or interfaces whose [memory safety] cannot be verified by the type
 /// system.
 ///
-/// The `unsafe` keyword has two uses: to declare the existence of contracts the
-/// compiler can't check (`unsafe fn` and `unsafe trait`), and to declare that a
-/// programmer has checked that these contracts have been upheld (`unsafe {}`
-/// and `unsafe impl`, but also `unsafe fn` -- see below). They are not mutually
-/// exclusive, as can be seen in `unsafe fn`.
+/// The `unsafe` keyword has two uses:
+/// - to declare the existence of contracts the compiler can't check (`unsafe fn` and `unsafe
+/// trait`),
+/// - and to declare that a programmer has checked that these contracts have been upheld (`unsafe
+/// {}` and `unsafe impl`, but also `unsafe fn` -- see below).
+///
+/// They are not mutually exclusive, as can be seen in `unsafe fn`: the body of an `unsafe fn` is,
+/// by default, treated like an unsafe block. The `unsafe_op_in_unsafe_fn` lint can be enabled to
+/// change that.
 ///
 /// # Unsafe abilities
 ///
@@ -1900,14 +1874,14 @@ mod type_keyword {}
 /// - `unsafe impl`: the contract necessary to implement the trait has been
 /// checked by the programmer and is guaranteed to be respected.
 ///
-/// `unsafe fn` also acts like an `unsafe {}` block
+/// By default, `unsafe fn` also acts like an `unsafe {}` block
 /// around the code inside the function. This means it is not just a signal to
 /// the caller, but also promises that the preconditions for the operations
-/// inside the function are upheld. Mixing these two meanings can be confusing
-/// and [proposal]s exist to use `unsafe {}` blocks inside such functions when
-/// making `unsafe` operations.
+/// inside the function are upheld. Mixing these two meanings can be confusing, so the
+/// `unsafe_op_in_unsafe_fn` lint can be enabled to warn against that and require explicit unsafe
+/// blocks even inside `unsafe fn`.
 ///
-/// See the [Rustnomicon] and the [Reference] for more informations.
+/// See the [Rustonomicon] and the [Reference] for more information.
 ///
 /// # Examples
 ///
@@ -1973,13 +1947,16 @@ mod type_keyword {}
 ///
 /// ```rust
 /// # #![allow(dead_code)]
+/// #![deny(unsafe_op_in_unsafe_fn)]
+///
 /// /// Dereference the given pointer.
 /// ///
 /// /// # Safety
 /// ///
 /// /// `ptr` must be aligned and must not be dangling.
 /// unsafe fn deref_unchecked(ptr: *const i32) -> i32 {
-///     *ptr
+///     // SAFETY: the caller is required to ensure that `ptr` is aligned and dereferenceable.
+///     unsafe { *ptr }
 /// }
 ///
 /// let a = 3;
@@ -1989,34 +1966,117 @@ mod type_keyword {}
 /// unsafe { assert_eq!(*b, deref_unchecked(b)); };
 /// ```
 ///
-/// Traits marked as `unsafe` must be [`impl`]emented using `unsafe impl`. This
-/// makes a guarantee to other `unsafe` code that the implementation satisfies
-/// the trait's safety contract. The [Send] and [Sync] traits are examples of
-/// this behaviour in the standard library.
+/// ## `unsafe` and traits
+///
+/// The interactions of `unsafe` and traits can be surprising, so let us contrast the
+/// two combinations of safe `fn` in `unsafe trait` and `unsafe fn` in safe trait using two
+/// examples:
 ///
 /// ```rust
-/// /// Implementors of this trait must guarantee an element is always
-/// /// accessible with index 3.
-/// unsafe trait ThreeIndexable<T> {
-///     /// Returns a reference to the element with index 3 in `&self`.
-///     fn three(&self) -> &T;
+/// /// # Safety
+/// ///
+/// /// `make_even` must return an even number.
+/// unsafe trait MakeEven {
+///     fn make_even(&self) -> i32;
 /// }
 ///
-/// // The implementation of `ThreeIndexable` for `[T; 4]` is `unsafe`
-/// // because the implementor must abide by a contract the compiler cannot
-/// // check but as a programmer we know there will always be a valid element
-/// // at index 3 to access.
-/// unsafe impl<T> ThreeIndexable<T> for [T; 4] {
-///     fn three(&self) -> &T {
-///         // SAFETY: implementing the trait means there always is an element
-///         // with index 3 accessible.
-///         unsafe { self.get_unchecked(3) }
+/// // SAFETY: Our `make_even` always returns something even.
+/// unsafe impl MakeEven for i32 {
+///     fn make_even(&self) -> i32 {
+///         self << 1
 ///     }
 /// }
 ///
-/// let a = [1, 2, 4, 8];
-/// assert_eq!(a.three(), &8);
+/// fn use_make_even(x: impl MakeEven) {
+///     if x.make_even() % 2 == 1 {
+///         // SAFETY: this can never happen, because all `MakeEven` implementations
+///         // ensure that `make_even` returns something even.
+///         unsafe { std::hint::unreachable_unchecked() };
+///     }
+/// }
 /// ```
+///
+/// Note how the safety contract of the trait is upheld by the implementation, and is itself used to
+/// uphold the safety contract of the unsafe function `unreachable_unchecked` called by
+/// `use_make_even`. `make_even` itself is a safe function because its *callers* do not have to
+/// worry about any contract, only the *implementation* of `MakeEven` is required to uphold a
+/// certain contract. `use_make_even` is safe because it can use the promise made by `MakeEven`
+/// implementations to uphold the safety contract of the `unsafe fn unreachable_unchecked` it calls.
+///
+/// It is also possible to have `unsafe fn` in a regular safe `trait`:
+///
+/// ```rust
+/// # #![feature(never_type)]
+/// #![deny(unsafe_op_in_unsafe_fn)]
+///
+/// trait Indexable {
+///     const LEN: usize;
+///
+///     /// # Safety
+///     ///
+///     /// The caller must ensure that `idx < LEN`.
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32;
+/// }
+///
+/// // The implementation for `i32` doesn't need to do any contract reasoning.
+/// impl Indexable for i32 {
+///     const LEN: usize = 1;
+///
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32 {
+///         debug_assert_eq!(idx, 0);
+///         *self
+///     }
+/// }
+///
+/// // The implementation for arrays exploits the function contract to
+/// // make use of `get_unchecked` on slices and avoid a run-time check.
+/// impl Indexable for [i32; 42] {
+///     const LEN: usize = 42;
+///
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32 {
+///         // SAFETY: As per this trait's documentation, the caller ensures
+///         // that `idx < 42`.
+///         unsafe { *self.get_unchecked(idx) }
+///     }
+/// }
+///
+/// // The implementation for the never type declares a length of 0,
+/// // which means `idx_unchecked` can never be called.
+/// impl Indexable for ! {
+///     const LEN: usize = 0;
+///
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32 {
+///         // SAFETY: As per this trait's documentation, the caller ensures
+///         // that `idx < 0`, which is impossible, so this is dead code.
+///         unsafe { std::hint::unreachable_unchecked() }
+///     }
+/// }
+///
+/// fn use_indexable<I: Indexable>(x: I, idx: usize) -> i32 {
+///     if idx < I::LEN {
+///         // SAFETY: We have checked that `idx < I::LEN`.
+///         unsafe { x.idx_unchecked(idx) }
+///     } else {
+///         panic!("index out-of-bounds")
+///     }
+/// }
+/// ```
+///
+/// This time, `use_indexable` is safe because it uses a run-time check to discharge the safety
+/// contract of `idx_unchecked`. Implementing `Indexable` is safe because when writing
+/// `idx_unchecked`, we don't have to worry: our *callers* need to discharge a proof obligation
+/// (like `use_indexable` does), but the *implementation* of `get_unchecked` has no proof obligation
+/// to contend with. Of course, the implementation of `Indexable` may choose to call other unsafe
+/// operations, and then it needs an `unsafe` *block* to indicate it discharged the proof
+/// obligations of its callees. (We enabled `unsafe_op_in_unsafe_fn`, so the body of `idx_unchecked`
+/// is not implicitly an unsafe block.) For that purpose it can make use of the contract that all
+/// its callers must uphold -- the fact that `idx < LEN`.
+///
+/// Formally speaking, an `unsafe fn` in a trait is a function with *preconditions* that go beyond
+/// those encoded by the argument types (such as `idx < LEN`), whereas an `unsafe trait` can declare
+/// that some of its functions have *postconditions* that go beyond those encoded in the return type
+/// (such as returning an even integer). If a trait needs a function with both extra precondition
+/// and extra postcondition, then it needs an `unsafe fn` in an `unsafe trait`.
 ///
 /// [`extern`]: keyword.extern.html
 /// [`trait`]: keyword.trait.html
@@ -2025,20 +2085,22 @@ mod type_keyword {}
 /// [`impl`]: keyword.impl.html
 /// [raw pointers]: ../reference/types/pointer.html
 /// [memory safety]: ../book/ch19-01-unsafe-rust.html
-/// [Rustnomicon]: ../nomicon/index.html
+/// [Rustonomicon]: ../nomicon/index.html
 /// [nomicon-soundness]: ../nomicon/safe-unsafe-meaning.html
 /// [soundness]: https://rust-lang.github.io/unsafe-code-guidelines/glossary.html#soundness-of-code--of-a-library
 /// [Reference]: ../reference/unsafety.html
-/// [proposal]: https://github.com/rust-lang/rfcs/pull/2585
 /// [discussion on Rust Internals]: https://internals.rust-lang.org/t/what-does-unsafe-mean/6696
 mod unsafe_keyword {}
 
 #[doc(keyword = "use")]
 //
-/// Import or rename items from other crates or modules.
+/// Import or rename items from other crates or modules, or specify precise capturing
+/// with `use<..>`.
 ///
-/// Usually a `use` keyword is used to shorten the path required to refer to a module item.
-/// The keyword may appear in modules, blocks and even functions, usually at the top.
+/// ## Importing items
+///
+/// The `use` keyword is employed to shorten the path required to refer to a module item.
+/// The keyword may appear in modules, blocks, and even functions, typically at the top.
 ///
 /// The most basic usage of the keyword is `use path::to::item;`,
 /// though a number of convenient shortcuts are supported:
@@ -2079,19 +2141,48 @@ mod unsafe_keyword {}
 /// // Compiles.
 /// let _ = VariantA;
 ///
-/// // Does not compile !
+/// // Does not compile!
 /// let n = new();
 /// ```
 ///
-/// For more information on `use` and paths in general, see the [Reference].
+/// For more information on `use` and paths in general, see the [Reference][ref-use-decls].
 ///
 /// The differences about paths and the `use` keyword between the 2015 and 2018 editions
-/// can also be found in the [Reference].
+/// can also be found in the [Reference][ref-use-decls].
+///
+/// ## Precise capturing
+///
+/// The `use<..>` syntax is used within certain `impl Trait` bounds to control which generic
+/// parameters are captured. This is important for return-position `impl Trait` (RPIT) types,
+/// as it affects borrow checking by controlling which generic parameters can be used in the
+/// hidden type.
+///
+/// For example, the following function demonstrates an error without precise capturing in
+/// Rust 2021 and earlier editions:
+///
+/// ```rust,compile_fail,edition2021
+/// fn f(x: &()) -> impl Sized { x }
+/// ```
+///
+/// By using `use<'_>` for precise capturing, it can be resolved:
+///
+/// ```rust
+/// fn f(x: &()) -> impl Sized + use<'_> { x }
+/// ```
+///
+/// This syntax specifies that the elided lifetime be captured and therefore available for
+/// use in the hidden type.
+///
+/// In Rust 2024, opaque types automatically capture all lifetime parameters in scope.
+/// `use<..>` syntax serves as an important way of opting-out of that default.
+///
+/// For more details about precise capturing, see the [Reference][ref-impl-trait].
 ///
 /// [`crate`]: keyword.crate.html
 /// [`self`]: keyword.self.html
 /// [`super`]: keyword.super.html
-/// [Reference]: ../reference/items/use-declarations.html
+/// [ref-use-decls]: ../reference/items/use-declarations.html
+/// [ref-impl-trait]: ../reference/types/impl-trait.html
 mod use_keyword {}
 
 #[doc(keyword = "where")]
@@ -2099,7 +2190,7 @@ mod use_keyword {}
 /// Add constraints that must be upheld to use an item.
 ///
 /// `where` allows specifying constraints on lifetime and generic parameters.
-/// The [RFC] introducing `where` contains detailed informations about the
+/// The [RFC] introducing `where` contains detailed information about the
 /// keyword.
 ///
 /// # Examples
@@ -2153,7 +2244,7 @@ mod use_keyword {}
 /// is missing: the `'b` lifetime is not known to live at least as long as `'a`
 /// which means this function cannot ensure it always returns a valid reference:
 ///
-/// ```rust,compile_fail,E0623
+/// ```rust,compile_fail
 /// fn select<'a, 'b>(s1: &'a str, s2: &'b str, second: bool) -> &'a str
 /// {
 ///     if second { s2 } else { s1 }
@@ -2184,8 +2275,8 @@ mod use_keyword {}
 /// # #![allow(dead_code)]
 /// pub enum Cow<'a, B>
 /// where
-///     B: 'a + ToOwned + ?Sized,
-///  {
+///     B: ToOwned + ?Sized,
+/// {
 ///     Borrowed(&'a B),
 ///     Owned(<B as ToOwned>::Owned),
 /// }
@@ -2194,12 +2285,70 @@ mod use_keyword {}
 /// [RFC]: https://github.com/rust-lang/rfcs/blob/master/text/0135-where.md
 mod where_keyword {}
 
+#[doc(keyword = "while")]
+//
+/// Loop while a condition is upheld.
+///
+/// A `while` expression is used for predicate loops. The `while` expression runs the conditional
+/// expression before running the loop body, then runs the loop body if the conditional
+/// expression evaluates to `true`, or exits the loop otherwise.
+///
+/// ```rust
+/// let mut counter = 0;
+///
+/// while counter < 10 {
+///     println!("{counter}");
+///     counter += 1;
+/// }
+/// ```
+///
+/// Like the [`for`] expression, we can use `break` and `continue`. A `while` expression
+/// cannot break with a value and always evaluates to `()` unlike [`loop`].
+///
+/// ```rust
+/// let mut i = 1;
+///
+/// while i < 100 {
+///     i *= 2;
+///     if i == 64 {
+///         break; // Exit when `i` is 64.
+///     }
+/// }
+/// ```
+///
+/// As `if` expressions have their pattern matching variant in `if let`, so too do `while`
+/// expressions with `while let`. The `while let` expression matches the pattern against the
+/// expression, then runs the loop body if pattern matching succeeds, or exits the loop otherwise.
+/// We can use `break` and `continue` in `while let` expressions just like in `while`.
+///
+/// ```rust
+/// let mut counter = Some(0);
+///
+/// while let Some(i) = counter {
+///     if i == 10 {
+///         counter = None;
+///     } else {
+///         println!("{i}");
+///         counter = Some (i + 1);
+///     }
+/// }
+/// ```
+///
+/// For more information on `while` and loops in general, see the [reference].
+///
+/// See also, [`for`], [`loop`].
+///
+/// [`for`]: keyword.for.html
+/// [`loop`]: keyword.loop.html
+/// [reference]: ../reference/expressions/loop-expr.html#predicate-loops
+mod while_keyword {}
+
 // 2018 Edition keywords
 
 #[doc(alias = "promise")]
 #[doc(keyword = "async")]
 //
-/// Return a [`Future`] instead of blocking the current thread.
+/// Returns a [`Future`] instead of blocking the current thread.
 ///
 /// Use `async` in front of `fn`, `closure`, or a `block` to turn the marked code into a `Future`.
 /// As such the code will not be run immediately, but will only be evaluated when the returned
@@ -2243,7 +2392,7 @@ mod await_keyword {}
 /// `dyn` is a prefix of a [trait object]'s type.
 ///
 /// The `dyn` keyword is used to highlight that calls to methods on the associated `Trait`
-/// are dynamically dispatched. To use the trait this way, it must be 'object safe'.
+/// are [dynamically dispatched]. To use the trait this way, it must be *dyn compatible*[^1].
 ///
 /// Unlike generic parameters or `impl Trait`, the compiler does not know the concrete type that
 /// is being passed. That is, the type has been [erased].
@@ -2256,7 +2405,7 @@ mod await_keyword {}
 /// the function pointer and then that function pointer is called.
 ///
 /// See the Reference for more information on [trait objects][ref-trait-obj]
-/// and [object safety][ref-obj-safety].
+/// and [dyn compatibility][ref-dyn-compat].
 ///
 /// ## Trade-offs
 ///
@@ -2267,9 +2416,11 @@ mod await_keyword {}
 /// the method won't be duplicated for each concrete type.
 ///
 /// [trait object]: ../book/ch17-02-trait-objects.html
+/// [dynamically dispatched]: https://en.wikipedia.org/wiki/Dynamic_dispatch
 /// [ref-trait-obj]: ../reference/types/trait-object.html
-/// [ref-obj-safety]: ../reference/items/traits.html#object-safety
+/// [ref-dyn-compat]: ../reference/items/traits.html#dyn-compatibility
 /// [erased]: https://en.wikipedia.org/wiki/Type_erasure
+/// [^1]: Formerly known as *object safe*.
 mod dyn_keyword {}
 
 #[doc(keyword = "union")]
@@ -2340,7 +2491,7 @@ mod dyn_keyword {}
 /// println!("f = {f} and i = {i}");
 /// ```
 ///
-/// See the [Reference][union] for more informations on `union`s.
+/// See the [Reference][union] for more information on `union`s.
 ///
 /// [`struct`]: keyword.struct.html
 /// [union]: ../reference/items/unions.html

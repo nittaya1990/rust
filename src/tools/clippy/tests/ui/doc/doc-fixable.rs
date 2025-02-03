@@ -1,9 +1,9 @@
-// run-rustfix
+
 //! This file tests for the `DOC_MARKDOWN` lint.
 
 #![allow(dead_code, incomplete_features)]
 #![warn(clippy::doc_markdown)]
-#![feature(custom_inner_attributes, generic_const_exprs, const_option)]
+#![feature(custom_inner_attributes, generic_const_exprs)]
 #![rustfmt::skip]
 
 /// The foo_bar function does _nothing_. See also foo::bar. (note the dot there)
@@ -54,20 +54,25 @@ fn test_units() {
 
 /// This tests allowed identifiers.
 /// KiB MiB GiB TiB PiB EiB
-/// DirectX
+/// MHz GHz THz
+/// AccessKit
+/// CoAP CoreFoundation CoreGraphics CoreText
+/// Direct2D Direct3D DirectWrite DirectX
 /// ECMAScript
 /// GPLv2 GPLv3
 /// GitHub GitLab
 /// IPv4 IPv6
-/// ClojureScript CoffeeScript JavaScript PureScript TypeScript
+/// ClojureScript CoffeeScript JavaScript PostScript PureScript TypeScript
+/// WebAssembly
 /// NaN NaNs
 /// OAuth GraphQL
 /// OCaml
-/// OpenGL OpenMP OpenSSH OpenSSL OpenStreetMap OpenDNS
-/// WebGL
+/// OpenAL OpenDNS OpenGL OpenMP OpenSSH OpenSSL OpenStreetMap OpenTelemetry
+/// OpenType
+/// WebGL WebGL2 WebGPU WebRTC WebSocket WebTransport
 /// TensorFlow
 /// TrueType
-/// iOS macOS FreeBSD
+/// iOS macOS FreeBSD NetBSD OpenBSD
 /// TeX LaTeX BibTeX BibLaTeX
 /// MinGW
 /// CamelCase (see also #2395)
@@ -75,10 +80,10 @@ fn test_units() {
 fn test_allowed() {
 }
 
-/// This test has [a link_with_underscores][chunked-example] inside it. See #823.
+/// This test has [a `link_with_underscores`][chunked-example] inside it. See #823.
 /// See also [the issue tracker](https://github.com/rust-lang/rust-clippy/search?q=clippy::doc_markdown&type=Issues)
 /// on GitHub (which is a camel-cased word, but is OK). And here is another [inline link][inline_link].
-/// It can also be [inline_link2].
+/// It can also be [inline_link2]. A link to [StackOverflow](https://stackoverflow.com) is also acceptable.
 ///
 /// [chunked-example]: https://en.wikipedia.org/wiki/Chunked_transfer_encoding#Example
 /// [inline_link]: https://foobar
@@ -197,6 +202,16 @@ fn pulldown_cmark_crash() {}
 /// [plain text][path::to::item]
 fn intra_doc_link() {}
 
+/// Ignore escaped\_underscores
+///
+/// \\[
+///     \\prod\_{x\\in X} p\_x
+/// \\]
+fn issue_2581() {}
+
+/// Foo \[bar\] \[baz\] \[qux\]. DocMarkdownLint
+fn lint_after_escaped_chars() {}
+
 // issue #7033 - generic_const_exprs ICE
 struct S<T, const N: usize>
 where [(); N.checked_next_power_of_two().unwrap()]: {
@@ -213,3 +228,22 @@ where [(); N.checked_next_power_of_two().unwrap()]: {
         }
     }
 }
+
+/// this checks if the lowerCamelCase issue is fixed
+fn issue_11568() {}
+
+/// There is no try (do() or do_not()).
+fn parenthesized_word() {}
+
+/// ABes
+/// OSes
+/// UXes
+fn plural_acronym_test() {}
+
+extern "C" {
+    /// foo()
+    fn in_extern();
+}
+
+/// https://github.com/rust-lang/rust-clippy/pull/12836
+fn check_autofix_for_base_urls() {}

@@ -17,10 +17,7 @@ pub fn install_tasks(force_override: bool) {
             println!("info: the task file can be removed with `cargo dev remove vscode-tasks`");
             println!("vscode tasks successfully installed");
         },
-        Err(err) => eprintln!(
-            "error: unable to copy `{}` to `{}` ({})",
-            TASK_SOURCE_FILE, TASK_TARGET_FILE, err
-        ),
+        Err(err) => eprintln!("error: unable to copy `{TASK_SOURCE_FILE}` to `{TASK_TARGET_FILE}` ({err})"),
     }
 }
 
@@ -44,23 +41,17 @@ fn check_install_precondition(force_override: bool) -> bool {
                 return delete_vs_task_file(path);
             }
 
-            eprintln!(
-                "error: there is already a `task.json` file inside the `{}` directory",
-                VSCODE_DIR
-            );
+            eprintln!("error: there is already a `task.json` file inside the `{VSCODE_DIR}` directory");
             println!("info: use the `--force-override` flag to override the existing `task.json` file");
             return false;
         }
     } else {
         match fs::create_dir(vs_dir_path) {
-            Ok(_) => {
-                println!("info: created `{}` directory for clippy", VSCODE_DIR);
+            Ok(()) => {
+                println!("info: created `{VSCODE_DIR}` directory for clippy");
             },
             Err(err) => {
-                eprintln!(
-                    "error: the task target directory `{}` could not be created ({})",
-                    VSCODE_DIR, err
-                );
+                eprintln!("error: the task target directory `{VSCODE_DIR}` could not be created ({err})");
             },
         }
     }
@@ -82,7 +73,7 @@ pub fn remove_tasks() {
 
 fn delete_vs_task_file(path: &Path) -> bool {
     if let Err(err) = fs::remove_file(path) {
-        eprintln!("error: unable to delete the existing `tasks.json` file ({})", err);
+        eprintln!("error: unable to delete the existing `tasks.json` file ({err})");
         return false;
     }
 
@@ -93,7 +84,7 @@ fn delete_vs_task_file(path: &Path) -> bool {
 /// It may fail silently.
 fn try_delete_vs_directory_if_empty() {
     let path = Path::new(VSCODE_DIR);
-    if path.read_dir().map_or(false, |mut iter| iter.next().is_none()) {
+    if path.read_dir().is_ok_and(|mut iter| iter.next().is_none()) {
         // The directory is empty. We just try to delete it but allow a silence
         // fail as an empty `.vscode` directory is still valid
         let _silence_result = fs::remove_dir(path);

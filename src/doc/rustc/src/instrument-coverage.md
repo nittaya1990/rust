@@ -1,13 +1,9 @@
-# `instrument-coverage`
+# Instrumentation-based Code Coverage
 
 ## Introduction
 
-The Rust compiler includes two code coverage implementations:
-
--   A GCC-compatible, gcov-based coverage implementation, enabled with `-Z profile`, which derives coverage data based on DebugInfo.
--   A source-based code coverage implementation, enabled with `-C instrument-coverage`, which uses LLVM's native, efficient coverage instrumentation to generate very precise coverage data.
-
-This document describes how to enable and use the LLVM instrumentation-based coverage, via the `-C instrument-coverage` compiler flag.
+This document describes how to enable and use LLVM instrumentation-based coverage,
+via the `-C instrument-coverage` compiler flag.
 
 ## How it works
 
@@ -31,7 +27,7 @@ Rust's source-based code coverage requires the Rust "profiler runtime". Without 
 
 The Rust `nightly` distribution channel includes the profiler runtime, by default.
 
-> **Important**: If you are building the Rust compiler from the source distribution, the profiler runtime is _not_ enabled in the default `config.toml.example`. Edit your `config.toml` file and ensure the `profiler` feature is set it to `true` (either under the `[build]` section, or under the settings for an individual `[target.<triple>]`):
+> **Important**: If you are building the Rust compiler from the source distribution, the profiler runtime is _not_ enabled in the default `config.example.toml`. Edit your `config.toml` file and ensure the `profiler` feature is set it to `true` (either under the `[build]` section, or under the settings for an individual `[target.<triple>]`):
 >
 > ```toml
 > # Build the profiler runtime (required when compiling with options that depend
@@ -47,12 +43,6 @@ One option for a Rust demangler is [`rustfilt`], which can be installed with:
 
 ```shell
 cargo install rustfilt
-```
-
-Another option, if you are building from the Rust compiler source distribution, is to use the `rust-demangler` tool included in the Rust source distribution, which can be built with:
-
-```shell
-$ ./x.py build rust-demangler
 ```
 
 [`rustfilt`]: https://crates.io/crates/rustfilt
@@ -97,7 +87,17 @@ $ echo "{some: 'thing'}" | target/debug/examples/formatjson5 -
 }
 ```
 
-After running this program, a new file, `default.profraw`, should be in the current working directory. It's often preferable to set a specific file name or path. You can change the output file using the environment variable `LLVM_PROFILE_FILE`:
+After running this program, a new file named like `default_11699812450447639123_0_20944` should be in the current working directory.
+A new, unique file name will be generated each time the program is run to avoid overwriting previous data.
+
+```shell
+$ echo "{some: 'thing'}" | target/debug/examples/formatjson5 -
+...
+$ ls default_*.profraw
+default_11699812450447639123_0_20944.profraw
+```
+
+You can also set a specific file name or path for the generated `.profraw` files by using the environment variable `LLVM_PROFILE_FILE`:
 
 ```shell
 $ echo "{some: 'thing'}" \
@@ -107,13 +107,16 @@ $ ls formatjson5.profraw
 formatjson5.profraw
 ```
 
-If `LLVM_PROFILE_FILE` contains a path to a non-existent directory, the missing directory structure will be created. Additionally, the following special pattern strings are rewritten:
+If `LLVM_PROFILE_FILE` contains a path to a nonexistent directory, the missing directory structure will be created. Additionally, the following special pattern strings are rewritten:
 
 -   `%p` - The process ID.
 -   `%h` - The hostname of the machine running the program.
 -   `%t` - The value of the TMPDIR environment variable.
 -   `%Nm` - the instrumented binary’s signature: The runtime creates a pool of N raw profiles, used for on-line profile merging. The runtime takes care of selecting a raw profile from the pool, locking it, and updating it before the program exits. `N` must be between `1` and `9`, and defaults to `1` if omitted (with simply `%m`).
 -   `%c` - Does not add anything to the filename, but enables a mode (on some platforms, including Darwin) in which profile counter updates are continuously synced to a file. This means that if the instrumented program crashes, or is killed by a signal, perfect coverage information can still be recovered.
+
+In the first example above, the value `11699812450447639123_0` in the generated filename is the instrumented binary's signature,
+which replaced the `%m` pattern and the value `20944` is the process ID of the binary being executed.
 
 ## Installing LLVM coverage tools
 
@@ -145,13 +148,13 @@ $ llvm-cov show -Xdemangler=rustfilt target/debug/examples/formatjson5 \
     -name=add_quoted_string
 ```
 
-<img alt="Screenshot of sample `llvm-cov show` result, for function add_quoted_string" src="img/llvm-cov-show-01.png" class="center"/>
+<img alt="Screenshot of sample `llvm-cov show` result, for function add_quoted_string" src="images/llvm-cov-show-01.png" class="center"/>
 <br/>
 <br/>
 
 Some of the more notable options in this example include:
 
--   `--Xdemangler=rustfilt` - the command name or path used to demangle Rust symbols (`rustfilt` in the example, but this could also be a path to the `rust-demangler` tool)
+-   `--Xdemangler=rustfilt` - the command name or path used to demangle Rust symbols (`rustfilt` in the example)
 -   `target/debug/examples/formatjson5` - the instrumented binary (from which to extract the coverage map)
 -   `--instr-profile=<path-to-file>.profdata` - the location of the `.profdata` file created by `llvm-profdata merge` (from the `.profraw` file generated by the instrumented binary)
 -   `--name=<exact-function-name>` - to show coverage for a specific function (or, consider using another filter option, such as `--name-regex=<pattern>`)
@@ -160,9 +163,9 @@ Some of the more notable options in this example include:
 [`llvm-cov report`]: https://llvm.org/docs/CommandGuide/llvm-cov.html#llvm-cov-report
 [`llvm-cov show`]: https://llvm.org/docs/CommandGuide/llvm-cov.html#llvm-cov-show
 
-> **Note**: Coverage can also be disabled on an individual function by annotating the function with the [`no_coverage` attribute] (which requires the feature flag `#![feature(no_coverage)]`).
+> **Note**: Coverage can also be disabled on an individual function by annotating the function with the [`coverage(off)` attribute] (which requires the feature flag `#![feature(coverage)]`).
 
-[`no_coverage` attribute]: ../unstable-book/language-features/no-coverage.html
+[`coverage` attribute]: ../unstable-book/language-features/coverage.html
 
 ## Interpreting reports
 
@@ -181,13 +184,14 @@ A typical use case for coverage analysis is test coverage. Rust's source-based c
 
 The following example (using the [`json5format`] crate, for demonstration purposes) show how to generate and analyze coverage results for all tests in a crate.
 
-Since `cargo test` both builds and runs the tests, we set both the additional `RUSTFLAGS`, to add the `-C instrument-coverage` flag, and `LLVM_PROFILE_FILE`, to set a custom filename for the raw profiling data generated during the test runs. Since there may be more than one test binary, apply `%m` in the filename pattern. This generates unique names for each test binary. (Otherwise, each executed test binary would overwrite the coverage results from the previous binary.)
+Since `cargo test` both builds and runs the tests, we set the additional `RUSTFLAGS`, to add the `-C instrument-coverage` flag.
 
 ```shell
 $ RUSTFLAGS="-C instrument-coverage" \
-    LLVM_PROFILE_FILE="json5format-%m.profraw" \
     cargo test --tests
 ```
+
+> **Note**: The default for `LLVM_PROFILE_FILE` is `default_%m_%p.profraw`. Versions prior to 1.65 had a default of `default.profraw`, so if using those earlier versions, it is recommended to explicitly set `LLVM_PROFILE_FILE="default_%m_%p.profraw"` to avoid having multiple tests overwrite the `.profraw` files.
 
 Make note of the test binary file paths, displayed after the word "`Running`" in the test output:
 
@@ -210,7 +214,7 @@ test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 You should have one or more `.profraw` files now, one for each test binary. Run the `profdata` tool to merge them:
 
 ```shell
-$ llvm-profdata merge -sparse json5format-*.profraw -o json5format.profdata
+$ llvm-profdata merge -sparse default_*.profraw -o json5format.profdata
 ```
 
 Then run the `cov` tool, with the `profdata` file and all test binaries:
@@ -229,6 +233,8 @@ $ llvm-cov show \
     --show-instantiations --show-line-counts-or-regions \
     --Xdemangler=rustfilt | less -R
 ```
+
+> **Note**: If overriding the default `profraw` file name via the `LLVM_PROFILE_FILE` environment variable, it's highly recommended to use the `%m` and `%p` special pattern strings to generate unique file names in the case of more than a single test binary being executed.
 
 > **Note**: The command line option `--ignore-filename-regex=/.cargo/registry`, which excludes the sources for dependencies from the coverage results.\_
 
@@ -271,9 +277,8 @@ To include doc tests in the coverage results, drop the `--tests` flag, and apply
 ```bash
 $ RUSTFLAGS="-C instrument-coverage" \
   RUSTDOCFLAGS="-C instrument-coverage -Z unstable-options --persist-doctests target/debug/doctestbins" \
-  LLVM_PROFILE_FILE="json5format-%m.profraw" \
     cargo test
-$ llvm-profdata merge -sparse json5format-*.profraw -o json5format.profdata
+$ llvm-profdata merge -sparse default_*.profraw -o json5format.profdata
 ```
 
 The `-Z unstable-options --persist-doctests` flag is required, to save the test binaries
@@ -302,8 +307,7 @@ $ llvm-cov report \
 > version without doc tests, include:
 
 -   The `cargo test ... --no-run` command is updated with the same environment variables
-    and flags used to _build_ the tests, _including_ the doc tests. (`LLVM_PROFILE_FILE`
-    is only used when _running_ the tests.)
+    and flags used to _build_ the tests, _including_ the doc tests.
 -   The file glob pattern `target/debug/doctestbins/*/rust_out` adds the `rust_out`
     binaries generated for doc tests (note, however, that some `rust_out` files may not
     be executable binaries).
@@ -317,10 +321,24 @@ $ llvm-cov report \
 
 ## `-C instrument-coverage=<options>`
 
--   `-C instrument-coverage=all`: Instrument all functions, including unused functions and unused generics. (This is the same as `-C instrument-coverage`, with no value.)
--   `-C instrument-coverage=off`: Do not instrument any functions. (This is the same as simply not including the `-C instrument-coverage` option.)
--   `-Zunstable-options -C instrument-coverage=except-unused-generics`: Instrument all functions except unused generics.
--   `-Zunstable-options -C instrument-coverage=except-unused-functions`: Instrument only used (called) functions and instantiated generic functions.
+- `-C instrument-coverage=no` (or `n`/`off`/`false`):
+  Don't enable coverage instrumentation. No functions will be instrumented for coverage.
+  - This is the same as not using the `-C instrument-coverage` flag at all.
+- `-C instrument-coverage=yes` (or `y`/`on`/`true`):
+  Enable coverage instrumentation with the default behaviour.
+  Currently this instruments all functions, including unused functions and unused generics.
+  - This is the same as `-C instrument-coverage` with no value.
+
+### Other values
+
+- `-C instrument-coverage=all`:
+  Currently an alias for `yes`, but may behave differently in the future if
+  more fine-grained coverage options are added.
+  Using this value is currently not recommended.
+
+## `-Z coverage-options=<options>`
+
+[This unstable option is described in the Unstable Book.](../unstable-book/compiler-flags/coverage-options.html)
 
 ## Other references
 

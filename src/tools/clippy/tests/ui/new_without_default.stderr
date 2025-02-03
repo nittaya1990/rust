@@ -1,12 +1,15 @@
 error: you should consider adding a `Default` implementation for `Foo`
-  --> $DIR/new_without_default.rs:7:5
+  --> tests/ui/new_without_default.rs:13:5
    |
 LL | /     pub fn new() -> Foo {
+LL | |
+LL | |
 LL | |         Foo
 LL | |     }
    | |_____^
    |
    = note: `-D clippy::new-without-default` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::new_without_default)]`
 help: try adding this
    |
 LL + impl Default for Foo {
@@ -17,9 +20,10 @@ LL + }
    |
 
 error: you should consider adding a `Default` implementation for `Bar`
-  --> $DIR/new_without_default.rs:15:5
+  --> tests/ui/new_without_default.rs:23:5
    |
 LL | /     pub fn new() -> Self {
+LL | |
 LL | |         Bar
 LL | |     }
    | |_____^
@@ -34,9 +38,10 @@ LL + }
    |
 
 error: you should consider adding a `Default` implementation for `LtKo<'c>`
-  --> $DIR/new_without_default.rs:79:5
+  --> tests/ui/new_without_default.rs:88:5
    |
 LL | /     pub fn new() -> LtKo<'c> {
+LL | |
 LL | |         unimplemented!()
 LL | |     }
    | |_____^
@@ -50,10 +55,28 @@ LL +     }
 LL + }
    |
 
+error: you should consider adding a `Default` implementation for `Const`
+  --> tests/ui/new_without_default.rs:121:5
+   |
+LL | /     pub const fn new() -> Const {
+LL | |         Const
+LL | |     } // While Default is not const, it can still call const functions, so we should lint this
+   | |_____^
+   |
+help: try adding this
+   |
+LL + impl Default for Const {
+LL +     fn default() -> Self {
+LL +         Self::new()
+LL +     }
+LL + }
+   |
+
 error: you should consider adding a `Default` implementation for `NewNotEqualToDerive`
-  --> $DIR/new_without_default.rs:172:5
+  --> tests/ui/new_without_default.rs:181:5
    |
 LL | /     pub fn new() -> Self {
+LL | |
 LL | |         NewNotEqualToDerive { foo: 1 }
 LL | |     }
    | |_____^
@@ -68,9 +91,10 @@ LL + }
    |
 
 error: you should consider adding a `Default` implementation for `FooGenerics<T>`
-  --> $DIR/new_without_default.rs:180:5
+  --> tests/ui/new_without_default.rs:190:5
    |
 LL | /     pub fn new() -> Self {
+LL | |
 LL | |         Self(Default::default())
 LL | |     }
    | |_____^
@@ -85,9 +109,10 @@ LL + }
    |
 
 error: you should consider adding a `Default` implementation for `BarGenerics<T>`
-  --> $DIR/new_without_default.rs:187:5
+  --> tests/ui/new_without_default.rs:198:5
    |
 LL | /     pub fn new() -> Self {
+LL | |
 LL | |         Self(Default::default())
 LL | |     }
    | |_____^
@@ -102,9 +127,10 @@ LL + }
    |
 
 error: you should consider adding a `Default` implementation for `Foo<T>`
-  --> $DIR/new_without_default.rs:198:9
+  --> tests/ui/new_without_default.rs:210:9
    |
 LL | /         pub fn new() -> Self {
+LL | |
 LL | |             todo!()
 LL | |         }
    | |_________^
@@ -117,7 +143,28 @@ LL +             Self::new()
 LL +         }
 LL +     }
 LL + 
- ...
+LL ~     impl<T> Foo<T> {
+   |
 
-error: aborting due to 7 previous errors
+error: you should consider adding a `Default` implementation for `MyStruct<K, V>`
+  --> tests/ui/new_without_default.rs:256:5
+   |
+LL | /     pub fn new() -> Self {
+LL | |         Self { _kv: None }
+LL | |     }
+   | |_____^
+   |
+help: try adding this
+   |
+LL + impl<K, V> Default for MyStruct<K, V>
+LL + where
+LL +     K: std::hash::Hash + Eq + PartialEq,
+LL +  {
+LL +     fn default() -> Self {
+LL +         Self::new()
+LL +     }
+LL + }
+   |
+
+error: aborting due to 9 previous errors
 

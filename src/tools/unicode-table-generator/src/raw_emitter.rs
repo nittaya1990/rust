@@ -1,8 +1,8 @@
-use crate::fmt_list;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::convert::TryFrom;
 use std::fmt::{self, Write};
 use std::ops::Range;
+
+use crate::fmt_list;
 
 #[derive(Clone)]
 pub struct RawEmitter {
@@ -24,6 +24,7 @@ impl RawEmitter {
     }
 
     fn emit_bitset(&mut self, ranges: &[Range<u32>]) -> Result<(), String> {
+        let first_code_point = ranges.first().unwrap().start;
         let last_code_point = ranges.last().unwrap().end;
         // bitset for every bit in the codepoint range
         //
@@ -96,8 +97,11 @@ impl RawEmitter {
 
         self.blank_line();
 
-        writeln!(&mut self.file, "pub fn lookup(c: char) -> bool {{").unwrap();
-        writeln!(&mut self.file, "    super::bitset_search(",).unwrap();
+        writeln!(&mut self.file, "pub const fn lookup(c: char) -> bool {{").unwrap();
+        if first_code_point > 0x7f {
+            writeln!(&mut self.file, "    (c as u32) >= {first_code_point:#04x} &&").unwrap();
+        }
+        writeln!(&mut self.file, "    super::bitset_search(").unwrap();
         writeln!(&mut self.file, "        c as u32,").unwrap();
         writeln!(&mut self.file, "        &BITSET_CHUNKS_MAP,").unwrap();
         writeln!(&mut self.file, "        &BITSET_INDEX_CHUNKS,").unwrap();
@@ -121,12 +125,8 @@ impl RawEmitter {
         for chunk in compressed_words.chunks(chunk_length) {
             chunks.insert(chunk);
         }
-        let chunk_map = chunks
-            .clone()
-            .into_iter()
-            .enumerate()
-            .map(|(idx, chunk)| (chunk, idx))
-            .collect::<HashMap<_, _>>();
+        let chunk_map =
+            chunks.iter().enumerate().map(|(idx, &chunk)| (chunk, idx)).collect::<HashMap<_, _>>();
         let mut chunk_indices = Vec::new();
         for chunk in compressed_words.chunks(chunk_length) {
             chunk_indices.push(chunk_map[chunk]);
@@ -168,6 +168,15 @@ pub fn emit_codepoints(emitter: &mut RawEmitter, ranges: &[Range<u32>]) {
         *emitter = skiplist;
         emitter.desc = String::from("skiplist");
     }
+}
+
+pub fn emit_whitespace(emitter: &mut RawEmitter, ranges: &[Range<u32>]) {
+    emitter.blank_line();
+
+    let mut cascading = emitter.clone();
+    cascading.emit_cascading_map(&ranges);
+    *emitter = cascading;
+    emitter.desc = String::from("cascading");
 }
 
 struct Canonicalized {
@@ -346,15 +355,12 @@ impl Canonicalized {
         let unique_mapping = unique_mapping
             .into_iter()
             .map(|(key, value)| {
-                (
-                    key,
-                    match value {
-                        UniqueMapping::Canonicalized(idx) => {
-                            u8::try_from(canonical_words.len() + idx).unwrap()
-                        }
-                        UniqueMapping::Canonical(idx) => u8::try_from(idx).unwrap(),
-                    },
-                )
+                (key, match value {
+                    UniqueMapping::Canonicalized(idx) => {
+                        u8::try_from(canonical_words.len() + idx).unwrap()
+                    }
+                    UniqueMapping::Canonical(idx) => u8::try_from(idx).unwrap(),
+                })
             })
             .collect::<HashMap<_, _>>();
 
@@ -369,24 +375,21 @@ impl Canonicalized {
         let canonicalized_words = canonicalized_words
             .into_iter()
             .map(|v| {
-                (
-                    u8::try_from(v.0).unwrap(),
-                    match v.1 {
-                        Mapping::RotateAndInvert(amount) => {
-                            assert_eq!(amount, amount & LOWER_6);
-                            1 << 6 | (amount as u8)
-                        }
-                        Mapping::Rotate(amount) => {
-                            assert_eq!(amount, amount & LOWER_6);
-                            amount as u8
-                        }
-                        Mapping::Invert => 1 << 6,
-                        Mapping::ShiftRight(shift_by) => {
-                            assert_eq!(shift_by, shift_by & LOWER_6);
-                            1 << 7 | (shift_by as u8)
-                        }
-                    },
-                )
+                (u8::try_from(v.0).unwrap(), match v.1 {
+                    Mapping::RotateAndInvert(amount) => {
+                        assert_eq!(amount, amount & LOWER_6);
+                        1 << 6 | (amount as u8)
+                    }
+                    Mapping::Rotate(amount) => {
+                        assert_eq!(amount, amount & LOWER_6);
+                        amount as u8
+                    }
+                    Mapping::Invert => 1 << 6,
+                    Mapping::ShiftRight(shift_by) => {
+                        assert_eq!(shift_by, shift_by & LOWER_6);
+                        1 << 7 | (shift_by as u8)
+                    }
+                })
             })
             .collect::<Vec<(u8, u8)>>();
         Canonicalized { unique_mapping, canonical_words, canonicalized_words }

@@ -1,10 +1,7 @@
-// run-rustfix
-#![allow(clippy::assertions_on_constants, clippy::equatable_if_let)]
+#![allow(clippy::assertions_on_constants, clippy::equatable_if_let, clippy::needless_if)]
+#![warn(clippy::collapsible_if, clippy::collapsible_else_if)]
 
 #[rustfmt::skip]
-#[warn(clippy::collapsible_if)]
-#[warn(clippy::collapsible_else_if)]
-
 fn main() {
     let x = "hello";
     let y = "world";
@@ -87,5 +84,13 @@ fn main() {
         if y == "world" {
             println!("world!")
         }
+    }
+}
+
+#[rustfmt::skip]
+fn issue_7318() {
+    if true { println!("I've been resolved!")
+    }else{
+        if false {}
     }
 }

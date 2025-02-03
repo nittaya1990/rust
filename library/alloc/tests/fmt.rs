@@ -1,7 +1,10 @@
 #![deny(warnings)]
+// FIXME(static_mut_refs): Do not allow `static_mut_refs` lint
+#![allow(static_mut_refs)]
 
 use std::cell::RefCell;
 use std::fmt::{self, Write};
+use std::ptr;
 
 #[test]
 fn test_format() {
@@ -69,21 +72,21 @@ fn test_format_macro_interface() {
     t!(format!("{:?}", "true"), "\"true\"");
     t!(format!("{:?}", "foo\nbar"), "\"foo\\nbar\"");
     t!(format!("{:?}", "foo\n\"bar\"\r\n\'baz\'\t\\qux\\"), r#""foo\n\"bar\"\r\n'baz'\t\\qux\\""#);
-    t!(format!("{:?}", "foo\0bar\x01baz\u{7f}q\u{75}x"), r#""foo\u{0}bar\u{1}baz\u{7f}qux""#);
+    t!(format!("{:?}", "foo\0bar\x01baz\u{7f}q\u{75}x"), r#""foo\0bar\u{1}baz\u{7f}qux""#);
     t!(format!("{:o}", 10_usize), "12");
     t!(format!("{:x}", 10_usize), "a");
     t!(format!("{:X}", 10_usize), "A");
     t!(format!("{}", "foo"), "foo");
     t!(format!("{}", "foo".to_string()), "foo");
     if cfg!(target_pointer_width = "32") {
-        t!(format!("{:#p}", 0x1234 as *const isize), "0x00001234");
-        t!(format!("{:#p}", 0x1234 as *mut isize), "0x00001234");
+        t!(format!("{:#p}", ptr::without_provenance::<isize>(0x1234)), "0x00001234");
+        t!(format!("{:#p}", ptr::without_provenance_mut::<isize>(0x1234)), "0x00001234");
     } else {
-        t!(format!("{:#p}", 0x1234 as *const isize), "0x0000000000001234");
-        t!(format!("{:#p}", 0x1234 as *mut isize), "0x0000000000001234");
+        t!(format!("{:#p}", ptr::without_provenance::<isize>(0x1234)), "0x0000000000001234");
+        t!(format!("{:#p}", ptr::without_provenance_mut::<isize>(0x1234)), "0x0000000000001234");
     }
-    t!(format!("{:p}", 0x1234 as *const isize), "0x1234");
-    t!(format!("{:p}", 0x1234 as *mut isize), "0x1234");
+    t!(format!("{:p}", ptr::without_provenance::<isize>(0x1234)), "0x1234");
+    t!(format!("{:p}", ptr::without_provenance_mut::<isize>(0x1234)), "0x1234");
     t!(format!("{A:x}"), "aloha");
     t!(format!("{B:X}"), "adios");
     t!(format!("foo {} ☃☃☃☃☃☃", "bar"), "foo bar ☃☃☃☃☃☃");
@@ -207,7 +210,7 @@ fn test_format_macro_interface() {
     {
         let val = usize::MAX;
         let exp = format!("{val:#x}");
-        t!(format!("{:p}", val as *const isize), exp);
+        t!(format!("{:p}", std::ptr::without_provenance::<isize>(val)), exp);
     }
 
     // Escaping
@@ -216,19 +219,19 @@ fn test_format_macro_interface() {
 
     // make sure that format! doesn't move out of local variables
     let a = Box::new(3);
-    format!("{a}");
-    format!("{a}");
+    let _ = format!("{a}");
+    let _ = format!("{a}");
 
     // make sure that format! doesn't cause spurious unused-unsafe warnings when
     // it's inside of an outer unsafe block
     unsafe {
         let a: isize = ::std::mem::transmute(3_usize);
-        format!("{a}");
+        let _ = format!("{a}");
     }
 
     // test that trailing commas are acceptable
-    format!("{}", "test",);
-    format!("{foo}", foo = "test",);
+    let _ = format!("{}", "test",);
+    let _ = format!("{foo}", foo = "test",);
 }
 
 // Basic test to make sure that we can invoke the `write!` macro with an

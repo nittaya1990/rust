@@ -2,20 +2,18 @@
 //! read the arguments that are built up.
 
 use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::io;
-use std::mem;
 use std::process::{self, Output};
+use std::{fmt, io, mem};
 
-use rustc_span::symbol::Symbol;
 use rustc_target::spec::LldFlavor;
 
 #[derive(Clone)]
-pub struct Command {
+pub(crate) struct Command {
     program: Program,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
+    env_clear: bool,
 }
 
 #[derive(Clone)]
@@ -26,33 +24,34 @@ enum Program {
 }
 
 impl Command {
-    pub fn new<P: AsRef<OsStr>>(program: P) -> Command {
+    pub(crate) fn new<P: AsRef<OsStr>>(program: P) -> Command {
         Command::_new(Program::Normal(program.as_ref().to_owned()))
     }
 
-    pub fn bat_script<P: AsRef<OsStr>>(program: P) -> Command {
+    pub(crate) fn bat_script<P: AsRef<OsStr>>(program: P) -> Command {
         Command::_new(Program::CmdBatScript(program.as_ref().to_owned()))
     }
 
-    pub fn lld<P: AsRef<OsStr>>(program: P, flavor: LldFlavor) -> Command {
+    pub(crate) fn lld<P: AsRef<OsStr>>(program: P, flavor: LldFlavor) -> Command {
         Command::_new(Program::Lld(program.as_ref().to_owned(), flavor))
     }
 
     fn _new(program: Program) -> Command {
-        Command { program, args: Vec::new(), env: Vec::new(), env_remove: Vec::new() }
+        Command {
+            program,
+            args: Vec::new(),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            env_clear: false,
+        }
     }
 
-    pub fn arg<P: AsRef<OsStr>>(&mut self, arg: P) -> &mut Command {
+    pub(crate) fn arg<P: AsRef<OsStr>>(&mut self, arg: P) -> &mut Command {
         self._arg(arg.as_ref());
         self
     }
 
-    pub fn sym_arg(&mut self, arg: Symbol) -> &mut Command {
-        self.arg(arg.as_str());
-        self
-    }
-
-    pub fn args<I>(&mut self, args: I) -> &mut Command
+    pub(crate) fn args<I>(&mut self, args: I) -> &mut Command
     where
         I: IntoIterator<Item: AsRef<OsStr>>,
     {
@@ -66,7 +65,7 @@ impl Command {
         self.args.push(arg.to_owned());
     }
 
-    pub fn env<K, V>(&mut self, key: K, value: V) -> &mut Command
+    pub(crate) fn env<K, V>(&mut self, key: K, value: V) -> &mut Command
     where
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
@@ -79,7 +78,7 @@ impl Command {
         self.env.push((key.to_owned(), value.to_owned()));
     }
 
-    pub fn env_remove<K>(&mut self, key: K) -> &mut Command
+    pub(crate) fn env_remove<K>(&mut self, key: K) -> &mut Command
     where
         K: AsRef<OsStr>,
     {
@@ -87,15 +86,20 @@ impl Command {
         self
     }
 
+    pub(crate) fn env_clear(&mut self) -> &mut Command {
+        self.env_clear = true;
+        self
+    }
+
     fn _env_remove(&mut self, key: &OsStr) {
         self.env_remove.push(key.to_owned());
     }
 
-    pub fn output(&mut self) -> io::Result<Output> {
+    pub(crate) fn output(&mut self) -> io::Result<Output> {
         self.command().output()
     }
 
-    pub fn command(&self) -> process::Command {
+    pub(crate) fn command(&self) -> process::Command {
         let mut ret = match self.program {
             Program::Normal(ref p) => process::Command::new(p),
             Program::CmdBatScript(ref p) => {
@@ -105,18 +109,7 @@ impl Command {
             }
             Program::Lld(ref p, flavor) => {
                 let mut c = process::Command::new(p);
-                c.arg("-flavor").arg(match flavor {
-                    LldFlavor::Wasm => "wasm",
-                    LldFlavor::Ld => "gnu",
-                    LldFlavor::Link => "link",
-                    LldFlavor::Ld64 => "darwin",
-                });
-                if let LldFlavor::Wasm = flavor {
-                    // LLVM expects host-specific formatting for @file
-                    // arguments, but we always generate posix formatted files
-                    // at this time. Indicate as such.
-                    c.arg("--rsp-quoting=posix");
-                }
+                c.arg("-flavor").arg(flavor.as_str());
                 c
             }
         };
@@ -125,22 +118,25 @@ impl Command {
         for k in &self.env_remove {
             ret.env_remove(k);
         }
+        if self.env_clear {
+            ret.env_clear();
+        }
         ret
     }
 
     // extensions
 
-    pub fn get_args(&self) -> &[OsString] {
+    pub(crate) fn get_args(&self) -> &[OsString] {
         &self.args
     }
 
-    pub fn take_args(&mut self) -> Vec<OsString> {
+    pub(crate) fn take_args(&mut self) -> Vec<OsString> {
         mem::take(&mut self.args)
     }
 
     /// Returns a `true` if we're pretty sure that this'll blow OS spawn limits,
     /// or `false` if we should attempt to spawn and see what the OS says.
-    pub fn very_likely_to_exceed_some_spawn_limit(&self) -> bool {
+    pub(crate) fn very_likely_to_exceed_some_spawn_limit(&self) -> bool {
         // We mostly only care about Windows in this method, on Unix the limits
         // can be gargantuan anyway so we're pretty unlikely to hit them
         if cfg!(unix) {

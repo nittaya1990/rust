@@ -1,11 +1,9 @@
-use super::super::testing::crash_test::{CrashTestDummy, Panic};
-use super::super::testing::rng::DeterministicRng;
+use std::ops::Bound::{Excluded, Included};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use super::*;
-use crate::vec::Vec;
-use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
-use std::iter::FromIterator;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use crate::testing::crash_test::{CrashTestDummy, Panic};
+use crate::testing::rng::DeterministicRng;
 
 #[test]
 fn test_clone_eq() {
@@ -134,11 +132,9 @@ fn test_difference() {
     check_difference(&[1, 3, 5, 9, 11], &[3, 6, 9], &[1, 5, 11]);
     check_difference(&[1, 3, 5, 9, 11], &[0, 1], &[3, 5, 9, 11]);
     check_difference(&[1, 3, 5, 9, 11], &[11, 12], &[1, 3, 5, 9]);
-    check_difference(
-        &[-5, 11, 22, 33, 40, 42],
-        &[-12, -5, 14, 23, 34, 38, 39, 50],
-        &[11, 22, 33, 40, 42],
-    );
+    check_difference(&[-5, 11, 22, 33, 40, 42], &[-12, -5, 14, 23, 34, 38, 39, 50], &[
+        11, 22, 33, 40, 42,
+    ]);
 
     if cfg!(miri) {
         // Miri is too slow
@@ -254,11 +250,9 @@ fn test_union() {
     check_union(&[], &[], &[]);
     check_union(&[1, 2, 3], &[2], &[1, 2, 3]);
     check_union(&[2], &[1, 2, 3], &[1, 2, 3]);
-    check_union(
-        &[1, 3, 5, 9, 11, 16, 19, 24],
-        &[-2, 1, 5, 9, 13, 19],
-        &[-2, 1, 3, 5, 9, 11, 13, 16, 19, 24],
-    );
+    check_union(&[1, 3, 5, 9, 11, 16, 19, 24], &[-2, 1, 5, 9, 13, 19], &[
+        -2, 1, 3, 5, 9, 11, 13, 16, 19, 24,
+    ]);
 }
 
 #[test]
@@ -320,6 +314,42 @@ fn test_is_subset() {
 }
 
 #[test]
+fn test_is_superset() {
+    fn is_superset(a: &[i32], b: &[i32]) -> bool {
+        let set_a = BTreeSet::from_iter(a.iter());
+        let set_b = BTreeSet::from_iter(b.iter());
+        set_a.is_superset(&set_b)
+    }
+
+    assert_eq!(is_superset(&[], &[]), true);
+    assert_eq!(is_superset(&[], &[1, 2]), false);
+    assert_eq!(is_superset(&[0], &[1, 2]), false);
+    assert_eq!(is_superset(&[1], &[1, 2]), false);
+    assert_eq!(is_superset(&[4], &[1, 2]), false);
+    assert_eq!(is_superset(&[1, 4], &[1, 2]), false);
+    assert_eq!(is_superset(&[1, 2], &[1, 2]), true);
+    assert_eq!(is_superset(&[1, 2, 3], &[1, 3]), true);
+    assert_eq!(is_superset(&[1, 2, 3], &[]), true);
+    assert_eq!(is_superset(&[-1, 1, 2, 3], &[-1, 3]), true);
+
+    if cfg!(miri) {
+        // Miri is too slow
+        return;
+    }
+
+    let large = Vec::from_iter(0..100);
+    assert_eq!(is_superset(&[], &large), false);
+    assert_eq!(is_superset(&large, &[]), true);
+    assert_eq!(is_superset(&large, &[1]), true);
+    assert_eq!(is_superset(&large, &[50, 99]), true);
+    assert_eq!(is_superset(&large, &[100]), false);
+    assert_eq!(is_superset(&large, &[0, 99]), true);
+    assert_eq!(is_superset(&[-1], &large), false);
+    assert_eq!(is_superset(&[0], &large), false);
+    assert_eq!(is_superset(&[99, 100], &large), false);
+}
+
+#[test]
 fn test_retain() {
     let mut set = BTreeSet::from([1, 2, 3, 4, 5, 6]);
     set.retain(|&k| k % 2 == 0);
@@ -330,18 +360,19 @@ fn test_retain() {
 }
 
 #[test]
-fn test_drain_filter() {
+fn test_extract_if() {
     let mut x = BTreeSet::from([1]);
     let mut y = BTreeSet::from([1]);
 
-    x.drain_filter(|_| true);
-    y.drain_filter(|_| false);
+    x.extract_if(|_| true).for_each(drop);
+    y.extract_if(|_| false).for_each(drop);
     assert_eq!(x.len(), 0);
     assert_eq!(y.len(), 1);
 }
 
 #[test]
-fn test_drain_filter_drop_panic_leak() {
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn test_extract_if_drop_panic_leak() {
     let a = CrashTestDummy::new(0);
     let b = CrashTestDummy::new(1);
     let c = CrashTestDummy::new(2);
@@ -350,7 +381,7 @@ fn test_drain_filter_drop_panic_leak() {
     set.insert(b.spawn(Panic::InDrop));
     set.insert(c.spawn(Panic::Never));
 
-    catch_unwind(move || drop(set.drain_filter(|dummy| dummy.query(true)))).ok();
+    catch_unwind(move || set.extract_if(|dummy| dummy.query(true)).for_each(drop)).ok();
 
     assert_eq!(a.queried(), 1);
     assert_eq!(b.queried(), 1);
@@ -361,7 +392,8 @@ fn test_drain_filter_drop_panic_leak() {
 }
 
 #[test]
-fn test_drain_filter_pred_panic_leak() {
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn test_extract_if_pred_panic_leak() {
     let a = CrashTestDummy::new(0);
     let b = CrashTestDummy::new(1);
     let c = CrashTestDummy::new(2);
@@ -370,7 +402,8 @@ fn test_drain_filter_pred_panic_leak() {
     set.insert(b.spawn(Panic::InQuery));
     set.insert(c.spawn(Panic::InQuery));
 
-    catch_unwind(AssertUnwindSafe(|| drop(set.drain_filter(|dummy| dummy.query(true))))).ok();
+    catch_unwind(AssertUnwindSafe(|| set.extract_if(|dummy| dummy.query(true)).for_each(drop)))
+        .ok();
 
     assert_eq!(a.queried(), 1);
     assert_eq!(b.queried(), 1);
@@ -389,6 +422,26 @@ fn test_clear() {
     x.insert(1);
 
     x.clear();
+    assert!(x.is_empty());
+}
+#[test]
+fn test_remove() {
+    let mut x = BTreeSet::new();
+    assert!(x.is_empty());
+
+    x.insert(1);
+    x.insert(2);
+    x.insert(3);
+    x.insert(4);
+
+    assert_eq!(x.remove(&2), true);
+    assert_eq!(x.remove(&0), false);
+    assert_eq!(x.remove(&5), false);
+    assert_eq!(x.remove(&1), true);
+    assert_eq!(x.remove(&2), false);
+    assert_eq!(x.remove(&3), true);
+    assert_eq!(x.remove(&4), true);
+    assert_eq!(x.remove(&4), false);
     assert!(x.is_empty());
 }
 
@@ -468,7 +521,7 @@ fn test_extend_ref() {
 #[test]
 fn test_recovery() {
     #[derive(Debug)]
-    struct Foo(&'static str, i32);
+    struct Foo(&'static str, #[allow(dead_code)] i32);
 
     impl PartialEq for Foo {
         fn eq(&self, other: &Self) -> bool {
@@ -547,8 +600,8 @@ fn assert_sync() {
         v.range(..)
     }
 
-    fn drain_filter<T: Sync + Ord>(v: &mut BTreeSet<T>) -> impl Sync + '_ {
-        v.drain_filter(|_| false)
+    fn extract_if<T: Sync + Ord>(v: &mut BTreeSet<T>) -> impl Sync + '_ {
+        v.extract_if(|_| false)
     }
 
     fn difference<T: Sync + Ord>(v: &BTreeSet<T>) -> impl Sync + '_ {
@@ -586,8 +639,8 @@ fn assert_send() {
         v.range(..)
     }
 
-    fn drain_filter<T: Send + Ord>(v: &mut BTreeSet<T>) -> impl Send + '_ {
-        v.drain_filter(|_| false)
+    fn extract_if<T: Send + Ord>(v: &mut BTreeSet<T>) -> impl Send + '_ {
+        v.extract_if(|_| false)
     }
 
     fn difference<T: Send + Sync + Ord>(v: &BTreeSet<T>) -> impl Send + '_ {
@@ -609,7 +662,7 @@ fn assert_send() {
 
 #[allow(dead_code)]
 // Check that the member-like functions conditionally provided by #[derive()]
-// are not overriden by genuine member functions with a different signature.
+// are not overridden by genuine member functions with a different signature.
 fn assert_derives() {
     fn hash<T: Hash, H: Hasher>(v: BTreeSet<T>, state: &mut H) {
         v.hash(state);
@@ -649,9 +702,9 @@ fn test_ord_absence() {
     }
 
     fn set_debug<K: Debug>(set: BTreeSet<K>) {
-        format!("{set:?}");
-        format!("{:?}", set.iter());
-        format!("{:?}", set.into_iter());
+        let _ = format!("{set:?}");
+        let _ = format!("{:?}", set.iter());
+        let _ = format!("{:?}", set.into_iter());
     }
 
     fn set_clone<K: Clone>(mut set: BTreeSet<K>) {
@@ -774,4 +827,26 @@ fn from_array() {
     let set = BTreeSet::from([1, 2, 3, 4]);
     let unordered_duplicates = BTreeSet::from([4, 1, 4, 3, 2]);
     assert_eq!(set, unordered_duplicates);
+}
+
+#[should_panic(expected = "range start is greater than range end in BTreeSet")]
+#[test]
+fn test_range_panic_1() {
+    let mut set = BTreeSet::new();
+    set.insert(3);
+    set.insert(5);
+    set.insert(8);
+
+    let _invalid_range = set.range((Included(&8), Included(&3)));
+}
+
+#[should_panic(expected = "range start and end are equal and excluded in BTreeSet")]
+#[test]
+fn test_range_panic_2() {
+    let mut set = BTreeSet::new();
+    set.insert(3);
+    set.insert(5);
+    set.insert(8);
+
+    let _invalid_range = set.range((Excluded(&5), Excluded(&5)));
 }

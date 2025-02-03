@@ -1,4 +1,4 @@
-//! Detecting language items.
+//! Detecting lang items.
 //!
 //! Language items are items that represent concepts intrinsic to the language
 //! itself. Examples are:
@@ -7,269 +7,357 @@
 //! * Traits that represent operators; e.g., `Add`, `Sub`, `Index`.
 //! * Functions called by the compiler itself.
 
-use crate::check_attr::target_from_impl_item;
+use rustc_ast as ast;
+use rustc_ast::visit;
+use rustc_data_structures::fx::FxHashMap;
+use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::lang_items::{GenericRequirement, extract};
+use rustc_hir::{LangItem, LanguageItems, MethodKind, Target};
+use rustc_middle::query::Providers;
+use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
+use rustc_session::cstore::ExternCrate;
+use rustc_span::{Span, kw};
+
+use crate::errors::{
+    DuplicateLangItem, IncorrectTarget, LangItemOnIncorrectTarget, UnknownLangItem,
+};
 use crate::weak_lang_items;
 
-use rustc_errors::{pluralize, struct_span_err};
-use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
-use rustc_hir::itemlikevisit::ItemLikeVisitor;
-use rustc_hir::lang_items::{extract, GenericRequirement, ITEM_REFS};
-use rustc_hir::{HirId, LangItem, LanguageItems, Target};
-use rustc_middle::ty::TyCtxt;
-use rustc_session::cstore::ExternCrate;
-use rustc_span::Span;
-
-use rustc_middle::ty::query::Providers;
-
-struct LanguageItemCollector<'tcx> {
-    items: LanguageItems,
-    tcx: TyCtxt<'tcx>,
+pub(crate) enum Duplicate {
+    Plain,
+    Crate,
+    CrateDepends,
 }
 
-impl<'v, 'tcx> ItemLikeVisitor<'v> for LanguageItemCollector<'tcx> {
-    fn visit_item(&mut self, item: &hir::Item<'_>) {
-        self.check_for_lang(Target::from_item(item), item.hir_id());
+struct LanguageItemCollector<'ast, 'tcx> {
+    items: LanguageItems,
+    tcx: TyCtxt<'tcx>,
+    resolver: &'ast ResolverAstLowering,
+    // FIXME(#118552): We should probably feed def_span eagerly on def-id creation
+    // so we can avoid constructing this map for local def-ids.
+    item_spans: FxHashMap<DefId, Span>,
+    parent_item: Option<&'ast ast::Item>,
+}
 
-        if let hir::ItemKind::Enum(def, ..) = &item.kind {
-            for variant in def.variants {
-                self.check_for_lang(Target::Variant, variant.id);
-            }
+impl<'ast, 'tcx> LanguageItemCollector<'ast, 'tcx> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        resolver: &'ast ResolverAstLowering,
+    ) -> LanguageItemCollector<'ast, 'tcx> {
+        LanguageItemCollector {
+            tcx,
+            resolver,
+            items: LanguageItems::new(),
+            item_spans: FxHashMap::default(),
+            parent_item: None,
         }
     }
 
-    fn visit_trait_item(&mut self, trait_item: &hir::TraitItem<'_>) {
-        self.check_for_lang(Target::from_trait_item(trait_item), trait_item.hir_id())
-    }
-
-    fn visit_impl_item(&mut self, impl_item: &hir::ImplItem<'_>) {
-        self.check_for_lang(target_from_impl_item(self.tcx, impl_item), impl_item.hir_id())
-    }
-
-    fn visit_foreign_item(&mut self, _: &hir::ForeignItem<'_>) {}
-}
-
-impl<'tcx> LanguageItemCollector<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>) -> LanguageItemCollector<'tcx> {
-        LanguageItemCollector { tcx, items: LanguageItems::new() }
-    }
-
-    fn check_for_lang(&mut self, actual_target: Target, hir_id: HirId) {
-        let attrs = self.tcx.hir().attrs(hir_id);
-        if let Some((value, span)) = extract(&attrs) {
-            match ITEM_REFS.get(&value).cloned() {
+    fn check_for_lang(
+        &mut self,
+        actual_target: Target,
+        def_id: LocalDefId,
+        attrs: &'ast [ast::Attribute],
+        item_span: Span,
+        generics: Option<&'ast ast::Generics>,
+    ) {
+        if let Some((name, attr_span)) = extract(attrs) {
+            match LangItem::from_name(name) {
                 // Known lang item with attribute on correct target.
-                Some((item_index, expected_target)) if actual_target == expected_target => {
-                    self.collect_item_extended(item_index, hir_id, span);
+                Some(lang_item) if actual_target == lang_item.target() => {
+                    self.collect_item_extended(
+                        lang_item,
+                        def_id,
+                        item_span,
+                        attr_span,
+                        generics,
+                        actual_target,
+                    );
                 }
                 // Known lang item with attribute on incorrect target.
-                Some((_, expected_target)) => {
-                    struct_span_err!(
-                        self.tcx.sess,
-                        span,
-                        E0718,
-                        "`{}` language item must be applied to a {}",
-                        value,
-                        expected_target,
-                    )
-                    .span_label(
-                        span,
-                        format!(
-                            "attribute should be applied to a {}, not a {}",
-                            expected_target, actual_target,
-                        ),
-                    )
-                    .emit();
+                Some(lang_item) => {
+                    self.tcx.dcx().emit_err(LangItemOnIncorrectTarget {
+                        span: attr_span,
+                        name,
+                        expected_target: lang_item.target(),
+                        actual_target,
+                    });
                 }
                 // Unknown lang item.
                 _ => {
-                    struct_span_err!(
-                        self.tcx.sess,
-                        span,
-                        E0522,
-                        "definition of an unknown language item: `{}`",
-                        value
-                    )
-                    .span_label(span, format!("definition of unknown language item `{}`", value))
-                    .emit();
+                    self.tcx.dcx().emit_err(UnknownLangItem { span: attr_span, name });
                 }
             }
         }
     }
 
-    fn collect_item(&mut self, item_index: usize, item_def_id: DefId) {
+    fn collect_item(&mut self, lang_item: LangItem, item_def_id: DefId, item_span: Option<Span>) {
         // Check for duplicates.
-        if let Some(original_def_id) = self.items.items[item_index] {
-            if original_def_id != item_def_id {
-                let lang_item = LangItem::from_u32(item_index as u32).unwrap();
-                let name = lang_item.name();
-                let mut err = match self.tcx.hir().span_if_local(item_def_id) {
-                    Some(span) => struct_span_err!(
-                        self.tcx.sess,
-                        span,
-                        E0152,
-                        "found duplicate lang item `{}`",
-                        name
-                    ),
-                    None => match self.tcx.extern_crate(item_def_id) {
-                        Some(ExternCrate { dependency_of, .. }) => {
-                            self.tcx.sess.struct_err(&format!(
-                                "duplicate lang item in crate `{}` (which `{}` depends on): `{}`.",
-                                self.tcx.crate_name(item_def_id.krate),
-                                self.tcx.crate_name(*dependency_of),
-                                name
-                            ))
-                        }
-                        _ => self.tcx.sess.struct_err(&format!(
-                            "duplicate lang item in crate `{}`: `{}`.",
-                            self.tcx.crate_name(item_def_id.krate),
-                            name
-                        )),
-                    },
-                };
-                if let Some(span) = self.tcx.hir().span_if_local(original_def_id) {
-                    err.span_note(span, "the lang item is first defined here");
-                } else {
-                    match self.tcx.extern_crate(original_def_id) {
-                        Some(ExternCrate { dependency_of, .. }) => {
-                            err.note(&format!(
-                                "the lang item is first defined in crate `{}` (which `{}` depends on)",
-                                self.tcx.crate_name(original_def_id.krate),
-                                self.tcx.crate_name(*dependency_of)
-                            ));
-                        }
-                        _ => {
-                            err.note(&format!(
-                                "the lang item is first defined in crate `{}`.",
-                                self.tcx.crate_name(original_def_id.krate)
-                            ));
-                        }
-                    }
-                    let mut note_def = |which, def_id: DefId| {
-                        let crate_name = self.tcx.crate_name(def_id.krate);
-                        let note = if def_id.is_local() {
-                            format!("{} definition in the local crate (`{}`)", which, crate_name)
-                        } else {
-                            let paths: Vec<_> = self
-                                .tcx
-                                .crate_extern_paths(def_id.krate)
-                                .iter()
-                                .map(|p| p.display().to_string())
-                                .collect();
-                            format!(
-                                "{} definition in `{}` loaded from {}",
-                                which,
-                                crate_name,
-                                paths.join(", ")
-                            )
-                        };
-                        err.note(&note);
-                    };
-                    note_def("first", original_def_id);
-                    note_def("second", item_def_id);
-                }
-                err.emit();
-            }
-        }
+        if let Some(original_def_id) = self.items.get(lang_item)
+            && original_def_id != item_def_id
+        {
+            let lang_item_name = lang_item.name();
+            let crate_name = self.tcx.crate_name(item_def_id.krate);
+            let mut dependency_of = kw::Empty;
+            let is_local = item_def_id.is_local();
+            let path = if is_local {
+                String::new()
+            } else {
+                self.tcx
+                    .crate_extern_paths(item_def_id.krate)
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
 
-        // Matched.
-        self.items.items[item_index] = Some(item_def_id);
-        if let Some(group) = LangItem::from_u32(item_index as u32).unwrap().group() {
-            self.items.groups[group as usize].push(item_def_id);
+            let first_defined_span = self.item_spans.get(&original_def_id).copied();
+            let mut orig_crate_name = kw::Empty;
+            let mut orig_dependency_of = kw::Empty;
+            let orig_is_local = original_def_id.is_local();
+            let orig_path = if orig_is_local {
+                String::new()
+            } else {
+                self.tcx
+                    .crate_extern_paths(original_def_id.krate)
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            if first_defined_span.is_none() {
+                orig_crate_name = self.tcx.crate_name(original_def_id.krate);
+                if let Some(ExternCrate { dependency_of: inner_dependency_of, .. }) =
+                    self.tcx.extern_crate(original_def_id.krate)
+                {
+                    orig_dependency_of = self.tcx.crate_name(*inner_dependency_of);
+                }
+            }
+
+            let duplicate = if item_span.is_some() {
+                Duplicate::Plain
+            } else {
+                match self.tcx.extern_crate(item_def_id.krate) {
+                    Some(ExternCrate { dependency_of: inner_dependency_of, .. }) => {
+                        dependency_of = self.tcx.crate_name(*inner_dependency_of);
+                        Duplicate::CrateDepends
+                    }
+                    _ => Duplicate::Crate,
+                }
+            };
+
+            // When there's a duplicate lang item, something went very wrong and there's no value
+            // in recovering or doing anything. Give the user the one message to let them debug the
+            // mess they created and then wish them farewell.
+            self.tcx.dcx().emit_fatal(DuplicateLangItem {
+                local_span: item_span,
+                lang_item_name,
+                crate_name,
+                dependency_of,
+                is_local,
+                path,
+                first_defined_span,
+                orig_crate_name,
+                orig_dependency_of,
+                orig_is_local,
+                orig_path,
+                duplicate,
+            });
+        } else {
+            // Matched.
+            self.items.set(lang_item, item_def_id);
+            // Collect span for error later
+            if let Some(item_span) = item_span {
+                self.item_spans.insert(item_def_id, item_span);
+            }
         }
     }
 
     // Like collect_item() above, but also checks whether the lang item is declared
     // with the right number of generic arguments.
-    fn collect_item_extended(&mut self, item_index: usize, hir_id: HirId, span: Span) {
-        let item_def_id = self.tcx.hir().local_def_id(hir_id).to_def_id();
-        let lang_item = LangItem::from_u32(item_index as u32).unwrap();
+    fn collect_item_extended(
+        &mut self,
+        lang_item: LangItem,
+        item_def_id: LocalDefId,
+        item_span: Span,
+        attr_span: Span,
+        generics: Option<&'ast ast::Generics>,
+        target: Target,
+    ) {
         let name = lang_item.name();
 
-        // Now check whether the lang_item has the expected number of generic
-        // arguments. Generally speaking, binary and indexing operations have
-        // one (for the RHS/index), unary operations have none, the closure
-        // traits have one for the argument list, generators have one for the
-        // resume argument, and ordering/equality relations have one for the RHS
-        // Some other types like Box and various functions like drop_in_place
-        // have minimum requirements.
+        if let Some(generics) = generics {
+            // Now check whether the lang_item has the expected number of generic
+            // arguments. Generally speaking, binary and indexing operations have
+            // one (for the RHS/index), unary operations have none, the closure
+            // traits have one for the argument list, coroutines have one for the
+            // resume argument, and ordering/equality relations have one for the RHS
+            // Some other types like Box and various functions like drop_in_place
+            // have minimum requirements.
 
-        if let hir::Node::Item(hir::Item { kind, span: item_span, .. }) = self.tcx.hir().get(hir_id)
-        {
-            let (actual_num, generics_span) = match kind.generics() {
-                Some(generics) => (generics.params.len(), generics.span),
-                None => (0, *item_span),
-            };
+            // FIXME: This still doesn't count, e.g., elided lifetimes and APITs.
+            let mut actual_num = generics.params.len();
+            if target.is_associated_item() {
+                actual_num += self
+                    .parent_item
+                    .unwrap()
+                    .opt_generics()
+                    .map_or(0, |generics| generics.params.len());
+            }
 
+            let mut at_least = false;
             let required = match lang_item.required_generics() {
-                GenericRequirement::Exact(num) if num != actual_num => {
-                    Some((format!("{}", num), pluralize!(num)))
-                }
+                GenericRequirement::Exact(num) if num != actual_num => Some(num),
                 GenericRequirement::Minimum(num) if actual_num < num => {
-                    Some((format!("at least {}", num), pluralize!(num)))
+                    at_least = true;
+                    Some(num)
                 }
                 // If the number matches, or there is no requirement, handle it normally
                 _ => None,
             };
 
-            if let Some((range_str, pluralized)) = required {
+            if let Some(num) = required {
                 // We are issuing E0718 "incorrect target" here, because while the
                 // item kind of the target is correct, the target is still wrong
                 // because of the wrong number of generic arguments.
-                struct_span_err!(
-                    self.tcx.sess,
-                    span,
-                    E0718,
-                    "`{}` language item must be applied to a {} with {} generic argument{}",
-                    name,
-                    kind.descr(),
-                    range_str,
-                    pluralized,
-                )
-                .span_label(
-                    generics_span,
-                    format!(
-                        "this {} has {} generic argument{}",
-                        kind.descr(),
-                        actual_num,
-                        pluralize!(actual_num),
-                    ),
-                )
-                .emit();
+                self.tcx.dcx().emit_err(IncorrectTarget {
+                    span: attr_span,
+                    generics_span: generics.span,
+                    name: name.as_str(),
+                    kind: target.name(),
+                    num,
+                    actual_num,
+                    at_least,
+                });
 
                 // return early to not collect the lang item
                 return;
             }
         }
 
-        self.collect_item(item_index, item_def_id);
+        self.collect_item(lang_item, item_def_id.to_def_id(), Some(item_span));
     }
 }
 
 /// Traverses and collects all the lang items in all crates.
 fn get_lang_items(tcx: TyCtxt<'_>, (): ()) -> LanguageItems {
+    let resolver = tcx.resolver_for_lowering().borrow();
+    let (resolver, krate) = &*resolver;
+
     // Initialize the collector.
-    let mut collector = LanguageItemCollector::new(tcx);
+    let mut collector = LanguageItemCollector::new(tcx, resolver);
 
     // Collect lang items in other crates.
-    for &cnum in tcx.crates(()).iter() {
-        for &(def_id, item_index) in tcx.defined_lang_items(cnum).iter() {
-            collector.collect_item(item_index, def_id);
+    for &cnum in tcx.used_crates(()).iter() {
+        for &(def_id, lang_item) in tcx.defined_lang_items(cnum).iter() {
+            collector.collect_item(lang_item, def_id, None);
         }
     }
 
-    // Collect lang items in this crate.
-    tcx.hir().visit_all_item_likes(&mut collector);
-
-    // Extract out the found lang items.
-    let LanguageItemCollector { mut items, .. } = collector;
+    // Collect lang items local to this crate.
+    visit::Visitor::visit_crate(&mut collector, krate);
 
     // Find all required but not-yet-defined lang items.
-    weak_lang_items::check_crate(tcx, &mut items);
+    weak_lang_items::check_crate(tcx, &mut collector.items, krate);
 
-    items
+    // Return all the lang items that were found.
+    collector.items
 }
 
-pub fn provide(providers: &mut Providers) {
+impl<'ast, 'tcx> visit::Visitor<'ast> for LanguageItemCollector<'ast, 'tcx> {
+    fn visit_item(&mut self, i: &'ast ast::Item) {
+        let target = match &i.kind {
+            ast::ItemKind::ExternCrate(_) => Target::ExternCrate,
+            ast::ItemKind::Use(_) => Target::Use,
+            ast::ItemKind::Static(_) => Target::Static,
+            ast::ItemKind::Const(_) => Target::Const,
+            ast::ItemKind::Fn(_) | ast::ItemKind::Delegation(..) => Target::Fn,
+            ast::ItemKind::Mod(_, _) => Target::Mod,
+            ast::ItemKind::ForeignMod(_) => Target::ForeignFn,
+            ast::ItemKind::GlobalAsm(_) => Target::GlobalAsm,
+            ast::ItemKind::TyAlias(_) => Target::TyAlias,
+            ast::ItemKind::Enum(_, _) => Target::Enum,
+            ast::ItemKind::Struct(_, _) => Target::Struct,
+            ast::ItemKind::Union(_, _) => Target::Union,
+            ast::ItemKind::Trait(_) => Target::Trait,
+            ast::ItemKind::TraitAlias(_, _) => Target::TraitAlias,
+            ast::ItemKind::Impl(_) => Target::Impl,
+            ast::ItemKind::MacroDef(_) => Target::MacroDef,
+            ast::ItemKind::MacCall(_) | ast::ItemKind::DelegationMac(_) => {
+                unreachable!("macros should have been expanded")
+            }
+        };
+
+        self.check_for_lang(
+            target,
+            self.resolver.node_id_to_def_id[&i.id],
+            &i.attrs,
+            i.span,
+            i.opt_generics(),
+        );
+
+        let parent_item = self.parent_item.replace(i);
+        visit::walk_item(self, i);
+        self.parent_item = parent_item;
+    }
+
+    fn visit_enum_def(&mut self, enum_definition: &'ast ast::EnumDef) {
+        for variant in &enum_definition.variants {
+            self.check_for_lang(
+                Target::Variant,
+                self.resolver.node_id_to_def_id[&variant.id],
+                &variant.attrs,
+                variant.span,
+                None,
+            );
+        }
+
+        visit::walk_enum_def(self, enum_definition);
+    }
+
+    fn visit_assoc_item(&mut self, i: &'ast ast::AssocItem, ctxt: visit::AssocCtxt) {
+        let (target, generics) = match &i.kind {
+            ast::AssocItemKind::Fn(..) | ast::AssocItemKind::Delegation(..) => {
+                let (body, generics) = if let ast::AssocItemKind::Fn(fun) = &i.kind {
+                    (fun.body.is_some(), Some(&fun.generics))
+                } else {
+                    (true, None)
+                };
+                (
+                    match &self.parent_item.unwrap().kind {
+                        ast::ItemKind::Impl(i) => {
+                            if i.of_trait.is_some() {
+                                Target::Method(MethodKind::Trait { body })
+                            } else {
+                                Target::Method(MethodKind::Inherent)
+                            }
+                        }
+                        ast::ItemKind::Trait(_) => Target::Method(MethodKind::Trait { body }),
+                        _ => unreachable!(),
+                    },
+                    generics,
+                )
+            }
+            ast::AssocItemKind::Const(ct) => (Target::AssocConst, Some(&ct.generics)),
+            ast::AssocItemKind::Type(ty) => (Target::AssocTy, Some(&ty.generics)),
+            ast::AssocItemKind::MacCall(_) | ast::AssocItemKind::DelegationMac(_) => {
+                unreachable!("macros should have been expanded")
+            }
+        };
+
+        self.check_for_lang(
+            target,
+            self.resolver.node_id_to_def_id[&i.id],
+            &i.attrs,
+            i.span,
+            generics,
+        );
+
+        visit::walk_assoc_item(self, i, ctxt);
+    }
+}
+
+pub(crate) fn provide(providers: &mut Providers) {
     providers.get_lang_items = get_lang_items;
 }

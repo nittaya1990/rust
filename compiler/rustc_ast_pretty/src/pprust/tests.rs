@@ -1,8 +1,8 @@
-use super::*;
-
 use rustc_ast as ast;
-use rustc_span::create_default_session_globals_then;
-use rustc_span::symbol::Ident;
+use rustc_span::{DUMMY_SP, Ident, create_default_session_globals_then};
+use thin_vec::ThinVec;
+
+use super::*;
 
 fn fun_to_string(
     decl: &ast::FnDecl,
@@ -27,8 +27,7 @@ fn test_fun_to_string() {
     create_default_session_globals_then(|| {
         let abba_ident = Ident::from_str("abba");
 
-        let decl =
-            ast::FnDecl { inputs: Vec::new(), output: ast::FnRetTy::Default(rustc_span::DUMMY_SP) };
+        let decl = ast::FnDecl { inputs: ThinVec::new(), output: ast::FnRetTy::Default(DUMMY_SP) };
         let generics = ast::Generics::default();
         assert_eq!(
             fun_to_string(&decl, ast::FnHeader::default(), abba_ident, &generics),
@@ -45,7 +44,7 @@ fn test_variant_to_string() {
         let var = ast::Variant {
             ident,
             vis: ast::Visibility {
-                span: rustc_span::DUMMY_SP,
+                span: DUMMY_SP,
                 kind: ast::VisibilityKind::Inherited,
                 tokens: None,
             },
@@ -53,7 +52,7 @@ fn test_variant_to_string() {
             id: ast::DUMMY_NODE_ID,
             data: ast::VariantData::Unit(ast::DUMMY_NODE_ID),
             disr_expr: None,
-            span: rustc_span::DUMMY_SP,
+            span: DUMMY_SP,
             is_placeholder: false,
         };
 

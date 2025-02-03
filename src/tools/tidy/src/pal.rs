@@ -30,42 +30,44 @@
 //! platform-specific cfgs are allowed. Not sure yet how to deal with
 //! this in the long term.
 
-use std::iter::Iterator;
 use std::path::Path;
+
+use crate::walk::{filter_dirs, walk};
 
 // Paths that may contain platform-specific code.
 const EXCEPTION_PATHS: &[&str] = &[
+    "library/windows_targets",
     "library/panic_abort",
     "library/panic_unwind",
     "library/unwind",
     "library/rtstartup", // Not sure what to do about this. magic stuff for mingw
-    "library/term",      // Not sure how to make this crate portable, but test crate needs it.
     "library/test",      // Probably should defer to unstable `std::sys` APIs.
     // The `VaList` implementation must have platform specific code.
     // The Windows implementation of a `va_list` is always a character
     // pointer regardless of the target architecture. As a result,
     // we must use `#[cfg(windows)]` to conditionally compile the
     // correct `VaList` structure for windows.
+    "library/core/src/ffi/va_list.rs",
+    // We placed a linkage against Windows libraries here
     "library/core/src/ffi/mod.rs",
-    "library/std/src/sys/", // Platform-specific code for std lives here.
-    "library/std/src/os",   // Platform-specific public interfaces
+    "library/std/src/sys", // Platform-specific code for std lives here.
+    "library/std/src/os",  // Platform-specific public interfaces
     // Temporary `std` exceptions
     // FIXME: platform-specific code should be moved to `sys`
     "library/std/src/io/copy.rs",
     "library/std/src/io/stdio.rs",
-    "library/std/src/f32.rs",
-    "library/std/src/f64.rs",
+    "library/std/src/lib.rs", // for miniz_oxide leaking docs, which itself workaround
     "library/std/src/path.rs",
     "library/std/src/sys_common", // Should only contain abstractions over platforms
     "library/std/src/net/test.rs", // Utility helpers for tests
-    "library/std/src/panic.rs",   // fuchsia-specific panic backtrace handling
+    "library/std/src/io/error.rs", // Repr unpacked needed for UEFI
 ];
 
 pub fn check(path: &Path, bad: &mut bool) {
     // Sanity check that the complex parsing here works.
     let mut saw_target_arch = false;
     let mut saw_cfg_bang = false;
-    super::walk(path, &mut super::filter_dirs, &mut |entry, contents| {
+    walk(path, |path, _is_dir| filter_dirs(path), &mut |entry, contents| {
         let file = entry.path();
         let filestr = file.to_string_lossy().replace("\\", "/");
         if !filestr.ends_with(".rs") {
@@ -125,6 +127,7 @@ fn check_cfgs(
             || cfg.contains("target_env")
             || cfg.contains("target_abi")
             || cfg.contains("target_vendor")
+            || cfg.contains("target_family")
             || cfg.contains("unix")
             || cfg.contains("windows");
 
@@ -132,7 +135,7 @@ fn check_cfgs(
             continue;
         }
 
-        let preceeded_by_doc_comment = {
+        let preceded_by_doc_comment = {
             let pre_contents = &contents[..idx];
             let pre_newline = pre_contents.rfind('\n');
             let pre_doc_comment = pre_contents.rfind("///");
@@ -143,7 +146,7 @@ fn check_cfgs(
             }
         };
 
-        if preceeded_by_doc_comment {
+        if preceded_by_doc_comment {
             continue;
         }
 

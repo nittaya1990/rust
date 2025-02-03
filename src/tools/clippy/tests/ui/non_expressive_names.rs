@@ -1,5 +1,5 @@
 #![warn(clippy::all)]
-#![allow(unused, clippy::println_empty_string, non_snake_case)]
+#![allow(unused, clippy::println_empty_string, non_snake_case, clippy::let_unit_value)]
 
 #[derive(Clone, Debug)]
 enum MaybeInst {
@@ -25,9 +25,9 @@ impl MaybeInst {
 }
 
 fn underscores_and_numbers() {
-    let _1 = 1; //~ERROR Consider a more descriptive name
-    let ____1 = 1; //~ERROR Consider a more descriptive name
-    let __1___2 = 12; //~ERROR Consider a more descriptive name
+    let _1 = 1; //~ERROR: consider choosing a more descriptive name
+    let ____1 = 1; //~ERROR: consider choosing a more descriptive name
+    let __1___2 = 12; //~ERROR: consider choosing a more descriptive name
     let _1_ok = 1;
 }
 
@@ -48,9 +48,9 @@ struct Bar;
 
 impl Bar {
     fn bar() {
-        let _1 = 1;
-        let ____1 = 1;
-        let __1___2 = 12;
+        let _1 = 1; //~ERROR: consider choosing a more descriptive name
+        let ____1 = 1; //~ERROR: consider choosing a more descriptive name
+        let __1___2 = 12; //~ERROR: consider choosing a more descriptive name
         let _1_ok = 1;
     }
 }

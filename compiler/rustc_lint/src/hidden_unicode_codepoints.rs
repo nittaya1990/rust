@@ -1,10 +1,15 @@
-use crate::{EarlyContext, EarlyLintPass, LintContext};
-use ast::util::unicode::{contains_text_flow_control_chars, TEXT_FLOW_CONTROL_CHARS};
+use ast::util::unicode::{TEXT_FLOW_CONTROL_CHARS, contains_text_flow_control_chars};
 use rustc_ast as ast;
-use rustc_errors::{Applicability, SuggestionStyle};
+use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::{BytePos, Span, Symbol};
 
+use crate::lints::{
+    HiddenUnicodeCodepointsDiag, HiddenUnicodeCodepointsDiagLabels, HiddenUnicodeCodepointsDiagSub,
+};
+use crate::{EarlyContext, EarlyLintPass, LintContext};
+
 declare_lint! {
+    #[allow(text_direction_codepoint_in_literal)]
     /// The `text_direction_codepoint_in_literal` lint detects Unicode codepoints that change the
     /// visual representation of text on screen in a way that does not correspond to their on
     /// memory representation.
@@ -60,70 +65,53 @@ impl HiddenUnicodeCodepoints {
             })
             .collect();
 
-        cx.struct_span_lint(TEXT_DIRECTION_CODEPOINT_IN_LITERAL, span, |lint| {
-            let mut err = lint.build(&format!(
-                "unicode codepoint changing visible direction of text present in {}",
-                label
-            ));
-            let (an, s) = match spans.len() {
-                1 => ("an ", ""),
-                _ => ("", "s"),
-            };
-            err.span_label(
-                span,
-                &format!(
-                    "this {} contains {}invisible unicode text flow control codepoint{}",
-                    label, an, s,
-                ),
-            );
-            if point_at_inner_spans {
-                for (c, span) in &spans {
-                    err.span_label(*span, format!("{:?}", c));
-                }
-            }
-            err.note(
-                "these kind of unicode codepoints change the way text flows on applications that \
-                 support them, but can cause confusion because they change the order of \
-                 characters on the screen",
-            );
-            if point_at_inner_spans && !spans.is_empty() {
-                err.multipart_suggestion_with_style(
-                    "if their presence wasn't intentional, you can remove them",
-                    spans.iter().map(|(_, span)| (*span, "".to_string())).collect(),
-                    Applicability::MachineApplicable,
-                    SuggestionStyle::HideCodeAlways,
-                );
-                err.multipart_suggestion(
-                    "if you want to keep them but make them visible in your source code, you can \
-                    escape them",
-                    spans
-                        .into_iter()
-                        .map(|(c, span)| {
-                            let c = format!("{:?}", c);
-                            (span, c[1..c.len() - 1].to_string())
-                        })
-                        .collect(),
-                    Applicability::MachineApplicable,
-                );
-            } else {
-                // FIXME: in other suggestions we've reversed the inner spans of doc comments. We
-                // should do the same here to provide the same good suggestions as we do for
-                // literals above.
-                err.note("if their presence wasn't intentional, you can remove them");
-                err.note(&format!(
-                    "if you want to keep them but make them visible in your source code, you can \
-                     escape them: {}",
-                    spans
-                        .into_iter()
-                        .map(|(c, _)| { format!("{:?}", c) })
-                        .collect::<Vec<String>>()
-                        .join(", "),
-                ));
-            }
-            err.emit();
+        let count = spans.len();
+        let labels = point_at_inner_spans
+            .then_some(HiddenUnicodeCodepointsDiagLabels { spans: spans.clone() });
+        let sub = if point_at_inner_spans && !spans.is_empty() {
+            HiddenUnicodeCodepointsDiagSub::Escape { spans }
+        } else {
+            HiddenUnicodeCodepointsDiagSub::NoEscape { spans }
+        };
+
+        cx.emit_span_lint(TEXT_DIRECTION_CODEPOINT_IN_LITERAL, span, HiddenUnicodeCodepointsDiag {
+            label,
+            count,
+            span_label: span,
+            labels,
+            sub,
         });
     }
+
+    fn check_literal(
+        &mut self,
+        cx: &EarlyContext<'_>,
+        text: Symbol,
+        lit_kind: ast::token::LitKind,
+        span: Span,
+        label: &'static str,
+    ) {
+        if !contains_text_flow_control_chars(text.as_str()) {
+            return;
+        }
+        let (padding, point_at_inner_spans) = match lit_kind {
+            // account for `"` or `'`
+            ast::token::LitKind::Str | ast::token::LitKind::Char => (1, true),
+            // account for `c"`
+            ast::token::LitKind::CStr => (2, true),
+            // account for `r###"`
+            ast::token::LitKind::StrRaw(n) => (n as u32 + 2, true),
+            // account for `cr###"`
+            ast::token::LitKind::CStrRaw(n) => (n as u32 + 3, true),
+            // suppress bad literals.
+            ast::token::LitKind::Err(_) => return,
+            // Be conservative just in case new literals do support these.
+            _ => (0, false),
+        };
+        self.lint_text_direction_codepoint(cx, text, span, padding, point_at_inner_spans, label);
+    }
 }
+
 impl EarlyLintPass for HiddenUnicodeCodepoints {
     fn check_attribute(&mut self, cx: &EarlyContext<'_>, attr: &ast::Attribute) {
         if let ast::AttrKind::DocComment(_, comment) = attr.kind {
@@ -133,25 +121,18 @@ impl EarlyLintPass for HiddenUnicodeCodepoints {
         }
     }
 
+    #[inline]
     fn check_expr(&mut self, cx: &EarlyContext<'_>, expr: &ast::Expr) {
         // byte strings are already handled well enough by `EscapeError::NonAsciiCharInByteString`
-        let (text, span, padding) = match &expr.kind {
-            ast::ExprKind::Lit(ast::Lit { token, kind, span }) => {
-                let text = token.symbol;
-                if !contains_text_flow_control_chars(text.as_str()) {
-                    return;
-                }
-                let padding = match kind {
-                    // account for `"` or `'`
-                    ast::LitKind::Str(_, ast::StrStyle::Cooked) | ast::LitKind::Char(_) => 1,
-                    // account for `r###"`
-                    ast::LitKind::Str(_, ast::StrStyle::Raw(val)) => *val as u32 + 2,
-                    _ => return,
-                };
-                (text, span, padding)
+        match &expr.kind {
+            ast::ExprKind::Lit(token_lit) => {
+                self.check_literal(cx, token_lit.symbol, token_lit.kind, expr.span, "literal");
             }
-            _ => return,
+            ast::ExprKind::FormatArgs(args) => {
+                let (lit_kind, text) = args.uncooked_fmt_str;
+                self.check_literal(cx, text, lit_kind, args.span, "format string");
+            }
+            _ => {}
         };
-        self.lint_text_direction_codepoint(cx, text, *span, padding, true, "literal");
     }
 }

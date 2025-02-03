@@ -5,8 +5,7 @@
 use std::io;
 use std::io::prelude::*;
 
-use super::color;
-use super::Terminal;
+use super::{Terminal, color};
 
 /// A Terminal implementation that uses the Win32 Console API.
 pub(crate) struct WinConsole<T> {
@@ -22,6 +21,8 @@ type WORD = u16;
 type DWORD = u32;
 type BOOL = i32;
 type HANDLE = *mut u8;
+// https://docs.microsoft.com/en-us/windows/console/getstdhandle
+const STD_OUTPUT_HANDLE: DWORD = -11 as _;
 
 #[allow(non_snake_case)]
 #[repr(C)]
@@ -99,31 +100,26 @@ impl<T: Write + Send + 'static> WinConsole<T> {
         accum |= color_to_bits(self.background) << 4;
 
         unsafe {
-            // Magic -11 means stdout, from
-            // https://docs.microsoft.com/en-us/windows/console/getstdhandle
-            //
             // You may be wondering, "but what about stderr?", and the answer
             // to that is that setting terminal attributes on the stdout
             // handle also sets them for stderr, since they go to the same
             // terminal! Admittedly, this is fragile, since stderr could be
             // redirected to a different console. This is good enough for
             // rustc though. See #13400.
-            let out = GetStdHandle(-11i32 as DWORD);
+            let out = GetStdHandle(STD_OUTPUT_HANDLE);
             SetConsoleTextAttribute(out, accum);
         }
     }
 
-    /// Returns `None` whenever the terminal cannot be created for some reason.
-    pub(crate) fn new(out: T) -> io::Result<WinConsole<T>> {
+    pub(crate) fn new(out: T) -> WinConsole<T> {
         use std::mem::MaybeUninit;
 
         let fg;
         let bg;
         unsafe {
             let mut buffer_info = MaybeUninit::<CONSOLE_SCREEN_BUFFER_INFO>::uninit();
-            if GetConsoleScreenBufferInfo(GetStdHandle(-11i32 as DWORD), buffer_info.as_mut_ptr())
-                != 0
-            {
+            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if GetConsoleScreenBufferInfo(handle, buffer_info.as_mut_ptr()) != 0 {
                 let buffer_info = buffer_info.assume_init();
                 fg = bits_to_color(buffer_info.wAttributes);
                 bg = bits_to_color(buffer_info.wAttributes >> 4);
@@ -132,13 +128,13 @@ impl<T: Write + Send + 'static> WinConsole<T> {
                 bg = color::BLACK;
             }
         }
-        Ok(WinConsole {
+        WinConsole {
             buf: out,
             def_foreground: fg,
             def_background: bg,
             foreground: fg,
             background: bg,
-        })
+        }
     }
 }
 

@@ -1,8 +1,7 @@
-// run-rustfix
 // will emits unused mut warnings after fixing
 #![allow(unused_mut)]
 // will emits needless collect warnings after fixing
-#![allow(clippy::needless_collect)]
+#![allow(clippy::needless_collect, clippy::drain_collect)]
 #![warn(clippy::iter_with_drain)]
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
@@ -37,6 +36,15 @@ fn should_not_help() {
 
     let mut b = vec!["aaa".to_string(), "bbb".to_string()];
     let _: Vec<_> = b.drain(0..a.len()).collect();
+}
+
+fn _closed_range(mut x: Vec<String>) {
+    let _: Vec<String> = x.drain(0..=x.len()).collect();
+}
+
+fn _with_mut(x: &mut Vec<String>, y: &mut VecDeque<String>) {
+    let _: Vec<String> = x.drain(..).collect();
+    let _: Vec<String> = y.drain(..).collect();
 }
 
 #[derive(Default)]

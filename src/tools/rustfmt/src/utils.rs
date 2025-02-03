@@ -1,16 +1,16 @@
 use std::borrow::Cow;
 
 use rustc_ast::ast::{
-    self, Attribute, CrateSugar, MetaItem, MetaItemKind, NestedMetaItem, NodeId, Path, Visibility,
+    self, Attribute, MetaItem, MetaItemInner, MetaItemKind, NodeId, Path, Visibility,
     VisibilityKind,
 };
 use rustc_ast::ptr;
 use rustc_ast_pretty::pprust;
-use rustc_span::{sym, symbol, BytePos, LocalExpnId, Span, Symbol, SyntaxContext};
+use rustc_span::{BytePos, LocalExpnId, Span, Symbol, SyntaxContext, sym, symbol};
 use unicode_width::UnicodeWidthStr;
 
-use crate::comment::{filter_normal_code, CharClasses, FullCodeCharKind, LineClasses};
-use crate::config::{Config, Version};
+use crate::comment::{CharClasses, FullCodeCharKind, LineClasses, filter_normal_code};
+use crate::config::{Config, StyleEdition};
 use crate::rewrite::RewriteContext;
 use crate::shape::{Indent, Shape};
 
@@ -44,15 +44,7 @@ pub(crate) fn is_same_visibility(a: &Visibility, b: &Visibility) -> bool {
             VisibilityKind::Restricted { path: q, .. },
         ) => pprust::path_to_string(p) == pprust::path_to_string(q),
         (VisibilityKind::Public, VisibilityKind::Public)
-        | (VisibilityKind::Inherited, VisibilityKind::Inherited)
-        | (
-            VisibilityKind::Crate(CrateSugar::PubCrate),
-            VisibilityKind::Crate(CrateSugar::PubCrate),
-        )
-        | (
-            VisibilityKind::Crate(CrateSugar::JustCrate),
-            VisibilityKind::Crate(CrateSugar::JustCrate),
-        ) => true,
+        | (VisibilityKind::Inherited, VisibilityKind::Inherited) => true,
         _ => false,
     }
 }
@@ -65,8 +57,6 @@ pub(crate) fn format_visibility(
     match vis.kind {
         VisibilityKind::Public => Cow::from("pub "),
         VisibilityKind::Inherited => Cow::from(""),
-        VisibilityKind::Crate(CrateSugar::PubCrate) => Cow::from("pub(crate) "),
-        VisibilityKind::Crate(CrateSugar::JustCrate) => Cow::from("crate "),
         VisibilityKind::Restricted { ref path, .. } => {
             let Path { ref segments, .. } = **path;
             let mut segments_iter = segments.iter().map(|seg| rewrite_ident(context, seg.ident));
@@ -75,20 +65,21 @@ pub(crate) fn format_visibility(
                     .next()
                     .expect("Non-global path in pub(restricted)?");
             }
-            let is_keyword = |s: &str| s == "self" || s == "super";
+            let is_keyword = |s: &str| s == "crate" || s == "self" || s == "super";
             let path = segments_iter.collect::<Vec<_>>().join("::");
             let in_str = if is_keyword(&path) { "" } else { "in " };
 
-            Cow::from(format!("pub({}{}) ", in_str, path))
+            Cow::from(format!("pub({in_str}{path}) "))
         }
     }
 }
 
 #[inline]
-pub(crate) fn format_async(is_async: &ast::Async) -> &'static str {
-    match is_async {
-        ast::Async::Yes { .. } => "async ",
-        ast::Async::No => "",
+pub(crate) fn format_coro(coroutine_kind: &ast::CoroutineKind) -> &'static str {
+    match coroutine_kind {
+        ast::CoroutineKind::Async { .. } => "async ",
+        ast::CoroutineKind::Gen { .. } => "gen ",
+        ast::CoroutineKind::AsyncGen { .. } => "async gen ",
     }
 }
 
@@ -117,10 +108,11 @@ pub(crate) fn format_defaultness(defaultness: ast::Defaultness) -> &'static str 
 }
 
 #[inline]
-pub(crate) fn format_unsafety(unsafety: ast::Unsafe) -> &'static str {
+pub(crate) fn format_safety(unsafety: ast::Safety) -> &'static str {
     match unsafety {
-        ast::Unsafe::Yes(..) => "unsafe ",
-        ast::Unsafe::No => "",
+        ast::Safety::Unsafe(..) => "unsafe ",
+        ast::Safety::Safe(..) => "safe ",
+        ast::Safety::Default => "",
     }
 }
 
@@ -141,23 +133,18 @@ pub(crate) fn format_mutability(mutability: ast::Mutability) -> &'static str {
 }
 
 #[inline]
-pub(crate) fn format_extern(
-    ext: ast::Extern,
-    explicit_abi: bool,
-    is_mod: bool,
-) -> Cow<'static, str> {
-    let abi = match ext {
-        ast::Extern::None => "Rust".to_owned(),
-        ast::Extern::Implicit => "C".to_owned(),
-        ast::Extern::Explicit(abi) => abi.symbol_unescaped.to_string(),
-    };
-
-    if abi == "Rust" && !is_mod {
-        Cow::from("")
-    } else if abi == "C" && !explicit_abi {
-        Cow::from("extern ")
-    } else {
-        Cow::from(format!(r#"extern "{}" "#, abi))
+pub(crate) fn format_extern(ext: ast::Extern, explicit_abi: bool) -> Cow<'static, str> {
+    match ext {
+        ast::Extern::None => Cow::from(""),
+        ast::Extern::Implicit(_) if explicit_abi => Cow::from("extern \"C\" "),
+        ast::Extern::Implicit(_) => Cow::from("extern "),
+        // turn `extern "C"` into `extern` when `explicit_abi` is set to false
+        ast::Extern::Explicit(abi, _) if abi.symbol_unescaped == sym::C && !explicit_abi => {
+            Cow::from("extern ")
+        }
+        ast::Extern::Explicit(abi, _) => {
+            Cow::from(format!(r#"extern "{}" "#, abi.symbol_unescaped))
+        }
     }
 }
 
@@ -270,10 +257,10 @@ fn is_skip(meta_item: &MetaItem) -> bool {
 }
 
 #[inline]
-fn is_skip_nested(meta_item: &NestedMetaItem) -> bool {
+fn is_skip_nested(meta_item: &MetaItemInner) -> bool {
     match meta_item {
-        NestedMetaItem::MetaItem(ref mi) => is_skip(mi),
-        NestedMetaItem::Literal(_) => false,
+        MetaItemInner::MetaItem(ref mi) => is_skip(mi),
+        MetaItemInner::Lit(_) => false,
     }
 }
 
@@ -302,14 +289,20 @@ pub(crate) fn semicolon_for_expr(context: &RewriteContext<'_>, expr: &ast::Expr)
 }
 
 #[inline]
-pub(crate) fn semicolon_for_stmt(context: &RewriteContext<'_>, stmt: &ast::Stmt) -> bool {
+pub(crate) fn semicolon_for_stmt(
+    context: &RewriteContext<'_>,
+    stmt: &ast::Stmt,
+    is_last_expr: bool,
+) -> bool {
     match stmt.kind {
         ast::StmtKind::Semi(ref expr) => match expr.kind {
-            ast::ExprKind::While(..) | ast::ExprKind::Loop(..) | ast::ExprKind::ForLoop(..) => {
+            ast::ExprKind::While(..) | ast::ExprKind::Loop(..) | ast::ExprKind::ForLoop { .. } => {
                 false
             }
             ast::ExprKind::Break(..) | ast::ExprKind::Continue(..) | ast::ExprKind::Ret(..) => {
-                context.config.trailing_semicolon()
+                // The only time we can skip the semi-colon is if the config option is set to false
+                // **and** this is the last expr (even though any following exprs are unreachable)
+                context.config.trailing_semicolon() || !is_last_expr
             }
             _ => true,
         },
@@ -370,14 +363,14 @@ macro_rules! out_of_file_lines_range {
             && !$self
                 .config
                 .file_lines()
-                .intersects(&$self.parse_sess.lookup_line_range($span))
+                .intersects(&$self.psess.lookup_line_range($span))
     };
 }
 
-macro_rules! skip_out_of_file_lines_range {
+macro_rules! skip_out_of_file_lines_range_err {
     ($self:ident, $span:expr) => {
         if out_of_file_lines_range!($self, $span) {
-            return None;
+            return Err(RewriteError::SkipFormatting);
         }
     };
 }
@@ -394,14 +387,15 @@ macro_rules! skip_out_of_file_lines_range_visitor {
 // Wraps String in an Option. Returns Some when the string adheres to the
 // Rewrite constraints defined for the Rewrite trait and None otherwise.
 pub(crate) fn wrap_str(s: String, max_width: usize, shape: Shape) -> Option<String> {
-    if is_valid_str(&filter_normal_code(&s), max_width, shape) {
+    if filtered_str_fits(&s, max_width, shape) {
         Some(s)
     } else {
         None
     }
 }
 
-fn is_valid_str(snippet: &str, max_width: usize, shape: Shape) -> bool {
+pub(crate) fn filtered_str_fits(snippet: &str, max_width: usize, shape: Shape) -> bool {
+    let snippet = &filter_normal_code(snippet);
     if !snippet.is_empty() {
         // First line must fits with `shape.width`.
         if first_line_width(snippet) > shape.width {
@@ -450,7 +444,7 @@ pub(crate) fn left_most_sub_expr(e: &ast::Expr) -> &ast::Expr {
         | ast::ExprKind::Assign(ref e, _, _)
         | ast::ExprKind::AssignOp(_, ref e, _)
         | ast::ExprKind::Field(ref e, _)
-        | ast::ExprKind::Index(ref e, _)
+        | ast::ExprKind::Index(ref e, _, _)
         | ast::ExprKind::Range(Some(ref e), _, _)
         | ast::ExprKind::Try(ref e) => left_most_sub_expr(e),
         _ => e,
@@ -472,6 +466,7 @@ pub(crate) fn first_line_ends_with(s: &str, c: char) -> bool {
 pub(crate) fn is_block_expr(context: &RewriteContext<'_>, expr: &ast::Expr, repr: &str) -> bool {
     match expr.kind {
         ast::ExprKind::MacCall(..)
+        | ast::ExprKind::FormatArgs(..)
         | ast::ExprKind::Call(..)
         | ast::ExprKind::MethodCall(..)
         | ast::ExprKind::Array(..)
@@ -480,18 +475,18 @@ pub(crate) fn is_block_expr(context: &RewriteContext<'_>, expr: &ast::Expr, repr
         | ast::ExprKind::If(..)
         | ast::ExprKind::Block(..)
         | ast::ExprKind::ConstBlock(..)
-        | ast::ExprKind::Async(..)
+        | ast::ExprKind::Gen(..)
         | ast::ExprKind::Loop(..)
-        | ast::ExprKind::ForLoop(..)
+        | ast::ExprKind::ForLoop { .. }
         | ast::ExprKind::TryBlock(..)
         | ast::ExprKind::Match(..) => repr.contains('\n'),
         ast::ExprKind::Paren(ref expr)
         | ast::ExprKind::Binary(_, _, ref expr)
-        | ast::ExprKind::Index(_, ref expr)
+        | ast::ExprKind::Index(_, ref expr, _)
         | ast::ExprKind::Unary(_, ref expr)
-        | ast::ExprKind::Closure(_, _, _, _, ref expr, _)
         | ast::ExprKind::Try(ref expr)
         | ast::ExprKind::Yield(Some(ref expr)) => is_block_expr(context, expr, repr),
+        ast::ExprKind::Closure(ref closure) => is_block_expr(context, &closure.body, repr),
         // This can only be a string lit
         ast::ExprKind::Lit(_) => {
             repr.contains('\n') && trimmed_last_line_width(repr) <= context.config.tab_spaces()
@@ -500,18 +495,23 @@ pub(crate) fn is_block_expr(context: &RewriteContext<'_>, expr: &ast::Expr, repr
         | ast::ExprKind::Assign(..)
         | ast::ExprKind::AssignOp(..)
         | ast::ExprKind::Await(..)
-        | ast::ExprKind::Box(..)
         | ast::ExprKind::Break(..)
         | ast::ExprKind::Cast(..)
         | ast::ExprKind::Continue(..)
-        | ast::ExprKind::Err
+        | ast::ExprKind::Dummy
+        | ast::ExprKind::Err(_)
         | ast::ExprKind::Field(..)
+        | ast::ExprKind::IncludedBytes(..)
         | ast::ExprKind::InlineAsm(..)
+        | ast::ExprKind::OffsetOf(..)
+        | ast::ExprKind::UnsafeBinderCast(..)
         | ast::ExprKind::Let(..)
         | ast::ExprKind::Path(..)
         | ast::ExprKind::Range(..)
         | ast::ExprKind::Repeat(..)
         | ast::ExprKind::Ret(..)
+        | ast::ExprKind::Become(..)
+        | ast::ExprKind::Yeet(..)
         | ast::ExprKind::Tup(..)
         | ast::ExprKind::Type(..)
         | ast::ExprKind::Yield(None)
@@ -597,7 +597,7 @@ pub(crate) fn trim_left_preserve_layout(
 
             // just InString{Commented} in order to allow the start of a string to be indented
             let new_veto_trim_value = (kind == FullCodeCharKind::InString
-                || (config.version() == Version::Two
+                || (config.style_edition() >= StyleEdition::Edition2024
                     && kind == FullCodeCharKind::InStringCommented))
                 && !line.ends_with('\\');
             let line = if veto_trim || new_veto_trim_value {
@@ -613,7 +613,7 @@ pub(crate) fn trim_left_preserve_layout(
             // such lines should not be taken into account when computing the minimum.
             match kind {
                 FullCodeCharKind::InStringCommented | FullCodeCharKind::EndStringCommented
-                    if config.version() == Version::Two =>
+                    if config.style_edition() >= StyleEdition::Edition2024 =>
                 {
                     None
                 }
@@ -646,9 +646,22 @@ pub(crate) fn trim_left_preserve_layout(
 }
 
 /// Based on the given line, determine if the next line can be indented or not.
-/// This allows to preserve the indentation of multi-line literals.
-pub(crate) fn indent_next_line(kind: FullCodeCharKind, _line: &str, config: &Config) -> bool {
-    !(kind.is_string() || (config.version() == Version::Two && kind.is_commented_string()))
+/// This allows to preserve the indentation of multi-line literals when
+/// re-inserted a code block that has been formatted separately from the rest
+/// of the code, such as code in macro defs or code blocks doc comments.
+pub(crate) fn indent_next_line(kind: FullCodeCharKind, line: &str, config: &Config) -> bool {
+    if kind.is_string() {
+        // If the string ends with '\', the string has been wrapped over
+        // multiple lines. If `format_strings = true`, then the indentation of
+        // strings wrapped over multiple lines will have been adjusted while
+        // formatting the code block, therefore the string's indentation needs
+        // to be adjusted for the code surrounding the code block.
+        config.format_strings() && line.ends_with('\\')
+    } else if config.style_edition() >= StyleEdition::Edition2024 {
+        !kind.is_commented_string()
+    } else {
+        true
+    }
 }
 
 pub(crate) fn is_empty_line(s: &str) -> bool {

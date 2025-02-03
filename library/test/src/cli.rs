@@ -1,9 +1,9 @@
 //! Module converting command-line arguments into test configuration.
 
 use std::env;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
-use super::helpers::isatty;
 use super::options::{ColorConfig, Options, OutputFormat, RunIgnored};
 use super::time::TestTimeOptions;
 
@@ -26,13 +26,17 @@ pub struct TestOpts {
     pub test_threads: Option<usize>,
     pub skip: Vec<String>,
     pub time_options: Option<TestTimeOptions>,
+    /// Stop at first failing test.
+    /// May run a few more tests due to threading, but will
+    /// abort as soon as possible.
+    pub fail_fast: bool,
     pub options: Options,
 }
 
 impl TestOpts {
     pub fn use_color(&self) -> bool {
         match self.color {
-            ColorConfig::AutoColor => !self.nocapture && isatty::stdout_isatty(),
+            ColorConfig::AutoColor => !self.nocapture && io::stdout().is_terminal(),
             ColorConfig::AlwaysColor => true,
             ColorConfig::NeverColor => false,
         }
@@ -40,7 +44,7 @@ impl TestOpts {
 }
 
 /// Result of parsing the options.
-pub type OptRes = Result<TestOpts, String>;
+pub(crate) type OptRes = Result<TestOpts, String>;
 /// Result of parsing the option part.
 type OptPartRes<T> = Result<T, String>;
 
@@ -54,7 +58,7 @@ fn optgroups() -> getopts::Options {
         .optflag("", "bench", "Run benchmarks instead of tests")
         .optflag("", "list", "List all tests and benchmarks")
         .optflag("h", "help", "Display this message")
-        .optopt("", "logfile", "Write logs to the specified file", "PATH")
+        .optopt("", "logfile", "Write logs to the specified file (deprecated)", "PATH")
         .optflag(
             "",
             "nocapture",
@@ -196,6 +200,7 @@ Test Attributes:
 pub fn parse_opts(args: &[String]) -> Option<OptRes> {
     // Parse matches.
     let opts = optgroups();
+    let binary = args.first().map(|c| &**c).unwrap_or("...");
     let args = args.get(1..).unwrap_or(args);
     let matches = match opts.parse(args) {
         Ok(m) => m,
@@ -205,7 +210,7 @@ pub fn parse_opts(args: &[String]) -> Option<OptRes> {
     // Check if help was requested.
     if matches.opt_present("h") {
         // Show help and do nothing more.
-        usage(&args[0], &opts);
+        usage(binary, &opts);
         return None;
     }
 
@@ -276,6 +281,10 @@ fn parse_opts_impl(matches: getopts::Matches) -> OptRes {
 
     let options = Options::new().display_output(matches.opt_present("show-output"));
 
+    if logfile.is_some() {
+        let _ = write!(io::stderr(), "warning: `--logfile` is deprecated");
+    }
+
     let test_opts = TestOpts {
         list,
         filters,
@@ -295,6 +304,7 @@ fn parse_opts_impl(matches: getopts::Matches) -> OptRes {
         skip,
         time_options,
         options,
+        fail_fast: false,
     };
 
     Ok(test_opts)
@@ -303,7 +313,8 @@ fn parse_opts_impl(matches: getopts::Matches) -> OptRes {
 // FIXME: Copied from librustc_ast until linkage errors are resolved. Issue #47566
 fn is_nightly() -> bool {
     // Whether this is a feature-staged build, i.e., on the beta or stable channel
-    let disable_unstable_features = option_env!("CFG_DISABLE_UNSTABLE_FEATURES").is_some();
+    let disable_unstable_features =
+        option_env!("CFG_DISABLE_UNSTABLE_FEATURES").map(|s| s != "0").unwrap_or(false);
     // Whether we should enable unstable features for bootstrapping
     let bootstrap = env::var("RUSTC_BOOTSTRAP").is_ok();
 
@@ -348,8 +359,7 @@ fn get_shuffle_seed(matches: &getopts::Matches, allow_unstable: bool) -> OptPart
             Err(e) => {
                 return Err(format!(
                     "argument for --shuffle-seed must be a number \
-                     (error: {})",
-                    e
+                     (error: {e})"
                 ));
             }
         },
@@ -377,8 +387,7 @@ fn get_test_threads(matches: &getopts::Matches) -> OptPartRes<Option<usize>> {
             Err(e) => {
                 return Err(format!(
                     "argument for --test-threads must be a number > 0 \
-                     (error: {})",
-                    e
+                     (error: {e})"
                 ));
             }
         },
@@ -399,21 +408,20 @@ fn get_format(
         Some("terse") => OutputFormat::Terse,
         Some("json") => {
             if !allow_unstable {
-                return Err("The \"json\" format is only accepted on the nightly compiler".into());
+                return Err("The \"json\" format is only accepted on the nightly compiler with -Z unstable-options".into());
             }
             OutputFormat::Json
         }
         Some("junit") => {
             if !allow_unstable {
-                return Err("The \"junit\" format is only accepted on the nightly compiler".into());
+                return Err("The \"junit\" format is only accepted on the nightly compiler with -Z unstable-options".into());
             }
             OutputFormat::Junit
         }
         Some(v) => {
             return Err(format!(
                 "argument for --format must be pretty, terse, json or junit (was \
-                 {})",
-                v
+                 {v})"
             ));
         }
     };
@@ -430,8 +438,7 @@ fn get_color_config(matches: &getopts::Matches) -> OptPartRes<ColorConfig> {
         Some(v) => {
             return Err(format!(
                 "argument for --color must be auto, always, or never (was \
-                 {})",
-                v
+                 {v})"
             ));
         }
     };

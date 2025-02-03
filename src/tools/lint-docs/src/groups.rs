@@ -1,19 +1,31 @@
-use crate::{Lint, LintExtractor};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::Write;
 use std::fs;
 use std::process::Command;
 
+use crate::{Lint, LintExtractor};
+
 /// Descriptions of rustc lint groups.
 static GROUP_DESCRIPTIONS: &[(&str, &str)] = &[
     ("unused", "Lints that detect things being declared but not used, or excess syntax"),
+    ("let-underscore", "Lints that detect wildcard let bindings that are likely to be invalid"),
     ("rustdoc", "Rustdoc-specific lints"),
     ("rust-2018-idioms", "Lints to nudge you toward idiomatic features of Rust 2018"),
     ("nonstandard-style", "Violation of standard naming conventions"),
     ("future-incompatible", "Lints that detect code that has future-compatibility problems"),
     ("rust-2018-compatibility", "Lints used to transition code from the 2015 edition to 2018"),
     ("rust-2021-compatibility", "Lints used to transition code from the 2018 edition to 2021"),
+    ("rust-2024-compatibility", "Lints used to transition code from the 2021 edition to 2024"),
+    (
+        "refining-impl-trait",
+        "Detects refinement of `impl Trait` return types by trait implementations",
+    ),
+    (
+        "keyword-idents",
+        "Lints that detect identifiers which will be come keywords in later editions",
+    ),
+    ("deprecated-safe", "Lints for functions which were erroneously marked as safe in the past"),
 ];
 
 type LintGroups = BTreeMap<String, BTreeSet<String>>;
@@ -27,7 +39,7 @@ impl<'a> LintExtractor<'a> {
             .map_err(|e| format!("could not read {}: {}", groups_path.display(), e))?;
         let new_contents =
             contents.replace("{{groups-table}}", &self.make_groups_table(lints, &groups)?);
-        // Delete the output because rustbuild uses hard links in its copies.
+        // Delete the output because bootstrap uses hard links in its copies.
         let _ = fs::remove_file(&groups_path);
         fs::write(&groups_path, new_contents)
             .map_err(|e| format!("could not write to {}: {}", groups_path.display(), e))?;
@@ -42,7 +54,7 @@ impl<'a> LintExtractor<'a> {
         let output = cmd.output().map_err(|e| format!("failed to run command {:?}\n{}", cmd, e))?;
         if !output.status.success() {
             return Err(format!(
-                "failed to collect lint info: {:?}\n--- stderr\n{}--- stdout\n{}\n",
+                "failed to collect lint info: failed to run {cmd:?}: {:?}\n--- stderr\n{}--- stdout\n{}\n",
                 output.status,
                 std::str::from_utf8(&output.stderr).unwrap(),
                 std::str::from_utf8(&output.stdout).unwrap(),
@@ -111,13 +123,13 @@ impl<'a> LintExtractor<'a> {
             };
             to_link.extend(group_lints);
             let brackets: Vec<_> = group_lints.iter().map(|l| format!("[{}]", l)).collect();
-            write!(result, "| {} | {} | {} |\n", group_name, description, brackets.join(", "))
+            writeln!(result, "| {} | {} | {} |", group_name, description, brackets.join(", "))
                 .unwrap();
         }
         result.push('\n');
         result.push_str("[warn-by-default]: listing/warn-by-default.md\n");
         for lint_name in to_link {
-            let lint_def = match lints.iter().find(|l| l.name == lint_name.replace("-", "_")) {
+            let lint_def = match lints.iter().find(|l| l.name == lint_name.replace('-', "_")) {
                 Some(def) => def,
                 None => {
                     let msg = format!(
@@ -134,9 +146,9 @@ impl<'a> LintExtractor<'a> {
                     }
                 }
             };
-            write!(
+            writeln!(
                 result,
-                "[{}]: listing/{}#{}\n",
+                "[{}]: listing/{}#{}",
                 lint_name,
                 lint_def.level.doc_filename(),
                 lint_name

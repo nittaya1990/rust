@@ -1,10 +1,9 @@
-// run-rustfix
 #![warn(clippy::all)]
 #![allow(clippy::boxed_local, clippy::needless_pass_by_value)]
-#![allow(clippy::blacklisted_name, unused_variables, dead_code)]
+#![allow(clippy::disallowed_names, unused_variables, dead_code)]
 #![allow(unused_imports)]
 
-pub struct MyStruct {}
+pub struct MyStruct;
 
 pub struct SubT<T> {
     foo: T,
@@ -16,9 +15,7 @@ pub enum MyEnum {
 }
 
 mod outer_box {
-    use crate::MyEnum;
-    use crate::MyStruct;
-    use crate::SubT;
+    use crate::{MyEnum, MyStruct, SubT};
     use std::boxed::Box;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -35,9 +32,7 @@ mod outer_box {
 }
 
 mod outer_rc {
-    use crate::MyEnum;
-    use crate::MyStruct;
-    use crate::SubT;
+    use crate::{MyEnum, MyStruct, SubT};
     use std::boxed::Box;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -54,9 +49,7 @@ mod outer_rc {
 }
 
 mod outer_arc {
-    use crate::MyEnum;
-    use crate::MyStruct;
-    use crate::SubT;
+    use crate::{MyEnum, MyStruct, SubT};
     use std::boxed::Box;
     use std::rc::Rc;
     use std::sync::Arc;

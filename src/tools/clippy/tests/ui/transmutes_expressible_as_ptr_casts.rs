@@ -1,14 +1,13 @@
-// run-rustfix
 #![warn(clippy::transmutes_expressible_as_ptr_casts)]
-// These two warnings currrently cover the cases transmutes_expressible_as_ptr_casts
+// These two warnings currently cover the cases transmutes_expressible_as_ptr_casts
 // would otherwise be responsible for
 #![warn(clippy::useless_transmute)]
 #![warn(clippy::transmute_ptr_to_ptr)]
-#![allow(dead_code, unused_unsafe, clippy::borrow_as_ptr)]
+#![allow(unused, clippy::borrow_as_ptr, clippy::missing_transmute_annotations)]
 
 use std::mem::{size_of, transmute};
 
-// rustc_typeck::check::cast contains documentation about when a cast `e as U` is
+// rustc_hir_analysis::check::cast contains documentation about when a cast `e as U` is
 // valid, which we quote from below.
 fn main() {
     // We should see an error message for each transmute, and no error messages for
@@ -51,6 +50,8 @@ fn main() {
     // e is a function pointer type and U is an integer; fptr-addr-cast
     let _usize_from_fn_ptr_transmute = unsafe { transmute::<fn(usize) -> u8, usize>(foo) };
     let _usize_from_fn_ptr = foo as *const usize;
+
+    let _usize_from_ref = unsafe { transmute::<*const u32, usize>(&1u32) };
 }
 
 // If a ref-to-ptr cast of this form where the pointer type points to a type other
@@ -74,4 +75,23 @@ fn cannot_be_expressed_as_pointer_cast(in_param: Single) -> Pair {
     assert_eq!(size_of::<Single>(), size_of::<Pair>());
 
     unsafe { transmute::<Single, Pair>(in_param) }
+}
+
+fn issue_10449() {
+    fn f() {}
+
+    let _x: u8 = unsafe { *std::mem::transmute::<fn(), *const u8>(f) };
+}
+
+// Pointers cannot be cast to integers in const contexts
+#[allow(
+    ptr_to_integer_transmute_in_consts,
+    reason = "This is tested in the compiler test suite"
+)]
+const fn issue_12402<P>(ptr: *const P) {
+    // This test exists even though the compiler lints against it
+    // to test that clippy's transmute lints do not trigger on this.
+    unsafe { std::mem::transmute::<*const i32, usize>(&42i32) };
+    unsafe { std::mem::transmute::<fn(*const P), usize>(issue_12402) };
+    let _ = unsafe { std::mem::transmute::<_, usize>(ptr) };
 }

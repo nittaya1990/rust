@@ -1,5 +1,4 @@
-// run-rustfix
-#![allow(dead_code)]
+#![allow(dead_code, clippy::explicit_auto_deref, clippy::useless_vec)]
 #![warn(clippy::search_is_some)]
 
 fn main() {
@@ -212,5 +211,55 @@ mod issue7392 {
         let _ = !v.iter().any(|fp| fp.field.is_power_of_two());
         let _ = !v.iter().any(|fp| test_u32_1(fp.field));
         let _ = !v.iter().any(|fp| test_u32_2(*fp.field));
+    }
+}
+
+mod issue_11910 {
+    fn computations() -> u32 {
+        0
+    }
+
+    struct Foo;
+    impl Foo {
+        fn bar(&self, _: bool) {}
+    }
+
+    fn test_normal_for_iter() {
+        let v = vec![3, 2, 1, 0, -1, -2, -3];
+        let _ = !v.iter().any(|x| *x == 42);
+        Foo.bar(!v.iter().any(|x| *x == 42));
+    }
+
+    fn test_then_for_iter() {
+        let v = vec![3, 2, 1, 0, -1, -2, -3];
+        (!v.iter().any(|x| *x == 42)).then(computations);
+    }
+
+    fn test_then_some_for_iter() {
+        let v = vec![3, 2, 1, 0, -1, -2, -3];
+        (!v.iter().any(|x| *x == 42)).then_some(0);
+    }
+
+    fn test_normal_for_str() {
+        let s = "hello";
+        let _ = !s.contains("world");
+        Foo.bar(!s.contains("world"));
+        let s = String::from("hello");
+        let _ = !s.contains("world");
+        Foo.bar(!s.contains("world"));
+    }
+
+    fn test_then_for_str() {
+        let s = "hello";
+        let _ = (!s.contains("world")).then(computations);
+        let s = String::from("hello");
+        let _ = (!s.contains("world")).then(computations);
+    }
+
+    fn test_then_some_for_str() {
+        let s = "hello";
+        let _ = (!s.contains("world")).then_some(0);
+        let s = String::from("hello");
+        let _ = (!s.contains("world")).then_some(0);
     }
 }

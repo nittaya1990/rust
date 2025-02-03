@@ -2,11 +2,11 @@
 #![allow(
     clippy::boxed_local,
     clippy::needless_pass_by_value,
-    clippy::blacklisted_name,
+    clippy::disallowed_names,
     unused
 )]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
 
 macro_rules! boxit {
     ($init:expr, $x:ty) => {
@@ -15,10 +15,11 @@ macro_rules! boxit {
 }
 
 fn test_macro() {
-    boxit!(Vec::new(), Vec<u8>);
+    boxit!(vec![1], Vec<u8>);
 }
 
-fn test(foo: Box<Vec<bool>>) {}
+fn test1(foo: Box<Vec<bool>>) {}
+//~^ ERROR: you seem to be trying to use `Box<Vec<..>>`. Consider using just `Vec<..>`
 
 fn test2(foo: Box<dyn Fn(Vec<u32>)>) {
     // pass if #31 is fixed
@@ -26,8 +27,28 @@ fn test2(foo: Box<dyn Fn(Vec<u32>)>) {
 }
 
 fn test3(foo: Box<String>) {}
+//~^ ERROR: you seem to be trying to use `Box<String>`. Consider using just `String`
 
 fn test4(foo: Box<HashMap<String, String>>) {}
+//~^ ERROR: you seem to be trying to use `Box<HashMap<..>>`. Consider using just `HashMap<
+
+fn test5(foo: Box<HashSet<i64>>) {}
+//~^ ERROR: you seem to be trying to use `Box<HashSet<..>>`. Consider using just `HashSet<
+
+fn test6(foo: Box<VecDeque<i32>>) {}
+//~^ ERROR: you seem to be trying to use `Box<VecDeque<..>>`. Consider using just `VecDequ
+
+fn test7(foo: Box<LinkedList<i16>>) {}
+//~^ ERROR: you seem to be trying to use `Box<LinkedList<..>>`. Consider using just `Linke
+
+fn test8(foo: Box<BTreeMap<i8, String>>) {}
+//~^ ERROR: you seem to be trying to use `Box<BTreeMap<..>>`. Consider using just `BTreeMa
+
+fn test9(foo: Box<BTreeSet<u64>>) {}
+//~^ ERROR: you seem to be trying to use `Box<BTreeSet<..>>`. Consider using just `BTreeSe
+
+fn test10(foo: Box<BinaryHeap<u32>>) {}
+//~^ ERROR: you seem to be trying to use `Box<BinaryHeap<..>>`. Consider using just `Binar
 
 fn test_local_not_linted() {
     let _: Box<Vec<bool>>;
@@ -38,7 +59,7 @@ fn test_local_not_linted() {
 pub fn pub_test(foo: Box<Vec<bool>>) {}
 
 pub fn pub_test_ret() -> Box<Vec<bool>> {
-    Box::new(Vec::new())
+    Box::default()
 }
 
 fn main() {}

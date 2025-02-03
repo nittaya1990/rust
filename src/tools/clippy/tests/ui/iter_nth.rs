@@ -1,6 +1,7 @@
-// aux-build:option_helpers.rs
+//@aux-build:option_helpers.rs
 
 #![warn(clippy::iter_nth)]
+#![allow(clippy::useless_vec)]
 
 #[macro_use]
 extern crate option_helpers;
@@ -46,6 +47,9 @@ fn iter_nth() {
     {
         let bad_vec_deque = some_vec_deque.iter_mut().nth(3);
     }
+
+    let vec_ref = &Vec::<String>::new();
+    vec_ref.iter().nth(3);
 
     // Make sure we don't lint for non-relevant types.
     let false_positive = HasIter;

@@ -1,19 +1,17 @@
-target
-**/*.rs.bk
+# Build artifacts during normal use
+/download
+/build
+/dist
+/target
+/build_system/target
+
+# Downloaded by certain scripts
+/rust
+/git-fixed-subtree.sh
+
+# Various things that can be created during development
 *.rlib
 *.o
 perf.data
 perf.data.old
-*.events
-*.string*
-/y.bin
-/y.bin.dSYM
-/build
-/build_sysroot/sysroot_src
-/build_sysroot/compiler-builtins
-/build_sysroot/rustc_version
-/rust
-/rand
-/regex
-/simple-raytracer
-/portable-simd
+*.mm_profdata

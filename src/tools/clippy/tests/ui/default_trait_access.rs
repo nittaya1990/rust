@@ -1,11 +1,13 @@
-// run-rustfix
-
-#![allow(unused_imports, dead_code)]
+//@aux-build: proc_macros.rs
 #![deny(clippy::default_trait_access)]
+#![allow(dead_code, unused_imports)]
+#![allow(clippy::uninlined_format_args)]
 
-use std::default;
+extern crate proc_macros;
+
+use proc_macros::with_span;
 use std::default::Default as D2;
-use std::string;
+use std::{default, string};
 
 fn main() {
     let s1: String = Default::default();
@@ -50,6 +52,8 @@ fn main() {
         s: "foo",
         ..Default::default()
     };
+
+    let _s21: String = with_span!(s Default::default());
 
     println!(
         "[{}] [{}] [{}] [{}] [{}] [{}] [{}] [{}] [{}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}] [{:?}]",

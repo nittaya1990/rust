@@ -1,17 +1,17 @@
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::match_function_call;
-use clippy_utils::paths::FUTURE_FROM_GENERATOR;
-use clippy_utils::source::{position_before_rarrow, snippet_block, snippet_opt};
-use if_chain::if_chain;
+use clippy_utils::source::{SpanRangeExt, position_before_rarrow, snippet_block};
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
-    AsyncGeneratorKind, Block, Body, Expr, ExprKind, FnDecl, FnRetTy, GeneratorKind, GenericArg, GenericBound, HirId,
-    IsAsync, ItemKind, LifetimeName, Term, TraitRef, Ty, TyKind, TypeBindingKind,
+    Block, Body, Closure, ClosureKind, CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, ExprKind, FnDecl,
+    FnRetTy, GenericBound, ImplItem, Item, Node, OpaqueTy, TraitRef, Ty, TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::{sym, Span};
+use rustc_middle::middle::resolve_bound_vars::ResolvedArg;
+use rustc_middle::ty;
+use rustc_session::declare_lint_pass;
+use rustc_span::def_id::LocalDefId;
+use rustc_span::{Span, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -21,13 +21,13 @@ declare_clippy_lint! {
     /// It's more idiomatic to use the dedicated syntax.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// use std::future::Future;
     ///
     /// fn foo() -> impl Future<Output = i32> { async { 42 } }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// async fn foo() -> i32 { 42 }
     /// ```
     #[clippy::version = "1.45.0"]
@@ -46,157 +46,140 @@ impl<'tcx> LateLintPass<'tcx> for ManualAsyncFn {
         decl: &'tcx FnDecl<'_>,
         body: &'tcx Body<'_>,
         span: Span,
-        _: HirId,
+        fn_def_id: LocalDefId,
     ) {
-        if_chain! {
-            if let Some(header) = kind.header();
-            if header.asyncness == IsAsync::NotAsync;
+        if let Some(header) = kind.header()
+            && !header.asyncness.is_async()
             // Check that this function returns `impl Future`
-            if let FnRetTy::Return(ret_ty) = decl.output;
-            if let Some((trait_ref, output_lifetimes)) = future_trait_ref(cx, ret_ty);
-            if let Some(output) = future_output_ty(trait_ref);
-            if captures_all_lifetimes(decl.inputs, &output_lifetimes);
+            && let FnRetTy::Return(ret_ty) = decl.output
+            && let TyKind::OpaqueDef(opaque) = ret_ty.kind
+            && let Some(trait_ref) = future_trait_ref(cx, opaque)
+            && let Some(output) = future_output_ty(trait_ref)
+            && captures_all_lifetimes(cx, fn_def_id, opaque.def_id)
             // Check that the body of the function consists of one async block
-            if let ExprKind::Block(block, _) = body.value.kind;
-            if block.stmts.is_empty();
-            if let Some(closure_body) = desugared_async_block(cx, block);
-            then {
-                let header_span = span.with_hi(ret_ty.span.hi());
+            && let ExprKind::Block(block, _) = body.value.kind
+            && block.stmts.is_empty()
+            && let Some(closure_body) = desugared_async_block(cx, block)
+            && let Node::Item(Item {vis_span, ..}) | Node::ImplItem(ImplItem {vis_span, ..}) =
+                cx.tcx.hir_node_by_def_id(fn_def_id)
+        {
+            let header_span = span.with_hi(ret_ty.span.hi());
 
-                span_lint_and_then(
-                    cx,
-                    MANUAL_ASYNC_FN,
-                    header_span,
-                    "this function can be simplified using the `async fn` syntax",
-                    |diag| {
-                        if_chain! {
-                            if let Some(header_snip) = snippet_opt(cx, header_span);
-                            if let Some(ret_pos) = position_before_rarrow(&header_snip);
-                            if let Some((ret_sugg, ret_snip)) = suggested_ret(cx, output);
-                            then {
-                                let help = format!("make the function `async` and {}", ret_sugg);
-                                diag.span_suggestion(
-                                    header_span,
-                                    &help,
-                                    format!("async {}{}", &header_snip[..ret_pos], ret_snip),
-                                    Applicability::MachineApplicable
-                                );
+            span_lint_and_then(
+                cx,
+                MANUAL_ASYNC_FN,
+                header_span,
+                "this function can be simplified using the `async fn` syntax",
+                |diag| {
+                    if let Some(vis_snip) = vis_span.get_source_text(cx)
+                        && let Some(header_snip) = header_span.get_source_text(cx)
+                        && let Some(ret_pos) = position_before_rarrow(&header_snip)
+                        && let Some((_, ret_snip)) = suggested_ret(cx, output)
+                    {
+                        let header_snip = if vis_snip.is_empty() {
+                            format!("async {}", &header_snip[..ret_pos])
+                        } else {
+                            format!("{} async {}", vis_snip, &header_snip[vis_snip.len() + 1..ret_pos])
+                        };
 
-                                let body_snip = snippet_block(cx, closure_body.value.span, "..", Some(block.span));
-                                diag.span_suggestion(
-                                    block.span,
-                                    "move the body of the async block to the enclosing function",
-                                    body_snip.to_string(),
-                                    Applicability::MachineApplicable
-                                );
-                            }
-                        }
-                    },
-                );
-            }
+                        let body_snip = snippet_block(cx, closure_body.value.span, "..", Some(block.span)).to_string();
+
+                        diag.multipart_suggestion(
+                            "make the function `async` and return the output of the future directly",
+                            vec![
+                                (header_span, format!("{header_snip}{ret_snip}")),
+                                (block.span, body_snip),
+                            ],
+                            Applicability::MachineApplicable,
+                        );
+                    }
+                },
+            );
         }
     }
 }
 
-fn future_trait_ref<'tcx>(
-    cx: &LateContext<'tcx>,
-    ty: &'tcx Ty<'tcx>,
-) -> Option<(&'tcx TraitRef<'tcx>, Vec<LifetimeName>)> {
-    if_chain! {
-        if let TyKind::OpaqueDef(item_id, bounds) = ty.kind;
-        let item = cx.tcx.hir().item(item_id);
-        if let ItemKind::OpaqueTy(opaque) = &item.kind;
-        if let Some(trait_ref) = opaque.bounds.iter().find_map(|bound| {
-            if let GenericBound::Trait(poly, _) = bound {
-                Some(&poly.trait_ref)
-            } else {
-                None
-            }
-        });
-        if trait_ref.trait_def_id() == cx.tcx.lang_items().future_trait();
-        then {
-            let output_lifetimes = bounds
-                .iter()
-                .filter_map(|bound| {
-                    if let GenericArg::Lifetime(lt) = bound {
-                        Some(lt.name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            return Some((trait_ref, output_lifetimes));
+fn future_trait_ref<'tcx>(cx: &LateContext<'tcx>, opaque: &'tcx OpaqueTy<'tcx>) -> Option<&'tcx TraitRef<'tcx>> {
+    if let Some(trait_ref) = opaque.bounds.iter().find_map(|bound| {
+        if let GenericBound::Trait(poly) = bound {
+            Some(&poly.trait_ref)
+        } else {
+            None
         }
+    }) && trait_ref.trait_def_id() == cx.tcx.lang_items().future_trait()
+    {
+        return Some(trait_ref);
     }
 
     None
 }
 
 fn future_output_ty<'tcx>(trait_ref: &'tcx TraitRef<'tcx>) -> Option<&'tcx Ty<'tcx>> {
-    if_chain! {
-        if let Some(segment) = trait_ref.path.segments.last();
-        if let Some(args) = segment.args;
-        if args.bindings.len() == 1;
-        let binding = &args.bindings[0];
-        if binding.ident.name == sym::Output;
-        if let TypeBindingKind::Equality{term: Term::Ty(output)} = binding.kind;
-        then {
-            return Some(output)
-        }
+    if let Some(segment) = trait_ref.path.segments.last()
+        && let Some(args) = segment.args
+        && let [constraint] = args.constraints
+        && constraint.ident.name == sym::Output
+        && let Some(output) = constraint.ty()
+    {
+        return Some(output);
     }
 
     None
 }
 
-fn captures_all_lifetimes(inputs: &[Ty<'_>], output_lifetimes: &[LifetimeName]) -> bool {
-    let input_lifetimes: Vec<LifetimeName> = inputs
-        .iter()
-        .filter_map(|ty| {
-            if let TyKind::Rptr(lt, _) = ty.kind {
-                Some(lt.name)
-            } else {
-                None
-            }
-        })
-        .collect();
+fn captures_all_lifetimes(cx: &LateContext<'_>, fn_def_id: LocalDefId, opaque_def_id: LocalDefId) -> bool {
+    let early_input_params = ty::GenericArgs::identity_for_item(cx.tcx, fn_def_id);
+    let late_input_params = cx.tcx.late_bound_vars(cx.tcx.local_def_id_to_hir_id(fn_def_id));
 
-    // The lint should trigger in one of these cases:
-    // - There are no input lifetimes
-    // - There's only one output lifetime bound using `+ '_`
-    // - All input lifetimes are explicitly bound to the output
-    input_lifetimes.is_empty()
-        || (output_lifetimes.len() == 1 && matches!(output_lifetimes[0], LifetimeName::Underscore))
-        || input_lifetimes
-            .iter()
-            .all(|in_lt| output_lifetimes.iter().any(|out_lt| in_lt == out_lt))
+    let num_early_lifetimes = early_input_params
+        .iter()
+        .filter(|param| param.as_region().is_some())
+        .count();
+    let num_late_lifetimes = late_input_params
+        .iter()
+        .filter(|param_kind| matches!(param_kind, ty::BoundVariableKind::Region(_)))
+        .count();
+
+    // There is no lifetime, so they are all captured.
+    if num_early_lifetimes == 0 && num_late_lifetimes == 0 {
+        return true;
+    }
+
+    // By construction, each captured lifetime only appears once in `opaque_captured_lifetimes`.
+    let num_captured_lifetimes = cx
+        .tcx
+        .opaque_captured_lifetimes(opaque_def_id)
+        .iter()
+        .filter(|&(lifetime, _)| {
+            matches!(
+                *lifetime,
+                ResolvedArg::EarlyBound(_) | ResolvedArg::LateBound(ty::INNERMOST, _, _)
+            )
+        })
+        .count();
+    num_captured_lifetimes == num_early_lifetimes + num_late_lifetimes
 }
 
 fn desugared_async_block<'tcx>(cx: &LateContext<'tcx>, block: &'tcx Block<'tcx>) -> Option<&'tcx Body<'tcx>> {
-    if_chain! {
-        if let Some(block_expr) = block.expr;
-        if let Some(args) = match_function_call(cx, block_expr, &FUTURE_FROM_GENERATOR);
-        if args.len() == 1;
-        if let Expr{kind: ExprKind::Closure(_, _, body_id, ..), ..} = args[0];
-        let closure_body = cx.tcx.hir().body(body_id);
-        if closure_body.generator_kind == Some(GeneratorKind::Async(AsyncGeneratorKind::Block));
-        then {
-            return Some(closure_body);
-        }
+    if let Some(&Expr {
+        kind: ExprKind::Closure(&Closure { kind, body, .. }),
+        ..
+    }) = block.expr
+        && let ClosureKind::Coroutine(CoroutineKind::Desugared(CoroutineDesugaring::Async, CoroutineSource::Block)) =
+            kind
+    {
+        return Some(cx.tcx.hir().body(body));
     }
 
     None
 }
 
 fn suggested_ret(cx: &LateContext<'_>, output: &Ty<'_>) -> Option<(&'static str, String)> {
-    match output.kind {
-        TyKind::Tup(tys) if tys.is_empty() => {
-            let sugg = "remove the return type";
-            Some((sugg, "".into()))
-        },
-        _ => {
-            let sugg = "return the output of the future directly";
-            snippet_opt(cx, output.span).map(|snip| (sugg, format!(" -> {}", snip)))
-        },
+    if let TyKind::Tup([]) = output.kind {
+        let sugg = "remove the return type";
+        Some((sugg, String::new()))
+    } else {
+        let sugg = "return the output of the future directly";
+        output.span.get_source_text(cx).map(|src| (sugg, format!(" -> {src}")))
     }
 }

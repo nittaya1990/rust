@@ -1,14 +1,15 @@
 error: single-character lifetime names are likely uninformative
-  --> $DIR/single_char_lifetime_names.rs:4:22
+  --> tests/ui/single_char_lifetime_names.rs:5:22
    |
 LL | struct DiagnosticCtx<'a, 'b>
    |                      ^^
    |
-   = note: `-D clippy::single-char-lifetime-names` implied by `-D warnings`
    = help: use a more informative name
+   = note: `-D clippy::single-char-lifetime-names` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::single_char_lifetime_names)]`
 
 error: single-character lifetime names are likely uninformative
-  --> $DIR/single_char_lifetime_names.rs:4:26
+  --> tests/ui/single_char_lifetime_names.rs:5:26
    |
 LL | struct DiagnosticCtx<'a, 'b>
    |                          ^^
@@ -16,7 +17,7 @@ LL | struct DiagnosticCtx<'a, 'b>
    = help: use a more informative name
 
 error: single-character lifetime names are likely uninformative
-  --> $DIR/single_char_lifetime_names.rs:13:6
+  --> tests/ui/single_char_lifetime_names.rs:16:6
    |
 LL | impl<'a, 'b> DiagnosticCtx<'a, 'b> {
    |      ^^
@@ -24,7 +25,7 @@ LL | impl<'a, 'b> DiagnosticCtx<'a, 'b> {
    = help: use a more informative name
 
 error: single-character lifetime names are likely uninformative
-  --> $DIR/single_char_lifetime_names.rs:13:10
+  --> tests/ui/single_char_lifetime_names.rs:16:10
    |
 LL | impl<'a, 'b> DiagnosticCtx<'a, 'b> {
    |          ^^
@@ -32,7 +33,7 @@ LL | impl<'a, 'b> DiagnosticCtx<'a, 'b> {
    = help: use a more informative name
 
 error: single-character lifetime names are likely uninformative
-  --> $DIR/single_char_lifetime_names.rs:33:15
+  --> tests/ui/single_char_lifetime_names.rs:38:15
    |
 LL | fn split_once<'a>(base: &'a str, other: &'_ str) -> (&'a str, Option<&'a str>) {
    |               ^^

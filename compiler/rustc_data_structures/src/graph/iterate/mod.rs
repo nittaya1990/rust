@@ -1,19 +1,21 @@
-use super::{DirectedGraph, WithNumNodes, WithStartNode, WithSuccessors};
-use rustc_index::bit_set::BitSet;
-use rustc_index::vec::IndexVec;
 use std::ops::ControlFlow;
+
+use rustc_index::bit_set::DenseBitSet;
+use rustc_index::{IndexSlice, IndexVec};
+
+use super::{DirectedGraph, StartNode, Successors};
 
 #[cfg(test)]
 mod tests;
 
-pub fn post_order_from<G: DirectedGraph + WithSuccessors + WithNumNodes>(
+pub fn post_order_from<G: DirectedGraph + Successors>(
     graph: &G,
     start_node: G::Node,
 ) -> Vec<G::Node> {
     post_order_from_to(graph, start_node, None)
 }
 
-pub fn post_order_from_to<G: DirectedGraph + WithSuccessors + WithNumNodes>(
+pub fn post_order_from_to<G: DirectedGraph + Successors>(
     graph: &G,
     start_node: G::Node,
     end_node: Option<G::Node>,
@@ -27,11 +29,11 @@ pub fn post_order_from_to<G: DirectedGraph + WithSuccessors + WithNumNodes>(
     result
 }
 
-fn post_order_walk<G: DirectedGraph + WithSuccessors + WithNumNodes>(
+fn post_order_walk<G: DirectedGraph + Successors>(
     graph: &G,
     node: G::Node,
     result: &mut Vec<G::Node>,
-    visited: &mut IndexVec<G::Node, bool>,
+    visited: &mut IndexSlice<G::Node, bool>,
 ) {
     struct PostOrderFrame<Node, Iter> {
         node: Node,
@@ -48,7 +50,7 @@ fn post_order_walk<G: DirectedGraph + WithSuccessors + WithNumNodes>(
         let node = frame.node;
         visited[node] = true;
 
-        while let Some(successor) = frame.iter.next() {
+        for successor in frame.iter.by_ref() {
             if !visited[successor] {
                 stack.push(PostOrderFrame { node: successor, iter: graph.successors(successor) });
                 continue 'recurse;
@@ -60,7 +62,7 @@ fn post_order_walk<G: DirectedGraph + WithSuccessors + WithNumNodes>(
     }
 }
 
-pub fn reverse_post_order<G: DirectedGraph + WithSuccessors + WithNumNodes>(
+pub fn reverse_post_order<G: DirectedGraph + Successors>(
     graph: &G,
     start_node: G::Node,
 ) -> Vec<G::Node> {
@@ -70,21 +72,21 @@ pub fn reverse_post_order<G: DirectedGraph + WithSuccessors + WithNumNodes>(
 }
 
 /// A "depth-first search" iterator for a directed graph.
-pub struct DepthFirstSearch<'graph, G>
+pub struct DepthFirstSearch<G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors,
+    G: DirectedGraph + Successors,
 {
-    graph: &'graph G,
+    graph: G,
     stack: Vec<G::Node>,
-    visited: BitSet<G::Node>,
+    visited: DenseBitSet<G::Node>,
 }
 
-impl<'graph, G> DepthFirstSearch<'graph, G>
+impl<G> DepthFirstSearch<G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors,
+    G: DirectedGraph + Successors,
 {
-    pub fn new(graph: &'graph G) -> Self {
-        Self { graph, stack: vec![], visited: BitSet::new_empty(graph.num_nodes()) }
+    pub fn new(graph: G) -> Self {
+        Self { stack: vec![], visited: DenseBitSet::new_empty(graph.num_nodes()), graph }
     }
 
     /// Version of `push_start_node` that is convenient for chained
@@ -112,7 +114,7 @@ where
     /// This is equivalent to just invoke `next` repeatedly until
     /// you get a `None` result.
     pub fn complete_search(&mut self) {
-        while let Some(_) = self.next() {}
+        for _ in self.by_ref() {}
     }
 
     /// Returns true if node has been visited thus far.
@@ -123,11 +125,21 @@ where
     pub fn visited(&self, node: G::Node) -> bool {
         self.visited.contains(node)
     }
+
+    /// Returns a reference to the set of nodes that have been visited, with
+    /// the same caveats as [`Self::visited`].
+    ///
+    /// When incorporating the visited nodes into another bitset, using bulk
+    /// operations like `union` or `intersect` can be more efficient than
+    /// processing each node individually.
+    pub fn visited_set(&self) -> &DenseBitSet<G::Node> {
+        &self.visited
+    }
 }
 
-impl<G> std::fmt::Debug for DepthFirstSearch<'_, G>
+impl<G> std::fmt::Debug for DepthFirstSearch<G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors,
+    G: DirectedGraph + Successors,
 {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut f = fmt.debug_set();
@@ -138,9 +150,9 @@ where
     }
 }
 
-impl<G> Iterator for DepthFirstSearch<'_, G>
+impl<G> Iterator for DepthFirstSearch<G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors,
+    G: DirectedGraph + Successors,
 {
     type Item = G::Node;
 
@@ -201,24 +213,24 @@ struct Event<N> {
 /// [CLR]: https://en.wikipedia.org/wiki/Introduction_to_Algorithms
 pub struct TriColorDepthFirstSearch<'graph, G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors,
+    G: ?Sized + DirectedGraph + Successors,
 {
     graph: &'graph G,
     stack: Vec<Event<G::Node>>,
-    visited: BitSet<G::Node>,
-    settled: BitSet<G::Node>,
+    visited: DenseBitSet<G::Node>,
+    settled: DenseBitSet<G::Node>,
 }
 
 impl<'graph, G> TriColorDepthFirstSearch<'graph, G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors,
+    G: ?Sized + DirectedGraph + Successors,
 {
     pub fn new(graph: &'graph G) -> Self {
         TriColorDepthFirstSearch {
             graph,
             stack: vec![],
-            visited: BitSet::new_empty(graph.num_nodes()),
-            settled: BitSet::new_empty(graph.num_nodes()),
+            visited: DenseBitSet::new_empty(graph.num_nodes()),
+            settled: DenseBitSet::new_empty(graph.num_nodes()),
         }
     }
 
@@ -278,7 +290,7 @@ where
 
 impl<G> TriColorDepthFirstSearch<'_, G>
 where
-    G: ?Sized + DirectedGraph + WithNumNodes + WithSuccessors + WithStartNode,
+    G: ?Sized + DirectedGraph + Successors + StartNode,
 {
     /// Performs a depth-first search, starting from `G::start_node()`.
     ///
@@ -317,12 +329,12 @@ where
         _node: G::Node,
         _prior_status: Option<NodeStatus>,
     ) -> ControlFlow<Self::BreakVal> {
-        ControlFlow::CONTINUE
+        ControlFlow::Continue(())
     }
 
     /// Called after all nodes reachable from this one have been examined.
     fn node_settled(&mut self, _node: G::Node) -> ControlFlow<Self::BreakVal> {
-        ControlFlow::CONTINUE
+        ControlFlow::Continue(())
     }
 
     /// Behave as if no edges exist from `source` to `target`.
@@ -346,8 +358,8 @@ where
         prior_status: Option<NodeStatus>,
     ) -> ControlFlow<Self::BreakVal> {
         match prior_status {
-            Some(NodeStatus::Visited) => ControlFlow::BREAK,
-            _ => ControlFlow::CONTINUE,
+            Some(NodeStatus::Visited) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
         }
     }
 }

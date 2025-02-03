@@ -1,13 +1,13 @@
 error: this `else` block is redundant
-  --> $DIR/needless_continue.rs:29:16
+  --> tests/ui/needless_continue.rs:30:16
    |
 LL |           } else {
    |  ________________^
+LL | |
 LL | |             continue;
 LL | |         }
    | |_________^
    |
-   = note: `-D clippy::needless-continue` implied by `-D warnings`
    = help: consider dropping the `else` clause and merging the code that follows (in the loop) with the `if` block
                    if i % 2 == 0 && i % 3 == 0 {
                        println!("{}", i);
@@ -26,6 +26,7 @@ LL | |         }
                            println!("lama");
                        }
                        if (zero!(i % 2) || nonzero!(i % 5)) && i % 3 != 0 {
+
                            continue;
                        } else {
                            println!("Blabber");
@@ -33,11 +34,14 @@ LL | |         }
                        }
                        println!("bleh");
                    }
+   = note: `-D clippy::needless-continue` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_continue)]`
 
 error: there is no need for an explicit `else` block for this `if` expression
-  --> $DIR/needless_continue.rs:44:9
+  --> tests/ui/needless_continue.rs:46:9
    |
 LL | /         if (zero!(i % 2) || nonzero!(i % 5)) && i % 3 != 0 {
+LL | |
 LL | |             continue;
 LL | |         } else {
 LL | |             println!("Blabber");
@@ -47,6 +51,7 @@ LL | |         }
    |
    = help: consider dropping the `else` clause
                    if (zero!(i % 2) || nonzero!(i % 5)) && i % 3 != 0 {
+
                        continue;
                    }
                    {
@@ -55,43 +60,52 @@ LL | |         }
                    }
 
 error: this `continue` expression is redundant
-  --> $DIR/needless_continue.rs:57:9
+  --> tests/ui/needless_continue.rs:60:9
    |
-LL |         continue; // should lint here
-   |         ^^^^^^^^^
-   |
-   = help: consider dropping the `continue` expression
-
-error: this `continue` expression is redundant
-  --> $DIR/needless_continue.rs:64:9
-   |
-LL |         continue; // should lint here
-   |         ^^^^^^^^^
-   |
-   = help: consider dropping the `continue` expression
-
-error: this `continue` expression is redundant
-  --> $DIR/needless_continue.rs:71:9
-   |
-LL |         continue // should lint here
+LL |         continue;
    |         ^^^^^^^^
    |
    = help: consider dropping the `continue` expression
 
 error: this `continue` expression is redundant
-  --> $DIR/needless_continue.rs:79:9
+  --> tests/ui/needless_continue.rs:68:9
    |
-LL |         continue // should lint here
+LL |         continue;
    |         ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:76:9
+   |
+LL |         continue
+   |         ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:85:9
+   |
+LL |         continue
+   |         ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:93:11
+   |
+LL |         { continue }
+   |           ^^^^^^^^
    |
    = help: consider dropping the `continue` expression
 
 error: this `else` block is redundant
-  --> $DIR/needless_continue.rs:129:24
+  --> tests/ui/needless_continue.rs:144:24
    |
 LL |                   } else {
    |  ________________________^
-LL | |                     continue 'inner; // should lint here
+LL | |
+LL | |                     continue 'inner;
 LL | |                 }
    | |_________________^
    |
@@ -102,7 +116,8 @@ LL | |                 }
                                println!("bar-4");
                                update_condition();
                                if condition() {
-                                   continue; // should lint here
+
+                                   continue;
                                } else {
                                    println!("bar-5");
                                }
@@ -110,10 +125,11 @@ LL | |                 }
                            }
 
 error: there is no need for an explicit `else` block for this `if` expression
-  --> $DIR/needless_continue.rs:135:17
+  --> tests/ui/needless_continue.rs:151:17
    |
 LL | /                 if condition() {
-LL | |                     continue; // should lint here
+LL | |
+LL | |                     continue;
 LL | |                 } else {
 LL | |                     println!("bar-5");
 LL | |                 }
@@ -121,11 +137,78 @@ LL | |                 }
    |
    = help: consider dropping the `else` clause
                            if condition() {
-                               continue; // should lint here
+
+                               continue;
                            }
                            {
                                println!("bar-5");
                            }
 
-error: aborting due to 8 previous errors
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:174:13
+   |
+LL |             continue 'b;
+   |             ^^^^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:190:21
+   |
+LL |                     continue 'inner;
+   |                     ^^^^^^^^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:193:21
+   |
+LL |                     continue 'inner;
+   |                     ^^^^^^^^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `continue` expression is redundant
+  --> tests/ui/needless_continue.rs:203:21
+   |
+LL |                     continue;
+   |                     ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+
+error: this `else` block is redundant
+  --> tests/ui/needless_continue.rs:210:20
+   |
+LL |               } else {
+   |  ____________________^
+LL | |                 // redundant `else`
+LL | |                 continue; // redundant `continue`
+LL | |             }
+   | |_____________^
+   |
+   = help: consider dropping the `else` clause and merging the code that follows (in the loop) with the `if` block
+                       if true {
+           // merged code follows:
+           
+                       }
+
+error: there is no need for an explicit `else` block for this `if` expression
+  --> tests/ui/needless_continue.rs:217:13
+   |
+LL | /             if some_expr() {
+LL | |                 continue;
+LL | |             } else {
+LL | |                 do_something();
+LL | |             }
+   | |_____________^
+   |
+   = help: consider dropping the `else` clause
+                       if some_expr() {
+                           continue;
+                       }
+                       {
+                           do_something();
+                       }
+
+error: aborting due to 15 previous errors
 

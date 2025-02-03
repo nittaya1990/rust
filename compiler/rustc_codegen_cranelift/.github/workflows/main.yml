@@ -4,23 +4,183 @@ on:
   - push
   - pull_request
 
+defaults:
+  run:
+    shell: bash
+
+permissions: {}
+
+env:
+  # Disabling incr comp reduces cache size and incr comp doesn't save as much
+  # on CI anyway.
+  CARGO_BUILD_INCREMENTAL: false
+  # Rust's CI denies warnings. Deny them here too to ensure subtree syncs don't
+  # fail because of warnings.
+  RUSTFLAGS: "-Dwarnings"
+
 jobs:
   rustfmt:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
-    - name: Install rustfmt
+    - name: Avoid installing rustc-dev
       run: |
-        rustup component add rustfmt
+        sed -i 's/components.*/components = ["rustfmt"]/' rust-toolchain
+        rustfmt -v
 
     - name: Rustfmt
       run: |
         cargo fmt --check
+        rustfmt --check build_system/main.rs
+        rustfmt --check example/*
+        rustfmt --check scripts/*.rs
 
-  build:
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    env:
+      CG_CLIF_EXPENSIVE_CHECKS: 1
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            env:
+              TARGET_TRIPLE: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            env:
+              TARGET_TRIPLE: x86_64-apple-darwin
+          - os: ubuntu-latest
+            env:
+              TARGET_TRIPLE: aarch64-unknown-linux-gnu
+            apt_deps: gcc-aarch64-linux-gnu qemu-user
+          - os: macos-latest
+            env:
+              TARGET_TRIPLE: aarch64-apple-darwin
+          - os: ubuntu-latest
+            env:
+              TARGET_TRIPLE: s390x-unknown-linux-gnu
+            apt_deps: gcc-s390x-linux-gnu qemu-user
+          - os: ubuntu-latest
+            env:
+              TARGET_TRIPLE: riscv64gc-unknown-linux-gnu
+            apt_deps: gcc-riscv64-linux-gnu qemu-user
+          - os: windows-latest
+            env:
+              TARGET_TRIPLE: x86_64-pc-windows-msvc
+          - os: windows-latest
+            env:
+              TARGET_TRIPLE: x86_64-pc-windows-gnu
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: CPU features
+      if: matrix.os == 'ubuntu-latest'
+      run: cat /proc/cpuinfo
+
+    - name: Cache cargo target dir
+      uses: actions/cache@v4
+      with:
+        path: build/cg_clif
+        key: ${{ runner.os }}-${{ matrix.env.TARGET_TRIPLE }}-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
+
+    - name: Set MinGW as the default toolchain
+      if: matrix.os == 'windows-latest' && matrix.env.TARGET_TRIPLE == 'x86_64-pc-windows-gnu'
+      run: rustup set default-host x86_64-pc-windows-gnu
+
+    - name: Use x86_64 compiler on macOS
+      if: matrix.os == 'macos-latest' && matrix.env.TARGET_TRIPLE == 'x86_64-apple-darwin'
+      run: rustup set default-host x86_64-apple-darwin
+
+    - name: Install toolchain and emulator
+      if: matrix.apt_deps != null
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ matrix.apt_deps }}
+
+    - name: Prepare dependencies
+      run: ./y.sh prepare
+
+    - name: Build
+      run: ./y.sh build --sysroot none
+
+    - name: Test
+      env:
+        TARGET_TRIPLE: ${{ matrix.env.TARGET_TRIPLE }}
+      run: ./y.sh test
+
+    - name: Install LLVM standard library
+      run: rustup target add ${{ matrix.env.TARGET_TRIPLE }}
+
+    # This is roughly config rust-lang/rust uses for testing
+    - name: Test with LLVM sysroot
+      env:
+        TARGET_TRIPLE: ${{ matrix.env.TARGET_TRIPLE }}
+      run: ./y.sh test --sysroot llvm --no-unstable-features
+
+
+  # This job doesn't use cg_clif in any way. It checks that all cg_clif tests work with cg_llvm too.
+  test_llvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: CPU features
+      run: cat /proc/cpuinfo
+
+    - name: Prepare dependencies
+      run: ./y.sh prepare
+
+    - name: Disable JIT tests
+      run: |
+        sed -i 's/jit./#jit./' config.txt
+
+    - name: Test
+      env:
+        TARGET_TRIPLE: x86_64-unknown-linux-gnu
+      run: ./y.sh test --use-backend llvm
+
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: CPU features
+      run: cat /proc/cpuinfo
+
+    - name: Cache cargo target dir
+      uses: actions/cache@v4
+      with:
+        path: build/cg_clif
+        key: ${{ runner.os }}-x86_64-unknown-linux-gnu-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
+
+    - name: Install hyperfine
+      run: |
+        sudo apt update
+        sudo apt install -y hyperfine
+
+    - name: Prepare dependencies
+      run: ./y.sh prepare
+
+    - name: Build
+      run: ./y.sh build --sysroot none
+
+    - name: Benchmark
+      run: ./y.sh bench
+
+
+  dist:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
@@ -28,157 +188,97 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # FIXME update at some point in the future once most distros use a newer glibc
+          - os: ubuntu-20.04
+            env:
+              TARGET_TRIPLE: x86_64-unknown-linux-gnu
           - os: macos-latest
-          # cross-compile from Linux to Windows using mingw
-          - os: ubuntu-latest
+            env:
+              TARGET_TRIPLE: x86_64-apple-darwin
+          - os: macos-latest
+            env:
+              TARGET_TRIPLE: aarch64-apple-darwin
+          - os: windows-latest
+            env:
+              TARGET_TRIPLE: x86_64-pc-windows-msvc
+          - os: windows-latest
             env:
               TARGET_TRIPLE: x86_64-pc-windows-gnu
-          - os: ubuntu-latest
-            env:
-              TARGET_TRIPLE: aarch64-unknown-linux-gnu
 
     steps:
-    - uses: actions/checkout@v2
-
-    - name: Cache cargo installed crates
-      uses: actions/cache@v2
-      with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-cargo-installed-crates
-
-    - name: Cache cargo registry and index
-      uses: actions/cache@v2
-      with:
-        path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-        key: ${{ runner.os }}-cargo-registry-and-index-${{ hashFiles('**/Cargo.lock') }}
+    - uses: actions/checkout@v4
 
     - name: Cache cargo target dir
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
+        path: build/cg_clif
+        key: ${{ runner.os }}-${{ matrix.env.TARGET_TRIPLE }}-dist-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
 
-    - name: Install MinGW toolchain and wine
-      if: matrix.os == 'ubuntu-latest' && matrix.env.TARGET_TRIPLE == 'x86_64-pc-windows-gnu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-mingw-w64-x86-64 wine-stable
-        rustup target add x86_64-pc-windows-gnu
+    - name: Set MinGW as the default toolchain
+      if: matrix.os == 'windows-latest' && matrix.env.TARGET_TRIPLE == 'x86_64-pc-windows-gnu'
+      run: rustup set default-host x86_64-pc-windows-gnu
 
-    - name: Install AArch64 toolchain and qemu
-      if: matrix.os == 'ubuntu-latest' && matrix.env.TARGET_TRIPLE == 'aarch64-unknown-linux-gnu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+    - name: Use x86_64 compiler on macOS
+      if: matrix.os == 'macos-latest' && matrix.env.TARGET_TRIPLE == 'x86_64-apple-darwin'
+      run: rustup set default-host x86_64-apple-darwin
 
     - name: Prepare dependencies
-      run: |
-        git config --global user.email "user@example.com"
-        git config --global user.name "User"
-        ./y.rs prepare
+      run: ./y.sh prepare
 
-    - name: Build without unstable features
-      env:
-        TARGET_TRIPLE: ${{ matrix.env.TARGET_TRIPLE }}
-      # This is the config rust-lang/rust uses for builds
-      run: ./y.rs build --no-unstable-features
+    - name: Build backend
+      run: ./y.sh build --sysroot none
 
-    - name: Build
-      run: ./y.rs build --sysroot none
-
-    - name: Test
-      env:
-        TARGET_TRIPLE: ${{ matrix.env.TARGET_TRIPLE }}
-      run: |
-        # Enable backtraces for easier debugging
-        export RUST_BACKTRACE=1
-
-        # Reduce amount of benchmark runs as they are slow
-        export COMPILE_RUNS=2
-        export RUN_RUNS=2
-
-        # Enable extra checks
-        export CG_CLIF_ENABLE_VERIFIER=1
-
-        ./test.sh
+    - name: Build sysroot
+      run: ./y.sh build
 
     - name: Package prebuilt cg_clif
-      run: tar cvfJ cg_clif.tar.xz build
+      run: tar cvfJ cg_clif.tar.xz dist
 
     - name: Upload prebuilt cg_clif
-      if: matrix.env.TARGET_TRIPLE != 'x86_64-pc-windows-gnu'
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
-        name: cg_clif-${{ runner.os }}
+        name: cg_clif-${{ matrix.env.TARGET_TRIPLE }}
         path: cg_clif.tar.xz
 
-    - name: Upload prebuilt cg_clif (cross compile)
-      if: matrix.env.TARGET_TRIPLE == 'x86_64-pc-windows-gnu'
-      uses: actions/upload-artifact@v2
-      with:
-        name: cg_clif-${{ runner.os }}-cross-x86_64-mingw
-        path: cg_clif.tar.xz
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ github.ref == 'refs/heads/master' }}
+    needs: [rustfmt, test, bench, dist]
 
-  build_windows:
-    runs-on: windows-latest
-    timeout-minutes: 60
+    permissions:
+      contents: write # for creating the dev tag and release
+
+    concurrency:
+      group: release-dev
+      cancel-in-progress: true
 
     steps:
-    - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-    #- name: Cache cargo installed crates
-    #  uses: actions/cache@v2
-    #  with:
-    #    path: ~/.cargo/bin
-    #    key: ${{ runner.os }}-cargo-installed-crates
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
 
-    #- name: Cache cargo registry and index
-    #  uses: actions/cache@v2
-    #  with:
-    #    path: |
-    #        ~/.cargo/registry
-    #        ~/.cargo/git
-    #    key: ${{ runner.os }}-cargo-registry-and-index-${{ hashFiles('**/Cargo.lock') }}
+      - run: |
+          ls -R artifacts/
+          mkdir release/
+          pushd artifacts/
+          for dir in *; do
+            mv $dir/cg_clif.tar.xz ../release/$dir.tar.xz
+            rmdir $dir/ # verify $dir is empty
+          done
+          popd
+          rmdir artifacts/ # verify all artifacts are represented in release/
+          ls -R release/
 
-    #- name: Cache cargo target dir
-    #  uses: actions/cache@v2
-    #  with:
-    #    path: target
-    #    key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
+      - run: npm install --production
+        working-directory: .github/actions/github-release
 
-    - name: Prepare dependencies
-      run: |
-        git config --global user.email "user@example.com"
-        git config --global user.name "User"
-        git config --global core.autocrlf false
-        rustup set default-host x86_64-pc-windows-gnu
-        rustc y.rs -o y.exe -g
-        ./y.exe prepare
-
-    - name: Build
-      #name: Test
-      run: |
-        # Enable backtraces for easier debugging
-        #export RUST_BACKTRACE=1
-
-        # Reduce amount of benchmark runs as they are slow
-        #export COMPILE_RUNS=2
-        #export RUN_RUNS=2
-
-        # Enable extra checks
-        #export CG_CLIF_ENABLE_VERIFIER=1
-
-        ./y.exe build
-
-    - name: Package prebuilt cg_clif
-      # don't use compression as xzip isn't supported by tar on windows and bzip2 hangs
-      run: tar cvf cg_clif.tar build
-
-    - name: Upload prebuilt cg_clif
-      uses: actions/upload-artifact@v2
-      with:
-        name: cg_clif-${{ runner.os }}
-        path: cg_clif.tar
+      - name: Publish Release
+        uses: ./.github/actions/github-release
+        with:
+          files: "release/*"
+          token: ${{ github.token }}
+        continue-on-error: true

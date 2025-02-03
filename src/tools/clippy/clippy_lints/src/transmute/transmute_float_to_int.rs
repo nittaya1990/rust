@@ -1,7 +1,7 @@
 use super::TRANSMUTE_FLOAT_TO_INT;
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::sugg;
-use if_chain::if_chain;
 use rustc_ast as ast;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, UnOp};
@@ -17,14 +17,17 @@ pub(super) fn check<'tcx>(
     to_ty: Ty<'tcx>,
     mut arg: &'tcx Expr<'_>,
     const_context: bool,
+    msrv: &Msrv,
 ) -> bool {
     match (&from_ty.kind(), &to_ty.kind()) {
-        (ty::Float(float_ty), ty::Int(_) | ty::Uint(_)) if !const_context => {
+        (ty::Float(float_ty), ty::Int(_) | ty::Uint(_))
+            if !const_context || msrv.meets(msrvs::CONST_FLOAT_BITS_CONV) =>
+        {
             span_lint_and_then(
                 cx,
                 TRANSMUTE_FLOAT_TO_INT,
                 e.span,
-                &format!("transmute from a `{}` to a `{}`", from_ty, to_ty),
+                format!("transmute from a `{from_ty}` to a `{to_ty}`"),
                 |diag| {
                     let mut sugg = sugg::Sugg::hir(cx, arg, "..");
 
@@ -32,17 +35,15 @@ pub(super) fn check<'tcx>(
                         arg = inner_expr;
                     }
 
-                    if_chain! {
+                    if let ExprKind::Lit(lit) = &arg.kind
                         // if the expression is a float literal and it is unsuffixed then
                         // add a suffix so the suggestion is valid and unambiguous
-                        if let ExprKind::Lit(lit) = &arg.kind;
-                        if let ast::LitKind::Float(_, ast::LitFloatType::Unsuffixed) = lit.node;
-                        then {
-                            let op = format!("{}{}", sugg, float_ty.name_str()).into();
-                            match sugg {
-                                sugg::Sugg::MaybeParen(_) => sugg = sugg::Sugg::MaybeParen(op),
-                                _ => sugg = sugg::Sugg::NonParen(op)
-                            }
+                        && let ast::LitKind::Float(_, ast::LitFloatType::Unsuffixed) = lit.node
+                    {
+                        let op = format!("{sugg}{}", float_ty.name_str()).into();
+                        match sugg {
+                            sugg::Sugg::MaybeParen(_) => sugg = sugg::Sugg::MaybeParen(op),
+                            _ => sugg = sugg::Sugg::NonParen(op),
                         }
                     }
 
@@ -55,7 +56,7 @@ pub(super) fn check<'tcx>(
                         sugg
                     };
 
-                    diag.span_suggestion(e.span, "consider using", sugg.to_string(), Applicability::Unspecified);
+                    diag.span_suggestion(e.span, "consider using", sugg, Applicability::Unspecified);
                 },
             );
             true

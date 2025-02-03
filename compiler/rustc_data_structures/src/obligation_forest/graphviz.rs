@@ -1,11 +1,11 @@
-use crate::obligation_forest::{ForestObligation, ObligationForest};
-use rustc_graphviz as dot;
 use std::env::var_os;
 use std::fs::File;
-use std::io::BufWriter;
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rustc_graphviz as dot;
+
+use crate::obligation_forest::{ForestObligation, ObligationForest};
 
 impl<O: ForestObligation> ObligationForest<O> {
     /// Creates a graphviz representation of the obligation forest. Given a directory this will
@@ -30,9 +30,9 @@ impl<O: ForestObligation> ObligationForest<O> {
 
         let counter = COUNTER.fetch_add(1, Ordering::AcqRel);
 
-        let file_path = dir.as_ref().join(format!("{:010}_{}.gv", counter, description));
+        let file_path = dir.as_ref().join(format!("{counter:010}_{description}.gv"));
 
-        let mut gv_file = BufWriter::new(File::create(file_path).unwrap());
+        let mut gv_file = File::create_buffered(file_path).unwrap();
 
         dot::render(&self, &mut gv_file).unwrap();
     }
@@ -47,7 +47,7 @@ impl<'a, O: ForestObligation + 'a> dot::Labeller<'a> for &'a ObligationForest<O>
     }
 
     fn node_id(&self, index: &Self::Node) -> dot::Id<'_> {
-        dot::Id::new(format!("obligation_{}", index)).unwrap()
+        dot::Id::new(format!("obligation_{index}")).unwrap()
     }
 
     fn node_label(&self, index: &Self::Node) -> dot::LabelText<'_> {

@@ -27,33 +27,30 @@ pub mod btree_set {
     pub use super::btree::set::*;
 }
 
+use core::fmt::Display;
+
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use binary_heap::BinaryHeap;
-
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use btree_map::BTreeMap;
-
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use btree_set::BTreeSet;
-
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use linked_list::LinkedList;
-
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use vec_deque::VecDeque;
 
 use crate::alloc::{Layout, LayoutError};
-use core::fmt::Display;
 
 /// The error type for `try_reserve` methods.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -139,7 +136,7 @@ impl Display for TryReserveError {
                 " because the computed capacity exceeded the collection's maximum"
             }
             TryReserveErrorKind::AllocError { .. } => {
-                " because the memory allocator returned a error"
+                " because the memory allocator returned an error"
             }
         };
         fmt.write_str(reason)
@@ -148,7 +145,11 @@ impl Display for TryReserveError {
 
 /// An intermediate trait for specialization of `Extend`.
 #[doc(hidden)]
+#[cfg(not(no_global_oom_handling))]
 trait SpecExtend<I: IntoIterator> {
     /// Extends `self` with the contents of the given iterator.
     fn spec_extend(&mut self, iter: I);
 }
+
+#[stable(feature = "try_reserve", since = "1.57.0")]
+impl core::error::Error for TryReserveError {}

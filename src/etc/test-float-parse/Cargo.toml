@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[workspace]
-
 [dependencies]
-rand = "0.4"
+indicatif = { version = "0.17.8", default-features = false }
+num = "0.4.3"
+rand = "0.8.5"
+rand_chacha = "0.3"
+rayon = "1"
 
 [lib]
 name = "test_float_parse"

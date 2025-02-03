@@ -5,10 +5,10 @@ use std::iter::Peekable;
 
 use rustc_span::BytePos;
 
-use crate::comment::{find_comment_end, rewrite_comment, FindUncommented};
+use crate::comment::{FindUncommented, find_comment_end, rewrite_comment};
 use crate::config::lists::*;
 use crate::config::{Config, IndentStyle};
-use crate::rewrite::RewriteContext;
+use crate::rewrite::{RewriteContext, RewriteError, RewriteResult};
 use crate::shape::{Indent, Shape};
 use crate::utils::{
     count_newlines, first_line_width, last_line_width, mk_sp, starts_with_newline,
@@ -125,18 +125,18 @@ pub(crate) struct ListItem {
     pub(crate) pre_comment_style: ListItemCommentStyle,
     // Item should include attributes and doc comments. None indicates a failed
     // rewrite.
-    pub(crate) item: Option<String>,
+    pub(crate) item: RewriteResult,
     pub(crate) post_comment: Option<String>,
     // Whether there is extra whitespace before this item.
     pub(crate) new_lines: bool,
 }
 
 impl ListItem {
-    pub(crate) fn empty() -> ListItem {
+    pub(crate) fn from_item(item: RewriteResult) -> ListItem {
         ListItem {
             pre_comment: None,
             pre_comment_style: ListItemCommentStyle::None,
-            item: None,
+            item: item,
             post_comment: None,
             new_lines: false,
         }
@@ -185,7 +185,7 @@ impl ListItem {
         ListItem {
             pre_comment: None,
             pre_comment_style: ListItemCommentStyle::None,
-            item: Some(s.into()),
+            item: Ok(s.into()),
             post_comment: None,
             new_lines: false,
         }
@@ -197,7 +197,11 @@ impl ListItem {
             !matches!(*s, Some(ref s) if !s.is_empty())
         }
 
-        !(empty(&self.pre_comment) && empty(&self.item) && empty(&self.post_comment))
+        fn empty_result(s: &RewriteResult) -> bool {
+            !matches!(*s, Ok(ref s) if !s.is_empty())
+        }
+
+        !(empty(&self.pre_comment) && empty_result(&self.item) && empty(&self.post_comment))
     }
 }
 
@@ -257,7 +261,7 @@ where
 }
 
 // Format a list of commented items into a string.
-pub(crate) fn write_list<I, T>(items: I, formatting: &ListFormatting<'_>) -> Option<String>
+pub(crate) fn write_list<I, T>(items: I, formatting: &ListFormatting<'_>) -> RewriteResult
 where
     I: IntoIterator<Item = T> + Clone,
     T: AsRef<ListItem>,
@@ -281,7 +285,7 @@ where
     let indent_str = &formatting.shape.indent.to_string(formatting.config);
     while let Some((i, item)) = iter.next() {
         let item = item.as_ref();
-        let inner_item = item.item.as_ref()?;
+        let inner_item = item.item.as_ref().or_else(|err| Err(err.clone()))?;
         let first = i == 0;
         let last = iter.peek().is_none();
         let mut separate = match sep_place {
@@ -297,9 +301,9 @@ where
         } else {
             inner_item.as_ref()
         };
-        let mut item_last_line_width = item_last_line.len() + item_sep_len;
+        let mut item_last_line_width = unicode_str_width(item_last_line) + item_sep_len;
         if item_last_line.starts_with(&**indent_str) {
-            item_last_line_width -= indent_str.len();
+            item_last_line_width -= unicode_str_width(indent_str);
         }
 
         if !item.is_substantial() {
@@ -449,7 +453,7 @@ where
                 } else if starts_with_newline(comment) {
                     false
                 } else {
-                    comment.trim().contains('\n') || comment.trim().len() > width
+                    comment.trim().contains('\n') || unicode_str_width(comment.trim()) > width
                 };
 
                 rewrite_comment(
@@ -465,7 +469,7 @@ where
             if !starts_with_newline(comment) {
                 if formatting.align_comments {
                     let mut comment_alignment =
-                        post_comment_alignment(item_max_width, inner_item.len());
+                        post_comment_alignment(item_max_width, unicode_str_width(inner_item));
                     if first_line_width(&formatted_comment)
                         + last_line_width(&result)
                         + comment_alignment
@@ -475,7 +479,7 @@ where
                         item_max_width = None;
                         formatted_comment = rewrite_post_comment(&mut item_max_width)?;
                         comment_alignment =
-                            post_comment_alignment(item_max_width, inner_item.len());
+                            post_comment_alignment(item_max_width, unicode_str_width(inner_item));
                     }
                     for _ in 0..=comment_alignment {
                         result.push(' ');
@@ -516,7 +520,7 @@ where
         prev_item_is_nested_import = inner_item.contains("::");
     }
 
-    Some(result)
+    Ok(result)
 }
 
 fn max_width_of_item_with_post_comment<I, T>(
@@ -533,7 +537,7 @@ where
     let mut first = true;
     for item in items.clone().into_iter().skip(i) {
         let item = item.as_ref();
-        let inner_item_width = item.inner_as_ref().len();
+        let inner_item_width = unicode_str_width(item.inner_as_ref());
         if !first
             && (item.is_different_group()
                 || item.post_comment.is_none()
@@ -552,8 +556,8 @@ where
     max_width
 }
 
-fn post_comment_alignment(item_max_width: Option<usize>, inner_item_len: usize) -> usize {
-    item_max_width.unwrap_or(0).saturating_sub(inner_item_len)
+fn post_comment_alignment(item_max_width: Option<usize>, inner_item_width: usize) -> usize {
+    item_max_width.unwrap_or(0).saturating_sub(inner_item_width)
 }
 
 pub(crate) struct ListItems<'a, I, F1, F2, F3>
@@ -575,7 +579,7 @@ where
 pub(crate) fn extract_pre_comment(pre_snippet: &str) -> (Option<String>, ListItemCommentStyle) {
     let trimmed_pre_snippet = pre_snippet.trim();
     // Both start and end are checked to support keeping a block comment inline with
-    // the item, even if there are preceeding line comments, while still supporting
+    // the item, even if there are preceding line comments, while still supporting
     // a snippet that starts with a block comment but also contains one or more
     // trailing single line comments.
     // https://github.com/rust-lang/rustfmt/issues/3025
@@ -611,18 +615,33 @@ pub(crate) fn extract_post_comment(
     post_snippet: &str,
     comment_end: usize,
     separator: &str,
+    is_last: bool,
 ) -> Option<String> {
     let white_space: &[_] = &[' ', '\t'];
 
     // Cleanup post-comment: strip separators and whitespace.
     let post_snippet = post_snippet[..comment_end].trim();
+
+    let last_inline_comment_ends_with_separator = if is_last {
+        if let Some(line) = post_snippet.lines().last() {
+            line.ends_with(separator) && line.trim().starts_with("//")
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     let post_snippet_trimmed = if post_snippet.starts_with(|c| c == ',' || c == ':') {
         post_snippet[1..].trim_matches(white_space)
     } else if let Some(stripped) = post_snippet.strip_prefix(separator) {
         stripped.trim_matches(white_space)
+    } else if last_inline_comment_ends_with_separator {
+        // since we're on the last item it's fine to keep any trailing separators in comments
+        post_snippet.trim_matches(white_space)
     }
     // not comment or over two lines
-    else if post_snippet.ends_with(',')
+    else if post_snippet.ends_with(separator)
         && (!post_snippet.trim().starts_with("//") || post_snippet.trim().contains('\n'))
     {
         post_snippet[..(post_snippet.len() - 1)].trim_matches(white_space)
@@ -726,7 +745,7 @@ where
     I: Iterator<Item = T>,
     F1: Fn(&T) -> BytePos,
     F2: Fn(&T) -> BytePos,
-    F3: Fn(&T) -> Option<String>,
+    F3: Fn(&T) -> RewriteResult,
 {
     type Item = ListItem;
 
@@ -748,22 +767,21 @@ where
                 .snippet_provider
                 .span_to_snippet(mk_sp((self.get_hi)(&item), next_start))
                 .unwrap_or("");
-            let comment_end = get_comment_end(
-                post_snippet,
-                self.separator,
-                self.terminator,
-                self.inner.peek().is_none(),
-            );
+            let is_last = self.inner.peek().is_none();
+            let comment_end =
+                get_comment_end(post_snippet, self.separator, self.terminator, is_last);
             let new_lines = has_extra_newline(post_snippet, comment_end);
-            let post_comment = extract_post_comment(post_snippet, comment_end, self.separator);
+            let post_comment =
+                extract_post_comment(post_snippet, comment_end, self.separator, is_last);
 
             self.prev_span_end = (self.get_hi)(&item) + BytePos(comment_end as u32);
 
             ListItem {
                 pre_comment,
                 pre_comment_style,
+                // leave_last is set to true only for rewrite_items
                 item: if self.inner.peek().is_none() && self.leave_last {
-                    None
+                    Err(RewriteError::SkipFormatting)
                 } else {
                     (self.get_item_string)(&item)
                 },
@@ -792,7 +810,7 @@ where
     I: Iterator<Item = T>,
     F1: Fn(&T) -> BytePos,
     F2: Fn(&T) -> BytePos,
-    F3: Fn(&T) -> Option<String>,
+    F3: Fn(&T) -> RewriteResult,
 {
     ListItems {
         snippet_provider,

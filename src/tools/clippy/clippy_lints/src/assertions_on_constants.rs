@@ -1,9 +1,10 @@
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint_and_help;
-use clippy_utils::macros::{find_assert_args, root_macro_call_first_node, PanicExpn};
-use rustc_hir::Expr;
+use clippy_utils::is_inside_always_const_context;
+use clippy_utils::macros::{PanicExpn, find_assert_args, root_macro_call_first_node};
+use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
@@ -13,9 +14,6 @@ declare_clippy_lint! {
     /// ### Why is this bad?
     /// Will be optimized out by the compiler or should probably be replaced by a
     /// `panic!()` or `unreachable!()`
-    ///
-    /// ### Known problems
-    /// None
     ///
     /// ### Example
     /// ```rust,ignore
@@ -34,20 +32,33 @@ declare_lint_pass!(AssertionsOnConstants => [ASSERTIONS_ON_CONSTANTS]);
 
 impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
-        let Some(macro_call) = root_macro_call_first_node(cx, e) else { return };
+        let Some(macro_call) = root_macro_call_first_node(cx, e) else {
+            return;
+        };
         let is_debug = match cx.tcx.get_diagnostic_name(macro_call.def_id) {
             Some(sym::debug_assert_macro) => true,
             Some(sym::assert_macro) => false,
             _ => return,
         };
-        let Some((condition, panic_expn)) = find_assert_args(cx, e, macro_call.expn) else { return };
-        let Some((Constant::Bool(val), _)) = constant(cx, cx.typeck_results(), condition) else { return };
+        let Some((condition, panic_expn)) = find_assert_args(cx, e, macro_call.expn) else {
+            return;
+        };
+        let Some(Constant::Bool(val)) = ConstEvalCtxt::new(cx).eval(condition) else {
+            return;
+        };
+
+        match condition.kind {
+            ExprKind::Path(..) | ExprKind::Lit(_) => {},
+            _ if is_inside_always_const_context(cx.tcx, e.hir_id) => return,
+            _ => {},
+        }
+
         if val {
             span_lint_and_help(
                 cx,
                 ASSERTIONS_ON_CONSTANTS,
                 macro_call.span,
-                &format!(
+                format!(
                     "`{}!(true)` will be optimized out by the compiler",
                     cx.tcx.item_name(macro_call.def_id)
                 ),
@@ -63,9 +74,9 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
                 cx,
                 ASSERTIONS_ON_CONSTANTS,
                 macro_call.span,
-                &format!("`assert!(false{})` should probably be replaced", assert_arg),
+                format!("`assert!(false{assert_arg})` should probably be replaced"),
                 None,
-                &format!("use `panic!({})` or `unreachable!({0})`", panic_arg),
+                format!("use `panic!({panic_arg})` or `unreachable!({panic_arg})`"),
             );
         }
     }

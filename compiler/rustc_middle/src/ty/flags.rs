@@ -1,12 +1,12 @@
-use crate::ty::subst::{GenericArg, GenericArgKind};
-use crate::ty::{self, InferConst, Term, Ty, TypeFlags};
 use std::slice;
+
+use crate::ty::{self, GenericArg, GenericArgKind, InferConst, Ty, TypeFlags};
 
 #[derive(Debug)]
 pub struct FlagComputation {
     pub flags: TypeFlags,
 
-    // see `Ty::outer_exclusive_binder` for details
+    /// see `Ty::outer_exclusive_binder` for details
     pub outer_exclusive_binder: ty::DebruijnIndex,
 }
 
@@ -22,22 +22,25 @@ impl FlagComputation {
         result
     }
 
-    pub fn for_predicate<'tcx>(binder: ty::Binder<'tcx, ty::PredicateKind<'_>>) -> FlagComputation {
+    pub fn for_predicate(binder: ty::Binder<'_, ty::PredicateKind<'_>>) -> FlagComputation {
         let mut result = FlagComputation::new();
         result.add_predicate(binder);
         result
     }
 
-    pub fn for_const(c: ty::Const<'_>) -> TypeFlags {
+    pub fn for_const_kind(kind: &ty::ConstKind<'_>) -> FlagComputation {
         let mut result = FlagComputation::new();
-        result.add_const(c);
-        result.flags
+        result.add_const_kind(kind);
+        result
     }
 
-    pub fn for_unevaluated_const(uv: ty::Unevaluated<'_>) -> TypeFlags {
+    pub fn for_clauses(clauses: &[ty::Clause<'_>]) -> FlagComputation {
         let mut result = FlagComputation::new();
-        result.add_unevaluated_const(uv);
-        result.flags
+        for c in clauses {
+            result.add_flags(c.as_predicate().flags());
+            result.add_exclusive_binder(c.as_predicate().outer_exclusive_binder());
+        }
+        result
     }
 
     fn add_flags(&mut self, flags: TypeFlags) {
@@ -66,7 +69,7 @@ impl FlagComputation {
         let mut computation = FlagComputation::new();
 
         if !value.bound_vars().is_empty() {
-            computation.flags = computation.flags | TypeFlags::HAS_RE_LATE_BOUND;
+            computation.add_flags(TypeFlags::HAS_BINDER_VARS);
         }
 
         f(&mut computation, value.skip_binder());
@@ -101,42 +104,65 @@ impl FlagComputation {
                 self.add_flags(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
             }
 
-            &ty::Generator(_, ref substs, _) => {
-                let substs = substs.as_generator();
+            ty::Coroutine(_, args) => {
+                let args = args.as_coroutine();
                 let should_remove_further_specializable =
                     !self.flags.contains(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
-                self.add_substs(substs.parent_substs());
+                self.add_args(args.parent_args());
                 if should_remove_further_specializable {
                     self.flags -= TypeFlags::STILL_FURTHER_SPECIALIZABLE;
                 }
 
-                self.add_ty(substs.resume_ty());
-                self.add_ty(substs.return_ty());
-                self.add_ty(substs.witness());
-                self.add_ty(substs.yield_ty());
-                self.add_ty(substs.tupled_upvars_ty());
+                self.add_ty(args.resume_ty());
+                self.add_ty(args.return_ty());
+                self.add_ty(args.witness());
+                self.add_ty(args.yield_ty());
+                self.add_ty(args.tupled_upvars_ty());
             }
 
-            &ty::GeneratorWitness(ts) => {
-                self.bound_computation(ts, |flags, ts| flags.add_tys(ts));
-            }
-
-            &ty::Closure(_, substs) => {
-                let substs = substs.as_closure();
+            ty::CoroutineWitness(_, args) => {
                 let should_remove_further_specializable =
                     !self.flags.contains(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
-                self.add_substs(substs.parent_substs());
+                self.add_args(args);
+                if should_remove_further_specializable {
+                    self.flags -= TypeFlags::STILL_FURTHER_SPECIALIZABLE;
+                }
+                self.add_flags(TypeFlags::HAS_TY_COROUTINE);
+            }
+
+            &ty::Closure(_, args) => {
+                let args = args.as_closure();
+                let should_remove_further_specializable =
+                    !self.flags.contains(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
+                self.add_args(args.parent_args());
                 if should_remove_further_specializable {
                     self.flags -= TypeFlags::STILL_FURTHER_SPECIALIZABLE;
                 }
 
-                self.add_ty(substs.sig_as_fn_ptr_ty());
-                self.add_ty(substs.kind_ty());
-                self.add_ty(substs.tupled_upvars_ty());
+                self.add_ty(args.sig_as_fn_ptr_ty());
+                self.add_ty(args.kind_ty());
+                self.add_ty(args.tupled_upvars_ty());
+            }
+
+            &ty::CoroutineClosure(_, args) => {
+                let args = args.as_coroutine_closure();
+                let should_remove_further_specializable =
+                    !self.flags.contains(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
+                self.add_args(args.parent_args());
+                if should_remove_further_specializable {
+                    self.flags -= TypeFlags::STILL_FURTHER_SPECIALIZABLE;
+                }
+
+                self.add_ty(args.kind_ty());
+                self.add_ty(args.signature_parts_ty());
+                self.add_ty(args.tupled_upvars_ty());
+                self.add_ty(args.coroutine_captures_by_ref_ty());
+                self.add_ty(args.coroutine_witness_ty());
             }
 
             &ty::Bound(debruijn, _) => {
                 self.add_bound_var(debruijn);
+                self.add_flags(TypeFlags::HAS_TY_BOUND);
             }
 
             &ty::Placeholder(..) => {
@@ -157,24 +183,25 @@ impl FlagComputation {
                 }
             }
 
-            &ty::Adt(_, substs) => {
-                self.add_substs(substs);
+            &ty::Adt(_, args) => {
+                self.add_args(args);
             }
 
-            &ty::Projection(data) => {
-                self.add_flags(TypeFlags::HAS_TY_PROJECTION);
-                self.add_projection_ty(data);
+            &ty::Alias(kind, data) => {
+                self.add_flags(match kind {
+                    ty::Projection => TypeFlags::HAS_TY_PROJECTION,
+                    ty::Weak => TypeFlags::HAS_TY_WEAK,
+                    ty::Opaque => TypeFlags::HAS_TY_OPAQUE,
+                    ty::Inherent => TypeFlags::HAS_TY_INHERENT,
+                });
+
+                self.add_alias_ty(data);
             }
 
-            &ty::Opaque(_, substs) => {
-                self.add_flags(TypeFlags::HAS_TY_OPAQUE);
-                self.add_substs(substs);
-            }
-
-            &ty::Dynamic(obj, r) => {
+            &ty::Dynamic(obj, r, _) => {
                 for predicate in obj.iter() {
                     self.bound_computation(predicate, |computation, predicate| match predicate {
-                        ty::ExistentialPredicate::Trait(tr) => computation.add_substs(tr.substs),
+                        ty::ExistentialPredicate::Trait(tr) => computation.add_args(tr.args),
                         ty::ExistentialPredicate::Projection(p) => {
                             computation.add_existential_projection(&p);
                         }
@@ -190,10 +217,24 @@ impl FlagComputation {
                 self.add_const(len);
             }
 
+            &ty::Pat(ty, pat) => {
+                self.add_ty(ty);
+                match *pat {
+                    ty::PatternKind::Range { start, end, include_end: _ } => {
+                        if let Some(start) = start {
+                            self.add_const(start)
+                        }
+                        if let Some(end) = end {
+                            self.add_const(end)
+                        }
+                    }
+                }
+            }
+
             &ty::Slice(tt) => self.add_ty(tt),
 
-            &ty::RawPtr(ref m) => {
-                self.add_ty(m.ty);
+            &ty::RawPtr(ty, _) => {
+                self.add_ty(ty);
             }
 
             &ty::Ref(r, ty, _) => {
@@ -205,14 +246,19 @@ impl FlagComputation {
                 self.add_tys(types);
             }
 
-            &ty::FnDef(_, substs) => {
-                self.add_substs(substs);
+            &ty::FnDef(_, args) => {
+                self.add_args(args);
             }
 
-            &ty::FnPtr(fn_sig) => self.bound_computation(fn_sig, |computation, fn_sig| {
-                computation.add_tys(fn_sig.inputs());
-                computation.add_ty(fn_sig.output());
+            &ty::FnPtr(sig_tys, _) => self.bound_computation(sig_tys, |computation, sig_tys| {
+                computation.add_tys(sig_tys.inputs_and_output);
             }),
+
+            &ty::UnsafeBinder(bound_ty) => {
+                self.bound_computation(bound_ty.into(), |computation, ty| {
+                    computation.add_ty(ty);
+                })
+            }
         }
     }
 
@@ -222,16 +268,32 @@ impl FlagComputation {
 
     fn add_predicate_atom(&mut self, atom: ty::PredicateKind<'_>) {
         match atom {
-            ty::PredicateKind::Trait(trait_pred) => {
-                self.add_substs(trait_pred.trait_ref.substs);
+            ty::PredicateKind::Clause(ty::ClauseKind::Trait(trait_pred)) => {
+                self.add_args(trait_pred.trait_ref.args);
             }
-            ty::PredicateKind::RegionOutlives(ty::OutlivesPredicate(a, b)) => {
+            ty::PredicateKind::Clause(ty::ClauseKind::HostEffect(ty::HostEffectPredicate {
+                trait_ref,
+                constness: _,
+            })) => {
+                self.add_args(trait_ref.args);
+            }
+            ty::PredicateKind::Clause(ty::ClauseKind::RegionOutlives(ty::OutlivesPredicate(
+                a,
+                b,
+            ))) => {
                 self.add_region(a);
                 self.add_region(b);
             }
-            ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(ty, region)) => {
+            ty::PredicateKind::Clause(ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(
+                ty,
+                region,
+            ))) => {
                 self.add_ty(ty);
                 self.add_region(region);
+            }
+            ty::PredicateKind::Clause(ty::ClauseKind::ConstArgHasType(ct, ty)) => {
+                self.add_const(ct);
+                self.add_ty(ty);
             }
             ty::PredicateKind::Subtype(ty::SubtypePredicate { a_is_expected: _, a, b }) => {
                 self.add_ty(a);
@@ -241,29 +303,32 @@ impl FlagComputation {
                 self.add_ty(a);
                 self.add_ty(b);
             }
-            ty::PredicateKind::Projection(ty::ProjectionPredicate { projection_ty, term }) => {
-                self.add_projection_ty(projection_ty);
-                match term {
-                    Term::Ty(ty) => self.add_ty(ty),
-                    Term::Const(c) => self.add_const(c),
-                }
+            ty::PredicateKind::Clause(ty::ClauseKind::Projection(ty::ProjectionPredicate {
+                projection_term,
+                term,
+            })) => {
+                self.add_alias_term(projection_term);
+                self.add_term(term);
             }
-            ty::PredicateKind::WellFormed(arg) => {
-                self.add_substs(slice::from_ref(&arg));
+            ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(arg)) => {
+                self.add_args(slice::from_ref(&arg));
             }
-            ty::PredicateKind::ObjectSafe(_def_id) => {}
-            ty::PredicateKind::ClosureKind(_def_id, substs, _kind) => {
-                self.add_substs(substs);
-            }
-            ty::PredicateKind::ConstEvaluatable(uv) => {
-                self.add_unevaluated_const(uv);
+            ty::PredicateKind::DynCompatible(_def_id) => {}
+            ty::PredicateKind::Clause(ty::ClauseKind::ConstEvaluatable(uv)) => {
+                self.add_const(uv);
             }
             ty::PredicateKind::ConstEquate(expected, found) => {
                 self.add_const(expected);
                 self.add_const(found);
             }
-            ty::PredicateKind::TypeWellFormedFromEnv(ty) => {
-                self.add_ty(ty);
+            ty::PredicateKind::Ambiguous => {}
+            ty::PredicateKind::NormalizesTo(ty::NormalizesTo { alias, term }) => {
+                self.add_alias_term(alias);
+                self.add_term(term);
+            }
+            ty::PredicateKind::AliasRelate(t1, t2, _) => {
+                self.add_term(t1);
+                self.add_term(t2);
             }
         }
     }
@@ -281,15 +346,22 @@ impl FlagComputation {
 
     fn add_region(&mut self, r: ty::Region<'_>) {
         self.add_flags(r.type_flags());
-        if let ty::ReLateBound(debruijn, _) = *r {
+        if let ty::ReBound(debruijn, _) = *r {
             self.add_bound_var(debruijn);
         }
     }
 
     fn add_const(&mut self, c: ty::Const<'_>) {
-        self.add_ty(c.ty());
-        match c.val() {
-            ty::ConstKind::Unevaluated(unevaluated) => self.add_unevaluated_const(unevaluated),
+        self.add_flags(c.flags());
+        self.add_exclusive_binder(c.outer_exclusive_binder());
+    }
+
+    fn add_const_kind(&mut self, c: &ty::ConstKind<'_>) {
+        match *c {
+            ty::ConstKind::Unevaluated(uv) => {
+                self.add_args(uv.args);
+                self.add_flags(TypeFlags::HAS_CT_PROJECTION);
+            }
             ty::ConstKind::Infer(infer) => {
                 self.add_flags(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
                 match infer {
@@ -299,6 +371,7 @@ impl FlagComputation {
             }
             ty::ConstKind::Bound(debruijn, _) => {
                 self.add_bound_var(debruijn);
+                self.add_flags(TypeFlags::HAS_CT_BOUND);
             }
             ty::ConstKind::Param(_) => {
                 self.add_flags(TypeFlags::HAS_CT_PARAM);
@@ -308,35 +381,42 @@ impl FlagComputation {
                 self.add_flags(TypeFlags::HAS_CT_PLACEHOLDER);
                 self.add_flags(TypeFlags::STILL_FURTHER_SPECIALIZABLE);
             }
-            ty::ConstKind::Value(_) => {}
+            ty::ConstKind::Value(cv) => self.add_ty(cv.ty),
+            ty::ConstKind::Expr(e) => self.add_args(e.args()),
             ty::ConstKind::Error(_) => self.add_flags(TypeFlags::HAS_ERROR),
         }
     }
 
-    fn add_unevaluated_const<P>(&mut self, ct: ty::Unevaluated<'_, P>) {
-        self.add_substs(ct.substs);
-        self.add_flags(TypeFlags::HAS_CT_PROJECTION);
-    }
-
     fn add_existential_projection(&mut self, projection: &ty::ExistentialProjection<'_>) {
-        self.add_substs(projection.substs);
-        match projection.term {
-            ty::Term::Ty(ty) => self.add_ty(ty),
-            ty::Term::Const(ct) => self.add_const(ct),
+        self.add_args(projection.args);
+        match projection.term.unpack() {
+            ty::TermKind::Ty(ty) => self.add_ty(ty),
+            ty::TermKind::Const(ct) => self.add_const(ct),
         }
     }
 
-    fn add_projection_ty(&mut self, projection_ty: ty::ProjectionTy<'_>) {
-        self.add_substs(projection_ty.substs);
+    fn add_alias_ty(&mut self, alias_ty: ty::AliasTy<'_>) {
+        self.add_args(alias_ty.args);
     }
 
-    fn add_substs(&mut self, substs: &[GenericArg<'_>]) {
-        for kind in substs {
+    fn add_alias_term(&mut self, alias_term: ty::AliasTerm<'_>) {
+        self.add_args(alias_term.args);
+    }
+
+    fn add_args(&mut self, args: &[GenericArg<'_>]) {
+        for kind in args {
             match kind.unpack() {
                 GenericArgKind::Type(ty) => self.add_ty(ty),
                 GenericArgKind::Lifetime(lt) => self.add_region(lt),
                 GenericArgKind::Const(ct) => self.add_const(ct),
             }
+        }
+    }
+
+    fn add_term(&mut self, term: ty::Term<'_>) {
+        match term.unpack() {
+            ty::TermKind::Ty(ty) => self.add_ty(ty),
+            ty::TermKind::Const(ct) => self.add_const(ct),
         }
     }
 }

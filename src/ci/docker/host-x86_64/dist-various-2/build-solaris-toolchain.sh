@@ -32,27 +32,29 @@ cd solaris
 
 dpkg --add-architecture $APT_ARCH
 apt-get update
-apt-get download $(apt-cache depends --recurse --no-replaces \
-  libc:$APT_ARCH           \
-  libm-dev:$APT_ARCH       \
-  libpthread:$APT_ARCH     \
-  libresolv:$APT_ARCH      \
-  librt:$APT_ARCH          \
-  libsocket:$APT_ARCH      \
-  system-crt:$APT_ARCH     \
-  system-header:$APT_ARCH  \
-  | grep "^\w")
+apt-get install -y --download-only                           \
+  libc:$APT_ARCH                                             \
+  liblgrp:$APT_ARCH                                          \
+  libm-dev:$APT_ARCH                                         \
+  libpthread:$APT_ARCH                                       \
+  libresolv:$APT_ARCH                                        \
+  librt:$APT_ARCH                                            \
+  libsendfile:$APT_ARCH                                      \
+  libsocket:$APT_ARCH                                        \
+  system-crt:$APT_ARCH                                       \
+  system-header:$APT_ARCH
 
-for deb in *$APT_ARCH.deb; do
+for deb in /var/cache/apt/archives/*$APT_ARCH.deb; do
   dpkg -x $deb .
 done
+apt-get clean
 
 # The -dev packages are not available from the apt repository we're using.
 # However, those packages are just symlinks from *.so to *.so.<version>.
 # This makes all those symlinks.
 for lib in $(find -name '*.so.*'); do
   target=${lib%.so.*}.so
-  [ -e $target ] || ln -s ${lib##*/} $target
+  ln -s ${lib##*/} $target || echo "warning: silenced error symlinking $lib"
 done
 
 # Remove Solaris 11 functions that are optionally used by libbacktrace.

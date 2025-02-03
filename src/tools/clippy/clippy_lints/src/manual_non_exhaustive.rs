@@ -1,14 +1,18 @@
-use clippy_utils::attrs::is_doc_hidden;
-use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::source::snippet_opt;
-use clippy_utils::{meets_msrv, msrvs};
-use if_chain::if_chain;
-use rustc_ast::ast::{FieldDef, Item, ItemKind, Variant, VariantData, VisibilityKind};
+use clippy_config::Conf;
+use clippy_utils::diagnostics::{span_lint_and_then, span_lint_hir_and_then};
+use clippy_utils::is_doc_hidden;
+use clippy_utils::msrvs::{self, Msrv};
+use clippy_utils::source::snippet_indent;
+use itertools::Itertools;
+use rustc_ast::attr;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
-use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
-use rustc_semver::RustcVersion;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{sym, Span};
+use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
+use rustc_hir::{Expr, ExprKind, Item, ItemKind, QPath, TyKind, VariantData};
+use rustc_lint::{LateContext, LateLintPass};
+use rustc_session::impl_lint_pass;
+use rustc_span::def_id::LocalDefId;
+use rustc_span::{Span, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -19,7 +23,7 @@ declare_clippy_lint! {
     /// and allows possible optimizations when applied to enums.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct S {
     ///     pub a: i32,
     ///     pub b: i32,
@@ -36,7 +40,7 @@ declare_clippy_lint! {
     /// struct T(pub i32, pub i32, ());
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// #[non_exhaustive]
     /// struct S {
     ///     pub a: i32,
@@ -58,129 +62,115 @@ declare_clippy_lint! {
     "manual implementations of the non-exhaustive pattern can be simplified using #[non_exhaustive]"
 }
 
-#[derive(Clone)]
 pub struct ManualNonExhaustive {
-    msrv: Option<RustcVersion>,
+    msrv: Msrv,
+    constructed_enum_variants: FxHashSet<LocalDefId>,
+    potential_enums: Vec<(LocalDefId, LocalDefId, Span, Span)>,
 }
 
 impl ManualNonExhaustive {
-    #[must_use]
-    pub fn new(msrv: Option<RustcVersion>) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+            constructed_enum_variants: FxHashSet::default(),
+            potential_enums: Vec::new(),
+        }
     }
 }
 
 impl_lint_pass!(ManualNonExhaustive => [MANUAL_NON_EXHAUSTIVE]);
 
-impl EarlyLintPass for ManualNonExhaustive {
-    fn check_item(&mut self, cx: &EarlyContext<'_>, item: &Item) {
-        if !meets_msrv(self.msrv.as_ref(), &msrvs::NON_EXHAUSTIVE) {
+impl<'tcx> LateLintPass<'tcx> for ManualNonExhaustive {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
+        if !self.msrv.meets(msrvs::NON_EXHAUSTIVE) || !cx.effective_visibilities.is_exported(item.owner_id.def_id) {
             return;
         }
 
-        match &item.kind {
-            ItemKind::Enum(def, _) => {
-                check_manual_non_exhaustive_enum(cx, item, &def.variants);
+        match item.kind {
+            ItemKind::Enum(def, _) if def.variants.len() > 1 => {
+                let iter = def.variants.iter().filter_map(|v| {
+                    (matches!(v.data, VariantData::Unit(_, _)) && is_doc_hidden(cx.tcx.hir().attrs(v.hir_id)))
+                        .then_some((v.def_id, v.span))
+                });
+                if let Ok((id, span)) = iter.exactly_one()
+                    && !attr::contains_name(cx.tcx.hir().attrs(item.hir_id()), sym::non_exhaustive)
+                {
+                    self.potential_enums.push((item.owner_id.def_id, id, item.span, span));
+                }
             },
             ItemKind::Struct(variant_data, _) => {
-                if let VariantData::Unit(..) = variant_data {
-                    return;
+                let fields = variant_data.fields();
+                let private_fields = fields
+                    .iter()
+                    .filter(|field| !cx.effective_visibilities.is_exported(field.def_id));
+                if fields.len() > 1
+                    && let Ok(field) = private_fields.exactly_one()
+                    && let TyKind::Tup([]) = field.ty.kind
+                {
+                    span_lint_and_then(
+                        cx,
+                        MANUAL_NON_EXHAUSTIVE,
+                        item.span,
+                        "this seems like a manual implementation of the non-exhaustive pattern",
+                        |diag| {
+                            if let Some(non_exhaustive) =
+                                attr::find_by_name(cx.tcx.hir().attrs(item.hir_id()), sym::non_exhaustive)
+                            {
+                                diag.span_note(non_exhaustive.span, "the struct is already non-exhaustive");
+                            } else {
+                                let indent = snippet_indent(cx, item.span).unwrap_or_default();
+                                diag.span_suggestion_verbose(
+                                    item.span.shrink_to_lo(),
+                                    "use the `#[non_exhaustive]` attribute instead",
+                                    format!("#[non_exhaustive]\n{indent}"),
+                                    Applicability::MaybeIncorrect,
+                                );
+                            }
+                            diag.span_help(field.span, "remove this field");
+                        },
+                    );
                 }
-
-                check_manual_non_exhaustive_struct(cx, item, variant_data);
             },
             _ => {},
         }
     }
 
-    extract_msrv_attr!(EarlyContext);
-}
-
-fn check_manual_non_exhaustive_enum(cx: &EarlyContext<'_>, item: &Item, variants: &[Variant]) {
-    fn is_non_exhaustive_marker(variant: &Variant) -> bool {
-        matches!(variant.data, VariantData::Unit(_))
-            && variant.ident.as_str().starts_with('_')
-            && is_doc_hidden(&variant.attrs)
-    }
-
-    let mut markers = variants.iter().filter(|v| is_non_exhaustive_marker(v));
-    if_chain! {
-        if let Some(marker) = markers.next();
-        if markers.count() == 0 && variants.len() > 1;
-        then {
-            span_lint_and_then(
-                cx,
-                MANUAL_NON_EXHAUSTIVE,
-                item.span,
-                "this seems like a manual implementation of the non-exhaustive pattern",
-                |diag| {
-                    if_chain! {
-                        if !item.attrs.iter().any(|attr| attr.has_name(sym::non_exhaustive));
-                        let header_span = cx.sess().source_map().span_until_char(item.span, '{');
-                        if let Some(snippet) = snippet_opt(cx, header_span);
-                        then {
-                            diag.span_suggestion(
-                                header_span,
-                                "add the attribute",
-                                format!("#[non_exhaustive] {}", snippet),
-                                Applicability::Unspecified,
-                            );
-                        }
-                    }
-                    diag.span_help(marker.span, "remove this variant");
-                });
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
+        if let ExprKind::Path(QPath::Resolved(None, p)) = &e.kind
+            && let Res::Def(DefKind::Ctor(CtorOf::Variant, CtorKind::Const), ctor_id) = p.res
+            && let Some(local_ctor) = ctor_id.as_local()
+        {
+            let variant_id = cx.tcx.local_parent(local_ctor);
+            self.constructed_enum_variants.insert(variant_id);
         }
     }
-}
 
-fn check_manual_non_exhaustive_struct(cx: &EarlyContext<'_>, item: &Item, data: &VariantData) {
-    fn is_private(field: &FieldDef) -> bool {
-        matches!(field.vis.kind, VisibilityKind::Inherited)
-    }
-
-    fn is_non_exhaustive_marker(field: &FieldDef) -> bool {
-        is_private(field) && field.ty.kind.is_unit() && field.ident.map_or(true, |n| n.as_str().starts_with('_'))
-    }
-
-    fn find_header_span(cx: &EarlyContext<'_>, item: &Item, data: &VariantData) -> Span {
-        let delimiter = match data {
-            VariantData::Struct(..) => '{',
-            VariantData::Tuple(..) => '(',
-            VariantData::Unit(_) => unreachable!("`VariantData::Unit` is already handled above"),
-        };
-
-        cx.sess().source_map().span_until_char(item.span, delimiter)
-    }
-
-    let fields = data.fields();
-    let private_fields = fields.iter().filter(|f| is_private(f)).count();
-    let public_fields = fields.iter().filter(|f| f.vis.kind.is_pub()).count();
-
-    if_chain! {
-        if private_fields == 1 && public_fields >= 1 && public_fields == fields.len() - 1;
-        if let Some(marker) = fields.iter().find(|f| is_non_exhaustive_marker(f));
-        then {
-            span_lint_and_then(
+    fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
+        for &(enum_id, _, enum_span, variant_span) in self
+            .potential_enums
+            .iter()
+            .filter(|(_, variant_id, _, _)| !self.constructed_enum_variants.contains(variant_id))
+        {
+            let hir_id = cx.tcx.local_def_id_to_hir_id(enum_id);
+            span_lint_hir_and_then(
                 cx,
                 MANUAL_NON_EXHAUSTIVE,
-                item.span,
+                hir_id,
+                enum_span,
                 "this seems like a manual implementation of the non-exhaustive pattern",
                 |diag| {
-                    if_chain! {
-                        if !item.attrs.iter().any(|attr| attr.has_name(sym::non_exhaustive));
-                        let header_span = find_header_span(cx, item, data);
-                        if let Some(snippet) = snippet_opt(cx, header_span);
-                        then {
-                            diag.span_suggestion(
-                                header_span,
-                                "add the attribute",
-                                format!("#[non_exhaustive] {}", snippet),
-                                Applicability::Unspecified,
-                            );
-                        }
-                    }
-                    diag.span_help(marker.span, "remove this field");
-                });
+                    let indent = snippet_indent(cx, enum_span).unwrap_or_default();
+                    diag.span_suggestion_verbose(
+                        enum_span.shrink_to_lo(),
+                        "use the `#[non_exhaustive]` attribute instead",
+                        format!("#[non_exhaustive]\n{indent}"),
+                        Applicability::MaybeIncorrect,
+                    );
+                    diag.span_help(variant_span, "remove this variant");
+                },
+            );
         }
     }
+
+    extract_msrv_attr!(LateContext);
 }

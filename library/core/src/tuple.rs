@@ -1,92 +1,195 @@
-// See src/libstd/primitive_docs.rs for documentation.
+// See core/src/primitive_docs.rs for documentation.
 
-use crate::cmp::Ordering::*;
-use crate::cmp::*;
+use crate::cmp::Ordering::{self, *};
+use crate::marker::{ConstParamTy_, StructuralPartialEq, UnsizedConstParamTy};
 
-// macro for implementing n-ary tuple functions and operations
+// Recursive macro for implementing n-ary tuple functions and operations
+//
+// Also provides implementations for tuples with lesser arity. For example, tuple_impls!(A B C)
+// will implement everything for (A, B, C), (A, B) and (A,).
 macro_rules! tuple_impls {
-    ($(
-        $Tuple:ident {
-            $(($idx:tt) -> $T:ident)+
-        }
-    )+) => {
-        $(
+    // Stopping criteria (1-ary tuple)
+    ($T:ident) => {
+        tuple_impls!(@impl $T);
+    };
+    // Running criteria (n-ary tuple, with n >= 2)
+    ($T:ident $( $U:ident )+) => {
+        tuple_impls!($( $U )+);
+        tuple_impls!(@impl $T $( $U )+);
+    };
+    // "Private" internal implementation
+    (@impl $( $T:ident )+) => {
+        maybe_tuple_doc! {
+            $($T)+ @
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($T:PartialEq),+> PartialEq for ($($T,)+) where last_type!($($T,)+): ?Sized {
+            impl<$($T: PartialEq),+> PartialEq for ($($T,)+)
+            where
+                last_type!($($T,)+): ?Sized
+            {
                 #[inline]
                 fn eq(&self, other: &($($T,)+)) -> bool {
-                    $(self.$idx == other.$idx)&&+
+                    $( ${ignore($T)} self.${index()} == other.${index()} )&&+
                 }
                 #[inline]
                 fn ne(&self, other: &($($T,)+)) -> bool {
-                    $(self.$idx != other.$idx)||+
+                    $( ${ignore($T)} self.${index()} != other.${index()} )||+
                 }
             }
+        }
 
+        maybe_tuple_doc! {
+            $($T)+ @
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($T:Eq),+> Eq for ($($T,)+) where last_type!($($T,)+): ?Sized {}
+            impl<$($T: Eq),+> Eq for ($($T,)+)
+            where
+                last_type!($($T,)+): ?Sized
+            {}
+        }
 
+        maybe_tuple_doc! {
+            $($T)+ @
+            #[unstable(feature = "adt_const_params", issue = "95174")]
+            impl<$($T: ConstParamTy_),+> ConstParamTy_ for ($($T,)+)
+            {}
+        }
+
+        maybe_tuple_doc! {
+            $($T)+ @
+            #[unstable(feature = "unsized_const_params", issue = "95174")]
+            impl<$($T: UnsizedConstParamTy),+> UnsizedConstParamTy for ($($T,)+)
+            {}
+        }
+
+        maybe_tuple_doc! {
+            $($T)+ @
+            #[unstable(feature = "structural_match", issue = "31434")]
+            impl<$($T),+> StructuralPartialEq for ($($T,)+)
+            {}
+        }
+
+        maybe_tuple_doc! {
+            $($T)+ @
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($T:PartialOrd + PartialEq),+> PartialOrd for ($($T,)+)
-                    where last_type!($($T,)+): ?Sized {
+            impl<$($T: PartialOrd),+> PartialOrd for ($($T,)+)
+            where
+                last_type!($($T,)+): ?Sized
+            {
                 #[inline]
                 fn partial_cmp(&self, other: &($($T,)+)) -> Option<Ordering> {
-                    lexical_partial_cmp!($(self.$idx, other.$idx),+)
+                    lexical_partial_cmp!($( ${ignore($T)} self.${index()}, other.${index()} ),+)
                 }
                 #[inline]
                 fn lt(&self, other: &($($T,)+)) -> bool {
-                    lexical_ord!(lt, $(self.$idx, other.$idx),+)
+                    lexical_ord!(lt, Less, $( ${ignore($T)} self.${index()}, other.${index()} ),+)
                 }
                 #[inline]
                 fn le(&self, other: &($($T,)+)) -> bool {
-                    lexical_ord!(le, $(self.$idx, other.$idx),+)
+                    lexical_ord!(le, Less, $( ${ignore($T)} self.${index()}, other.${index()} ),+)
                 }
                 #[inline]
                 fn ge(&self, other: &($($T,)+)) -> bool {
-                    lexical_ord!(ge, $(self.$idx, other.$idx),+)
+                    lexical_ord!(ge, Greater, $( ${ignore($T)} self.${index()}, other.${index()} ),+)
                 }
                 #[inline]
                 fn gt(&self, other: &($($T,)+)) -> bool {
-                    lexical_ord!(gt, $(self.$idx, other.$idx),+)
+                    lexical_ord!(gt, Greater, $( ${ignore($T)} self.${index()}, other.${index()} ),+)
                 }
             }
+        }
 
+        maybe_tuple_doc! {
+            $($T)+ @
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($T:Ord),+> Ord for ($($T,)+) where last_type!($($T,)+): ?Sized {
+            impl<$($T: Ord),+> Ord for ($($T,)+)
+            where
+                last_type!($($T,)+): ?Sized
+            {
                 #[inline]
                 fn cmp(&self, other: &($($T,)+)) -> Ordering {
-                    lexical_cmp!($(self.$idx, other.$idx),+)
+                    lexical_cmp!($( ${ignore($T)} self.${index()}, other.${index()} ),+)
                 }
             }
+        }
 
+        maybe_tuple_doc! {
+            $($T)+ @
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl<$($T:Default),+> Default for ($($T,)+) {
+            impl<$($T: Default),+> Default for ($($T,)+) {
                 #[inline]
                 fn default() -> ($($T,)+) {
                     ($({ let x: $T = Default::default(); x},)+)
                 }
             }
-        )+
+        }
+
+        maybe_tuple_doc! {
+            $($T)+ @
+            #[stable(feature = "array_tuple_conv", since = "1.71.0")]
+            impl<T> From<[T; ${count($T)}]> for ($(${ignore($T)} T,)+) {
+                #[inline]
+                #[allow(non_snake_case)]
+                fn from(array: [T; ${count($T)}]) -> Self {
+                    let [$($T,)+] = array;
+                    ($($T,)+)
+                }
+            }
+        }
+
+        maybe_tuple_doc! {
+            $($T)+ @
+            #[stable(feature = "array_tuple_conv", since = "1.71.0")]
+            impl<T> From<($(${ignore($T)} T,)+)> for [T; ${count($T)}] {
+                #[inline]
+                #[allow(non_snake_case)]
+                fn from(tuple: ($(${ignore($T)} T,)+)) -> Self {
+                    let ($($T,)+) = tuple;
+                    [$($T,)+]
+                }
+            }
+        }
     }
 }
 
-// Constructs an expression that performs a lexical ordering using method $rel.
-// The values are interleaved, so the macro invocation for
-// `(a1, a2, a3) < (b1, b2, b3)` would be `lexical_ord!(lt, a1, b1, a2, b2,
-// a3, b3)` (and similarly for `lexical_cmp`)
-macro_rules! lexical_ord {
-    ($rel: ident, $a:expr, $b:expr, $($rest_a:expr, $rest_b:expr),+) => {
-        if $a != $b { lexical_ord!($rel, $a, $b) }
-        else { lexical_ord!($rel, $($rest_a, $rest_b),+) }
+// If this is a unary tuple, it adds a doc comment.
+// Otherwise, it hides the docs entirely.
+macro_rules! maybe_tuple_doc {
+    ($a:ident @ #[$meta:meta] $item:item) => {
+        #[doc(fake_variadic)]
+        #[doc = "This trait is implemented for tuples up to twelve items long."]
+        #[$meta]
+        $item
     };
-    ($rel: ident, $a:expr, $b:expr) => { ($a) . $rel (& $b) };
+    ($a:ident $($rest_a:ident)+ @ #[$meta:meta] $item:item) => {
+        #[doc(hidden)]
+        #[$meta]
+        $item
+    };
+}
+
+// Constructs an expression that performs a lexical ordering using method `$rel`.
+// The values are interleaved, so the macro invocation for
+// `(a1, a2, a3) < (b1, b2, b3)` would be `lexical_ord!(lt, opt_is_lt, a1, b1,
+// a2, b2, a3, b3)` (and similarly for `lexical_cmp`)
+//
+// `$ne_rel` is only used to determine the result after checking that they're
+// not equal, so `lt` and `le` can both just use `Less`.
+macro_rules! lexical_ord {
+    ($rel: ident, $ne_rel: ident, $a:expr, $b:expr, $($rest_a:expr, $rest_b:expr),+) => {{
+        let c = PartialOrd::partial_cmp(&$a, &$b);
+        if c != Some(Equal) { c == Some($ne_rel) }
+        else { lexical_ord!($rel, $ne_rel, $($rest_a, $rest_b),+) }
+    }};
+    ($rel: ident, $ne_rel: ident, $a:expr, $b:expr) => {
+        // Use the specific method for the last element
+        PartialOrd::$rel(&$a, &$b)
+    };
 }
 
 macro_rules! lexical_partial_cmp {
     ($a:expr, $b:expr, $($rest_a:expr, $rest_b:expr),+) => {
         match ($a).partial_cmp(&$b) {
             Some(Equal) => lexical_partial_cmp!($($rest_a, $rest_b),+),
-            ordering   => ordering
+            ordering => ordering
         }
     };
     ($a:expr, $b:expr) => { ($a).partial_cmp(&$b) };
@@ -96,7 +199,7 @@ macro_rules! lexical_cmp {
     ($a:expr, $b:expr, $($rest_a:expr, $rest_b:expr),+) => {
         match ($a).cmp(&$b) {
             Equal => lexical_cmp!($($rest_a, $rest_b),+),
-            ordering   => ordering
+            ordering => ordering
         }
     };
     ($a:expr, $b:expr) => { ($a).cmp(&$b) };
@@ -107,107 +210,4 @@ macro_rules! last_type {
     ($a:ident, $($rest_a:ident,)+) => { last_type!($($rest_a,)+) };
 }
 
-tuple_impls! {
-    Tuple1 {
-        (0) -> A
-    }
-    Tuple2 {
-        (0) -> A
-        (1) -> B
-    }
-    Tuple3 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-    }
-    Tuple4 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-    }
-    Tuple5 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-    }
-    Tuple6 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-    }
-    Tuple7 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-        (6) -> G
-    }
-    Tuple8 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-        (6) -> G
-        (7) -> H
-    }
-    Tuple9 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-        (6) -> G
-        (7) -> H
-        (8) -> I
-    }
-    Tuple10 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-        (6) -> G
-        (7) -> H
-        (8) -> I
-        (9) -> J
-    }
-    Tuple11 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-        (6) -> G
-        (7) -> H
-        (8) -> I
-        (9) -> J
-        (10) -> K
-    }
-    Tuple12 {
-        (0) -> A
-        (1) -> B
-        (2) -> C
-        (3) -> D
-        (4) -> E
-        (5) -> F
-        (6) -> G
-        (7) -> H
-        (8) -> I
-        (9) -> J
-        (10) -> K
-        (11) -> L
-    }
-}
+tuple_impls!(E D C B A Z Y X W V U T);

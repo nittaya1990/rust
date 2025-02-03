@@ -1,218 +1,118 @@
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::LangItem;
+use rustc_hir::def_id::DefId;
 use rustc_infer::infer::TyCtxtInferExt;
-use rustc_middle::ty::subst::SubstsRef;
-use rustc_middle::ty::{self, Binder, Instance, Ty, TyCtxt, TypeFoldable, TypeVisitor};
-use rustc_span::{sym, DUMMY_SP};
-use rustc_target::spec::abi::Abi;
+use rustc_middle::bug;
+use rustc_middle::query::Providers;
+use rustc_middle::traits::{BuiltinImplSource, CodegenObligationError};
+use rustc_middle::ty::util::AsyncDropGlueMorphology;
+use rustc_middle::ty::{
+    self, GenericArgsRef, Instance, PseudoCanonicalInput, TyCtxt, TypeVisitableExt,
+};
+use rustc_span::sym;
 use rustc_trait_selection::traits;
-use traits::{translate_substs, Reveal};
-
-use rustc_data_structures::sso::SsoHashSet;
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
-use std::ops::ControlFlow;
-
+use rustc_type_ir::ClosureKind;
 use tracing::debug;
+use traits::translate_args;
 
-// FIXME(#86795): `BoundVarsCollector` here should **NOT** be used
-// outside of `resolve_associated_item`. It's just to address #64494,
-// #83765, and #85848 which are creating bound types/regions that lose
-// their `Binder` *unintentionally*.
-// It's ideal to remove `BoundVarsCollector` and just use
-// `ty::Binder::*` methods but we use this stopgap until we figure out
-// the "real" fix.
-struct BoundVarsCollector<'tcx> {
-    binder_index: ty::DebruijnIndex,
-    vars: BTreeMap<u32, ty::BoundVariableKind>,
-    // We may encounter the same variable at different levels of binding, so
-    // this can't just be `Ty`
-    visited: SsoHashSet<(ty::DebruijnIndex, Ty<'tcx>)>,
-}
+use crate::errors::UnexpectedFnPtrAssociatedItem;
 
-impl<'tcx> BoundVarsCollector<'tcx> {
-    fn new() -> Self {
-        BoundVarsCollector {
-            binder_index: ty::INNERMOST,
-            vars: BTreeMap::new(),
-            visited: SsoHashSet::default(),
-        }
-    }
-
-    fn into_vars(self, tcx: TyCtxt<'tcx>) -> &'tcx ty::List<ty::BoundVariableKind> {
-        let max = self.vars.iter().map(|(k, _)| *k).max().unwrap_or(0);
-        for i in 0..max {
-            if let None = self.vars.get(&i) {
-                panic!("Unknown variable: {:?}", i);
-            }
-        }
-
-        tcx.mk_bound_variable_kinds(self.vars.into_iter().map(|(_, v)| v))
-    }
-}
-
-impl<'tcx> TypeVisitor<'tcx> for BoundVarsCollector<'tcx> {
-    type BreakTy = ();
-
-    fn visit_binder<T: TypeFoldable<'tcx>>(
-        &mut self,
-        t: &Binder<'tcx, T>,
-    ) -> ControlFlow<Self::BreakTy> {
-        self.binder_index.shift_in(1);
-        let result = t.super_visit_with(self);
-        self.binder_index.shift_out(1);
-        result
-    }
-
-    fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
-        if t.outer_exclusive_binder() < self.binder_index
-            || !self.visited.insert((self.binder_index, t))
-        {
-            return ControlFlow::CONTINUE;
-        }
-        match *t.kind() {
-            ty::Bound(debruijn, bound_ty) if debruijn == self.binder_index => {
-                match self.vars.entry(bound_ty.var.as_u32()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(ty::BoundVariableKind::Ty(bound_ty.kind));
-                    }
-                    Entry::Occupied(entry) => match entry.get() {
-                        ty::BoundVariableKind::Ty(_) => {}
-                        _ => bug!("Conflicting bound vars"),
-                    },
-                }
-            }
-
-            _ => (),
-        };
-
-        t.super_visit_with(self)
-    }
-
-    fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
-        match *r {
-            ty::ReLateBound(index, br) if index == self.binder_index => {
-                match self.vars.entry(br.var.as_u32()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(ty::BoundVariableKind::Region(br.kind));
-                    }
-                    Entry::Occupied(entry) => match entry.get() {
-                        ty::BoundVariableKind::Region(_) => {}
-                        _ => bug!("Conflicting bound vars"),
-                    },
-                }
-            }
-
-            _ => (),
-        };
-
-        r.super_visit_with(self)
-    }
-}
-
-#[instrument(level = "debug", skip(tcx))]
-fn resolve_instance<'tcx>(
+fn resolve_instance_raw<'tcx>(
     tcx: TyCtxt<'tcx>,
-    key: ty::ParamEnvAnd<'tcx, (DefId, SubstsRef<'tcx>)>,
+    key: ty::PseudoCanonicalInput<'tcx, (DefId, GenericArgsRef<'tcx>)>,
 ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {
-    let (param_env, (did, substs)) = key.into_parts();
-    if let Some(did) = did.as_local() {
-        if let Some(param_did) = tcx.opt_const_param_of(did) {
-            return tcx.resolve_instance_of_const_arg(param_env.and((did, param_did, substs)));
-        }
-    }
+    let PseudoCanonicalInput { typing_env, value: (def_id, args) } = key;
 
-    inner_resolve_instance(tcx, param_env.and((ty::WithOptConstParam::unknown(did), substs)))
-}
-
-fn resolve_instance_of_const_arg<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    key: ty::ParamEnvAnd<'tcx, (LocalDefId, DefId, SubstsRef<'tcx>)>,
-) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {
-    let (param_env, (did, const_param_did, substs)) = key.into_parts();
-    inner_resolve_instance(
-        tcx,
-        param_env.and((
-            ty::WithOptConstParam { did: did.to_def_id(), const_param_did: Some(const_param_did) },
-            substs,
-        )),
-    )
-}
-
-#[instrument(level = "debug", skip(tcx))]
-fn inner_resolve_instance<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    key: ty::ParamEnvAnd<'tcx, (ty::WithOptConstParam<DefId>, SubstsRef<'tcx>)>,
-) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {
-    let (param_env, (def, substs)) = key.into_parts();
-
-    let result = if let Some(trait_def_id) = tcx.trait_of_item(def.did) {
-        debug!(" => associated item, attempting to find impl in param_env {:#?}", param_env);
-        resolve_associated_item(tcx, def.did, param_env, trait_def_id, substs)
+    let result = if let Some(trait_def_id) = tcx.trait_of_item(def_id) {
+        debug!(" => associated item, attempting to find impl in typing_env {:#?}", typing_env);
+        resolve_associated_item(
+            tcx,
+            def_id,
+            typing_env,
+            trait_def_id,
+            tcx.normalize_erasing_regions(typing_env, args),
+        )
     } else {
-        let ty = tcx.type_of(def.def_id_for_type_of());
-        let item_type = tcx.subst_and_normalize_erasing_regions(substs, param_env, ty);
+        let def = if tcx.intrinsic(def_id).is_some() {
+            debug!(" => intrinsic");
+            ty::InstanceKind::Intrinsic(def_id)
+        } else if tcx.is_lang_item(def_id, LangItem::DropInPlace) {
+            let ty = args.type_at(0);
 
-        let def = match *item_type.kind() {
-            ty::FnDef(..)
-                if {
-                    let f = item_type.fn_sig(tcx);
-                    f.abi() == Abi::RustIntrinsic || f.abi() == Abi::PlatformIntrinsic
-                } =>
-            {
-                debug!(" => intrinsic");
-                ty::InstanceDef::Intrinsic(def.did)
-            }
-            ty::FnDef(def_id, substs) if Some(def_id) == tcx.lang_items().drop_in_place_fn() => {
-                let ty = substs.type_at(0);
-
-                if ty.needs_drop(tcx, param_env) {
-                    debug!(" => nontrivial drop glue");
-                    match *ty.kind() {
-                        ty::Closure(..)
-                        | ty::Generator(..)
-                        | ty::Tuple(..)
-                        | ty::Adt(..)
-                        | ty::Dynamic(..)
-                        | ty::Array(..)
-                        | ty::Slice(..) => {}
-                        // Drop shims can only be built from ADTs.
-                        _ => return Ok(None),
-                    }
-
-                    ty::InstanceDef::DropGlue(def_id, Some(ty))
-                } else {
-                    debug!(" => trivial drop glue");
-                    ty::InstanceDef::DropGlue(def_id, None)
+            if ty.needs_drop(tcx, typing_env) {
+                debug!(" => nontrivial drop glue");
+                match *ty.kind() {
+                    ty::Closure(..)
+                    | ty::CoroutineClosure(..)
+                    | ty::Coroutine(..)
+                    | ty::Tuple(..)
+                    | ty::Adt(..)
+                    | ty::Dynamic(..)
+                    | ty::Array(..)
+                    | ty::Slice(..)
+                    | ty::UnsafeBinder(..) => {}
+                    // Drop shims can only be built from ADTs.
+                    _ => return Ok(None),
                 }
+
+                ty::InstanceKind::DropGlue(def_id, Some(ty))
+            } else {
+                debug!(" => trivial drop glue");
+                ty::InstanceKind::DropGlue(def_id, None)
             }
-            _ => {
-                debug!(" => free item");
-                ty::InstanceDef::Item(def)
+        } else if tcx.is_lang_item(def_id, LangItem::AsyncDropInPlace) {
+            let ty = args.type_at(0);
+
+            if ty.async_drop_glue_morphology(tcx) != AsyncDropGlueMorphology::Noop {
+                match *ty.kind() {
+                    ty::Closure(..)
+                    | ty::CoroutineClosure(..)
+                    | ty::Coroutine(..)
+                    | ty::Tuple(..)
+                    | ty::Adt(..)
+                    | ty::Dynamic(..)
+                    | ty::Array(..)
+                    | ty::Slice(..) => {}
+                    // Async destructor ctor shims can only be built from ADTs.
+                    _ => return Ok(None),
+                }
+                debug!(" => nontrivial async drop glue ctor");
+                ty::InstanceKind::AsyncDropGlueCtorShim(def_id, Some(ty))
+            } else {
+                debug!(" => trivial async drop glue ctor");
+                ty::InstanceKind::AsyncDropGlueCtorShim(def_id, None)
             }
+        } else {
+            debug!(" => free item");
+            ty::InstanceKind::Item(def_id)
         };
-        Ok(Some(Instance { def, substs }))
+
+        Ok(Some(Instance { def, args }))
     };
-    debug!("inner_resolve_instance: result={:?}", result);
+    debug!("resolve_instance: result={:?}", result);
     result
 }
 
 fn resolve_associated_item<'tcx>(
     tcx: TyCtxt<'tcx>,
     trait_item_id: DefId,
-    param_env: ty::ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     trait_id: DefId,
-    rcvr_substs: SubstsRef<'tcx>,
+    rcvr_args: GenericArgsRef<'tcx>,
 ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {
-    debug!(?trait_item_id, ?param_env, ?trait_id, ?rcvr_substs, "resolve_associated_item");
+    debug!(?trait_item_id, ?typing_env, ?trait_id, ?rcvr_args, "resolve_associated_item");
 
-    let trait_ref = ty::TraitRef::from_method(tcx, trait_id, rcvr_substs);
+    let trait_ref = ty::TraitRef::from_method(tcx, trait_id, rcvr_args);
 
-    // See FIXME on `BoundVarsCollector`.
-    let mut bound_vars_collector = BoundVarsCollector::new();
-    trait_ref.visit_with(&mut bound_vars_collector);
-    let trait_binder = ty::Binder::bind_with_vars(trait_ref, bound_vars_collector.into_vars(tcx));
-    let vtbl = tcx.codegen_fulfill_obligation((param_env, trait_binder))?;
+    let input = typing_env.as_query_input(trait_ref);
+    let vtbl = match tcx.codegen_select_candidate(input) {
+        Ok(vtbl) => vtbl,
+        Err(
+            CodegenObligationError::Ambiguity
+            | CodegenObligationError::Unimplemented
+            | CodegenObligationError::FulfillmentError,
+        ) => return Ok(None),
+    };
 
     // Now that we know which impl is being used, we can dispatch to
     // the actual function:
@@ -220,10 +120,10 @@ fn resolve_associated_item<'tcx>(
         traits::ImplSource::UserDefined(impl_data) => {
             debug!(
                 "resolving ImplSource::UserDefined: {:?}, {:?}, {:?}, {:?}",
-                param_env, trait_item_id, rcvr_substs, impl_data
+                typing_env, trait_item_id, rcvr_args, impl_data
             );
-            assert!(!rcvr_substs.needs_infer());
-            assert!(!trait_ref.needs_infer());
+            assert!(!rcvr_args.has_infer());
+            assert!(!trait_ref.has_infer());
 
             let trait_def_id = tcx.trait_id_of_impl(impl_data.impl_def_id).unwrap();
             let trait_def = tcx.trait_def(trait_def_id);
@@ -234,21 +134,10 @@ fn resolve_associated_item<'tcx>(
                     bug!("{:?} not found in {:?}", trait_item_id, impl_data.impl_def_id);
                 });
 
-            let substs = tcx.infer_ctxt().enter(|infcx| {
-                let param_env = param_env.with_reveal_all_normalized(tcx);
-                let substs = rcvr_substs.rebase_onto(tcx, trait_def_id, impl_data.substs);
-                let substs = translate_substs(
-                    &infcx,
-                    param_env,
-                    impl_data.impl_def_id,
-                    substs,
-                    leaf_def.defining_node,
-                );
-                infcx.tcx.erase_regions(substs)
-            });
-
-            // Since this is a trait item, we need to see if the item is either a trait default item
-            // or a specialization because we can't resolve those unless we can `Reveal::All`.
+            // Since this is a trait item, we need to see if the item is either a trait
+            // default item or a specialization because we can't resolve those until we're
+            // in `TypingMode::PostAnalysis`.
+            //
             // NOTE: This should be kept in sync with the similar code in
             // `rustc_trait_selection::traits::project::assemble_candidates_from_impls()`.
             let eligible = if leaf_def.is_final() {
@@ -259,130 +148,243 @@ fn resolve_associated_item<'tcx>(
                 // and the obligation is monomorphic, otherwise passes such as
                 // transmute checking and polymorphic MIR optimizations could
                 // get a result which isn't correct for all monomorphizations.
-                if param_env.reveal() == Reveal::All {
-                    !trait_ref.still_further_specializable()
-                } else {
-                    false
+                match typing_env.typing_mode {
+                    ty::TypingMode::Coherence
+                    | ty::TypingMode::Analysis { .. }
+                    | ty::TypingMode::PostBorrowckAnalysis { .. } => false,
+                    ty::TypingMode::PostAnalysis => !trait_ref.still_further_specializable(),
                 }
             };
-
             if !eligible {
                 return Ok(None);
             }
 
-            let substs = tcx.erase_regions(substs);
+            let typing_env = typing_env.with_post_analysis_normalized(tcx);
+            let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
+            let args = rcvr_args.rebase_onto(tcx, trait_def_id, impl_data.args);
+            let args = translate_args(
+                &infcx,
+                param_env,
+                impl_data.impl_def_id,
+                args,
+                leaf_def.defining_node,
+            );
+            let args = infcx.tcx.erase_regions(args);
 
-            // Check if we just resolved an associated `const` declaration from
-            // a `trait` to an associated `const` definition in an `impl`, where
-            // the definition in the `impl` has the wrong type (for which an
-            // error has already been/will be emitted elsewhere).
+            // HACK: We may have overlapping `dyn Trait` built-in impls and
+            // user-provided blanket impls. Detect that case here, and return
+            // ambiguity.
             //
-            // NB: this may be expensive, we try to skip it in all the cases where
-            // we know the error would've been caught (e.g. in an upstream crate).
-            //
-            // A better approach might be to just introduce a query (returning
-            // `Result<(), ErrorGuaranteed>`) for the check that `rustc_typeck`
-            // performs (i.e. that the definition's type in the `impl` matches
-            // the declaration in the `trait`), so that we can cheaply check
-            // here if it failed, instead of approximating it.
-            if leaf_def.item.kind == ty::AssocKind::Const
-                && trait_item_id != leaf_def.item.def_id
-                && leaf_def.item.def_id.is_local()
-            {
-                let normalized_type_of = |def_id, substs| {
-                    tcx.subst_and_normalize_erasing_regions(substs, param_env, tcx.type_of(def_id))
-                };
-
-                let original_ty = normalized_type_of(trait_item_id, rcvr_substs);
-                let resolved_ty = normalized_type_of(leaf_def.item.def_id, substs);
-
-                if original_ty != resolved_ty {
-                    let msg = format!(
-                        "Instance::resolve: inconsistent associated `const` type: \
-                         was `{}: {}` but resolved to `{}: {}`",
-                        tcx.def_path_str_with_substs(trait_item_id, rcvr_substs),
-                        original_ty,
-                        tcx.def_path_str_with_substs(leaf_def.item.def_id, substs),
-                        resolved_ty,
-                    );
-                    let span = tcx.def_span(leaf_def.item.def_id);
-                    tcx.sess.delay_span_bug(span, &msg);
-
-                    return Err(ErrorGuaranteed);
+            // This should not affect totally monomorphized contexts, only
+            // resolve calls that happen polymorphically, such as the mir-inliner
+            // and const-prop (and also some lints).
+            let self_ty = rcvr_args.type_at(0);
+            if !self_ty.is_known_rigid() {
+                let predicates = tcx
+                    .predicates_of(impl_data.impl_def_id)
+                    .instantiate(tcx, impl_data.args)
+                    .predicates;
+                let sized_def_id = tcx.lang_items().sized_trait();
+                // If we find a `Self: Sized` bound on the item, then we know
+                // that `dyn Trait` can certainly never apply here.
+                if !predicates.into_iter().filter_map(ty::Clause::as_trait_clause).any(|clause| {
+                    Some(clause.def_id()) == sized_def_id
+                        && clause.skip_binder().self_ty() == self_ty
+                }) {
+                    return Ok(None);
                 }
             }
 
-            Some(ty::Instance::new(leaf_def.item.def_id, substs))
+            // Any final impl is required to define all associated items.
+            if !leaf_def.item.defaultness(tcx).has_value() {
+                let guar = tcx.dcx().span_delayed_bug(
+                    tcx.def_span(leaf_def.item.def_id),
+                    "missing value for assoc item in impl",
+                );
+                return Err(guar);
+            }
+
+            // Make sure that we're projecting to an item that has compatible args.
+            // This may happen if we are resolving an instance before codegen, such
+            // as during inlining. This check is also done in projection.
+            if !tcx.check_args_compatible(leaf_def.item.def_id, args) {
+                let guar = tcx.dcx().span_delayed_bug(
+                    tcx.def_span(leaf_def.item.def_id),
+                    "missing value for assoc item in impl",
+                );
+                return Err(guar);
+            }
+
+            let args = tcx.erase_regions(args);
+
+            // We check that the impl item is compatible with the trait item
+            // because otherwise we may ICE in const eval due to type mismatches,
+            // signature incompatibilities, etc.
+            // NOTE: We could also only enforce this in `PostAnalysis`, which
+            // is what CTFE and MIR inlining would care about anyways.
+            if trait_item_id != leaf_def.item.def_id
+                && let Some(leaf_def_item) = leaf_def.item.def_id.as_local()
+            {
+                tcx.ensure_ok().compare_impl_item(leaf_def_item)?;
+            }
+
+            Some(ty::Instance::new(leaf_def.item.def_id, args))
         }
-        traits::ImplSource::Generator(generator_data) => Some(Instance {
-            def: ty::InstanceDef::Item(ty::WithOptConstParam::unknown(
-                generator_data.generator_def_id,
-            )),
-            substs: generator_data.substs,
-        }),
-        traits::ImplSource::Closure(closure_data) => {
-            let trait_closure_kind = tcx.fn_trait_kind_from_lang_item(trait_id).unwrap();
-            Some(Instance::resolve_closure(
-                tcx,
-                closure_data.closure_def_id,
-                closure_data.substs,
-                trait_closure_kind,
-            ))
+        traits::ImplSource::Builtin(BuiltinImplSource::Object(_), _) => {
+            let trait_ref = ty::TraitRef::from_method(tcx, trait_id, rcvr_args);
+            if trait_ref.has_non_region_infer() || trait_ref.has_non_region_param() {
+                // We only resolve totally substituted vtable entries.
+                None
+            } else {
+                let vtable_base = tcx.first_method_vtable_slot(trait_ref);
+                let offset = tcx
+                    .own_existential_vtable_entries(trait_id)
+                    .iter()
+                    .copied()
+                    .position(|def_id| def_id == trait_item_id);
+                offset.map(|offset| Instance {
+                    def: ty::InstanceKind::Virtual(trait_item_id, vtable_base + offset),
+                    args: rcvr_args,
+                })
+            }
         }
-        traits::ImplSource::FnPointer(ref data) => match data.fn_ty.kind() {
-            ty::FnDef(..) | ty::FnPtr(..) => Some(Instance {
-                def: ty::InstanceDef::FnPtrShim(trait_item_id, data.fn_ty),
-                substs: rcvr_substs,
-            }),
-            _ => None,
-        },
-        traits::ImplSource::Object(ref data) => {
-            let index = traits::get_vtable_index_of_object_method(tcx, data, trait_item_id);
-            Some(Instance {
-                def: ty::InstanceDef::Virtual(trait_item_id, index),
-                substs: rcvr_substs,
-            })
-        }
-        traits::ImplSource::Builtin(..) => {
-            if Some(trait_ref.def_id) == tcx.lang_items().clone_trait() {
+        traits::ImplSource::Builtin(BuiltinImplSource::Misc | BuiltinImplSource::Trivial, _) => {
+            if tcx.is_lang_item(trait_ref.def_id, LangItem::Clone) {
                 // FIXME(eddyb) use lang items for methods instead of names.
                 let name = tcx.item_name(trait_item_id);
                 if name == sym::clone {
                     let self_ty = trait_ref.self_ty();
-
-                    let is_copy = self_ty.is_copy_modulo_regions(tcx.at(DUMMY_SP), param_env);
                     match self_ty.kind() {
-                        _ if is_copy => (),
-                        ty::Closure(..) | ty::Tuple(..) => {}
+                        ty::FnDef(..) | ty::FnPtr(..) => (),
+                        ty::Coroutine(..)
+                        | ty::CoroutineWitness(..)
+                        | ty::Closure(..)
+                        | ty::CoroutineClosure(..)
+                        | ty::Tuple(..) => {}
                         _ => return Ok(None),
                     };
 
                     Some(Instance {
-                        def: ty::InstanceDef::CloneShim(trait_item_id, self_ty),
-                        substs: rcvr_substs,
+                        def: ty::InstanceKind::CloneShim(trait_item_id, self_ty),
+                        args: rcvr_args,
                     })
                 } else {
                     assert_eq!(name, sym::clone_from);
 
                     // Use the default `fn clone_from` from `trait Clone`.
-                    let substs = tcx.erase_regions(rcvr_substs);
-                    Some(ty::Instance::new(trait_item_id, substs))
+                    let args = tcx.erase_regions(rcvr_args);
+                    Some(ty::Instance::new(trait_item_id, args))
                 }
+            } else if tcx.is_lang_item(trait_ref.def_id, LangItem::FnPtrTrait) {
+                if tcx.is_lang_item(trait_item_id, LangItem::FnPtrAddr) {
+                    let self_ty = trait_ref.self_ty();
+                    if !matches!(self_ty.kind(), ty::FnPtr(..)) {
+                        return Ok(None);
+                    }
+                    Some(Instance {
+                        def: ty::InstanceKind::FnPtrAddrShim(trait_item_id, self_ty),
+                        args: rcvr_args,
+                    })
+                } else {
+                    tcx.dcx().emit_fatal(UnexpectedFnPtrAssociatedItem {
+                        span: tcx.def_span(trait_item_id),
+                    })
+                }
+            } else if let Some(target_kind) = tcx.fn_trait_kind_from_def_id(trait_ref.def_id) {
+                // FIXME: This doesn't check for malformed libcore that defines, e.g.,
+                // `trait Fn { fn call_once(&self) { .. } }`. This is mostly for extension
+                // methods.
+                if cfg!(debug_assertions)
+                    && ![sym::call, sym::call_mut, sym::call_once]
+                        .contains(&tcx.item_name(trait_item_id))
+                {
+                    // For compiler developers who'd like to add new items to `Fn`/`FnMut`/`FnOnce`,
+                    // you either need to generate a shim body, or perhaps return
+                    // `InstanceKind::Item` pointing to a trait default method body if
+                    // it is given a default implementation by the trait.
+                    bug!(
+                        "no definition for `{trait_ref}::{}` for built-in callable type",
+                        tcx.item_name(trait_item_id)
+                    )
+                }
+                match *rcvr_args.type_at(0).kind() {
+                    ty::Closure(closure_def_id, args) => {
+                        Some(Instance::resolve_closure(tcx, closure_def_id, args, target_kind))
+                    }
+                    ty::FnDef(..) | ty::FnPtr(..) => Some(Instance {
+                        def: ty::InstanceKind::FnPtrShim(trait_item_id, rcvr_args.type_at(0)),
+                        args: rcvr_args,
+                    }),
+                    ty::CoroutineClosure(coroutine_closure_def_id, args) => {
+                        // When a coroutine-closure implements the `Fn` traits, then it
+                        // always dispatches to the `FnOnce` implementation. This is to
+                        // ensure that the `closure_kind` of the resulting closure is in
+                        // sync with the built-in trait implementations (since all of the
+                        // implementations return `FnOnce::Output`).
+                        if ty::ClosureKind::FnOnce == args.as_coroutine_closure().kind() {
+                            Some(Instance::new(coroutine_closure_def_id, args))
+                        } else {
+                            Some(Instance {
+                                def: ty::InstanceKind::ConstructCoroutineInClosureShim {
+                                    coroutine_closure_def_id,
+                                    receiver_by_ref: target_kind != ty::ClosureKind::FnOnce,
+                                },
+                                args,
+                            })
+                        }
+                    }
+                    _ => bug!(
+                        "no built-in definition for `{trait_ref}::{}` for non-fn type",
+                        tcx.item_name(trait_item_id)
+                    ),
+                }
+            } else if let Some(target_kind) = tcx.async_fn_trait_kind_from_def_id(trait_ref.def_id)
+            {
+                match *rcvr_args.type_at(0).kind() {
+                    ty::CoroutineClosure(coroutine_closure_def_id, args) => {
+                        if target_kind == ClosureKind::FnOnce
+                            && args.as_coroutine_closure().kind() != ClosureKind::FnOnce
+                        {
+                            // If we're computing `AsyncFnOnce` for a by-ref closure then
+                            // construct a new body that has the right return types.
+                            Some(Instance {
+                                def: ty::InstanceKind::ConstructCoroutineInClosureShim {
+                                    coroutine_closure_def_id,
+                                    receiver_by_ref: false,
+                                },
+                                args,
+                            })
+                        } else {
+                            Some(Instance::new(coroutine_closure_def_id, args))
+                        }
+                    }
+                    ty::Closure(closure_def_id, args) => {
+                        Some(Instance::resolve_closure(tcx, closure_def_id, args, target_kind))
+                    }
+                    ty::FnDef(..) | ty::FnPtr(..) => Some(Instance {
+                        def: ty::InstanceKind::FnPtrShim(trait_item_id, rcvr_args.type_at(0)),
+                        args: rcvr_args,
+                    }),
+                    _ => bug!(
+                        "no built-in definition for `{trait_ref}::{}` for non-lending-closure type",
+                        tcx.item_name(trait_item_id)
+                    ),
+                }
+            } else if tcx.is_lang_item(trait_ref.def_id, LangItem::TransmuteTrait) {
+                let name = tcx.item_name(trait_item_id);
+                assert_eq!(name, sym::transmute);
+                let args = tcx.erase_regions(rcvr_args);
+                Some(ty::Instance::new(trait_item_id, args))
             } else {
-                None
+                Instance::try_resolve_item_for_coroutine(tcx, trait_item_id, trait_id, rcvr_args)
             }
         }
-        traits::ImplSource::AutoImpl(..)
-        | traits::ImplSource::Param(..)
-        | traits::ImplSource::TraitAlias(..)
-        | traits::ImplSource::DiscriminantKind(..)
-        | traits::ImplSource::Pointee(..)
-        | traits::ImplSource::TraitUpcasting(_)
-        | traits::ImplSource::ConstDrop(_) => None,
+        traits::ImplSource::Param(..)
+        | traits::ImplSource::Builtin(BuiltinImplSource::TraitUpcasting { .. }, _)
+        | traits::ImplSource::Builtin(BuiltinImplSource::TupleUnsizing, _) => None,
     })
 }
 
-pub fn provide(providers: &mut ty::query::Providers) {
-    *providers =
-        ty::query::Providers { resolve_instance, resolve_instance_of_const_arg, ..*providers };
+pub(crate) fn provide(providers: &mut Providers) {
+    *providers = Providers { resolve_instance_raw, ..*providers };
 }

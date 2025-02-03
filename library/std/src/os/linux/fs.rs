@@ -5,10 +5,9 @@
 #![stable(feature = "metadata_ext", since = "1.1.0")]
 
 use crate::fs::Metadata;
-use crate::sys_common::AsInner;
-
 #[allow(deprecated)]
 use crate::os::linux::raw;
+use crate::sys_common::AsInner;
 
 /// OS-specific extensions to [`fs::Metadata`].
 ///
@@ -38,7 +37,7 @@ pub trait MetadataExt {
     /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
-    #[rustc_deprecated(since = "1.8.0", reason = "other methods of this trait are now preferred")]
+    #[deprecated(since = "1.8.0", note = "other methods of this trait are now preferred")]
     #[allow(deprecated)]
     fn as_raw_stat(&self) -> &raw::stat;
 
@@ -329,7 +328,14 @@ pub trait MetadataExt {
 impl MetadataExt for Metadata {
     #[allow(deprecated)]
     fn as_raw_stat(&self) -> &raw::stat {
-        unsafe { &*(self.as_inner().as_inner() as *const libc::stat64 as *const raw::stat) }
+        #[cfg(target_env = "musl")]
+        unsafe {
+            &*(self.as_inner().as_inner() as *const libc::stat as *const raw::stat)
+        }
+        #[cfg(not(target_env = "musl"))]
+        unsafe {
+            &*(self.as_inner().as_inner() as *const libc::stat64 as *const raw::stat)
+        }
     }
     fn st_dev(&self) -> u64 {
         self.as_inner().as_inner().st_dev as u64
@@ -356,19 +362,34 @@ impl MetadataExt for Metadata {
         self.as_inner().as_inner().st_size as u64
     }
     fn st_atime(&self) -> i64 {
-        self.as_inner().as_inner().st_atime as i64
+        let file_attr = self.as_inner();
+        #[cfg(all(target_env = "gnu", target_pointer_width = "32"))]
+        if let Some(atime) = file_attr.stx_atime() {
+            return atime.tv_sec;
+        }
+        file_attr.as_inner().st_atime as i64
     }
     fn st_atime_nsec(&self) -> i64 {
         self.as_inner().as_inner().st_atime_nsec as i64
     }
     fn st_mtime(&self) -> i64 {
-        self.as_inner().as_inner().st_mtime as i64
+        let file_attr = self.as_inner();
+        #[cfg(all(target_env = "gnu", target_pointer_width = "32"))]
+        if let Some(mtime) = file_attr.stx_mtime() {
+            return mtime.tv_sec;
+        }
+        file_attr.as_inner().st_mtime as i64
     }
     fn st_mtime_nsec(&self) -> i64 {
         self.as_inner().as_inner().st_mtime_nsec as i64
     }
     fn st_ctime(&self) -> i64 {
-        self.as_inner().as_inner().st_ctime as i64
+        let file_attr = self.as_inner();
+        #[cfg(all(target_env = "gnu", target_pointer_width = "32"))]
+        if let Some(ctime) = file_attr.stx_ctime() {
+            return ctime.tv_sec;
+        }
+        file_attr.as_inner().st_ctime as i64
     }
     fn st_ctime_nsec(&self) -> i64 {
         self.as_inner().as_inner().st_ctime_nsec as i64

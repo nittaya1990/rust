@@ -1,170 +1,153 @@
-use clippy_utils::diagnostics::span_lint_and_note;
-use clippy_utils::ty::is_copy;
-use if_chain::if_chain;
-use rustc_hir::{Expr, ExprKind};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_must_use_func_call;
+use clippy_utils::ty::{is_copy, is_must_use_ty, is_type_lang_item};
+use rustc_hir::{Arm, Expr, ExprKind, LangItem, Node};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
+use std::borrow::Cow;
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for calls to `std::mem::drop` with a reference
-    /// instead of an owned value.
+    /// Checks for calls to `std::mem::drop` with a value that does not implement `Drop`.
     ///
     /// ### Why is this bad?
-    /// Calling `drop` on a reference will only drop the
-    /// reference itself, which is a no-op. It will not call the `drop` method (from
-    /// the `Drop` trait implementation) on the underlying referenced value, which
-    /// is likely what was intended.
+    /// Calling `std::mem::drop` is no different than dropping such a type. A different value may
+    /// have been intended.
     ///
     /// ### Example
-    /// ```ignore
-    /// let mut lock_guard = mutex.lock();
-    /// std::mem::drop(&lock_guard) // Should have been drop(lock_guard), mutex
-    /// // still locked
-    /// operation_that_requires_mutex_to_be_unlocked();
+    /// ```no_run
+    /// struct Foo;
+    /// let x = Foo;
+    /// std::mem::drop(x);
     /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub DROP_REF,
-    correctness,
-    "calls to `std::mem::drop` with a reference instead of an owned value"
+    #[clippy::version = "1.62.0"]
+    pub DROP_NON_DROP,
+    suspicious,
+    "call to `std::mem::drop` with a value which does not implement `Drop`"
 }
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for calls to `std::mem::forget` with a reference
-    /// instead of an owned value.
+    /// Checks for calls to `std::mem::forget` with a value that does not implement `Drop`.
     ///
     /// ### Why is this bad?
-    /// Calling `forget` on a reference will only forget the
-    /// reference itself, which is a no-op. It will not forget the underlying
-    /// referenced
-    /// value, which is likely what was intended.
+    /// Calling `std::mem::forget` is no different than dropping such a type. A different value may
+    /// have been intended.
     ///
     /// ### Example
-    /// ```rust
-    /// let x = Box::new(1);
-    /// std::mem::forget(&x) // Should have been forget(x), x will still be dropped
+    /// ```no_run
+    /// struct Foo;
+    /// let x = Foo;
+    /// std::mem::forget(x);
     /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub FORGET_REF,
-    correctness,
-    "calls to `std::mem::forget` with a reference instead of an owned value"
+    #[clippy::version = "1.62.0"]
+    pub FORGET_NON_DROP,
+    suspicious,
+    "call to `std::mem::forget` with a value which does not implement `Drop`"
 }
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for calls to `std::mem::drop` with a value
-    /// that derives the Copy trait
+    /// Checks for usage of `std::mem::forget(t)` where `t` is
+    /// `Drop` or has a field that implements `Drop`.
     ///
-    /// ### Why is this bad?
-    /// Calling `std::mem::drop` [does nothing for types that
-    /// implement Copy](https://doc.rust-lang.org/std/mem/fn.drop.html), since the
-    /// value will be copied and moved into the function on invocation.
-    ///
-    /// ### Example
-    /// ```rust
-    /// let x: i32 = 42; // i32 implements Copy
-    /// std::mem::drop(x) // A copy of x is passed to the function, leaving the
-    ///                   // original unaffected
-    /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub DROP_COPY,
-    correctness,
-    "calls to `std::mem::drop` with a value that implements Copy"
-}
-
-declare_clippy_lint! {
-    /// ### What it does
-    /// Checks for calls to `std::mem::forget` with a value that
-    /// derives the Copy trait
-    ///
-    /// ### Why is this bad?
-    /// Calling `std::mem::forget` [does nothing for types that
-    /// implement Copy](https://doc.rust-lang.org/std/mem/fn.drop.html) since the
-    /// value will be copied and moved into the function on invocation.
-    ///
-    /// An alternative, but also valid, explanation is that Copy types do not
-    /// implement
-    /// the Drop trait, which means they have no destructors. Without a destructor,
-    /// there
-    /// is nothing for `std::mem::forget` to ignore.
+    /// ### Why restrict this?
+    /// `std::mem::forget(t)` prevents `t` from running its destructor, possibly causing leaks.
+    /// It is not possible to detect all means of creating leaks, but it may be desirable to
+    /// prohibit the simple ones.
     ///
     /// ### Example
-    /// ```rust
-    /// let x: i32 = 42; // i32 implements Copy
-    /// std::mem::forget(x) // A copy of x is passed to the function, leaving the
-    ///                     // original unaffected
+    /// ```no_run
+    /// # use std::mem;
+    /// # use std::rc::Rc;
+    /// mem::forget(Rc::new(55))
     /// ```
     #[clippy::version = "pre 1.29.0"]
-    pub FORGET_COPY,
-    correctness,
-    "calls to `std::mem::forget` with a value that implements Copy"
+    pub MEM_FORGET,
+    restriction,
+    "`mem::forget` usage on `Drop` types, likely to cause memory leaks"
 }
 
-const DROP_REF_SUMMARY: &str = "calls to `std::mem::drop` with a reference instead of an owned value. \
-                                Dropping a reference does nothing";
-const FORGET_REF_SUMMARY: &str = "calls to `std::mem::forget` with a reference instead of an owned value. \
-                                  Forgetting a reference does nothing";
-const DROP_COPY_SUMMARY: &str = "calls to `std::mem::drop` with a value that implements `Copy`. \
-                                 Dropping a copy leaves the original intact";
-const FORGET_COPY_SUMMARY: &str = "calls to `std::mem::forget` with a value that implements `Copy`. \
-                                   Forgetting a copy leaves the original intact";
+const DROP_NON_DROP_SUMMARY: &str = "call to `std::mem::drop` with a value that does not implement `Drop`. \
+                                 Dropping such a type only extends its contained lifetimes";
+const FORGET_NON_DROP_SUMMARY: &str = "call to `std::mem::forget` with a value that does not implement `Drop`. \
+                                   Forgetting such a type is the same as dropping it";
 
-declare_lint_pass!(DropForgetRef => [DROP_REF, FORGET_REF, DROP_COPY, FORGET_COPY]);
+declare_lint_pass!(DropForgetRef => [
+    DROP_NON_DROP,
+    FORGET_NON_DROP,
+    MEM_FORGET,
+]);
 
 impl<'tcx> LateLintPass<'tcx> for DropForgetRef {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if_chain! {
-            if let ExprKind::Call(path, args) = expr.kind;
-            if let ExprKind::Path(ref qpath) = path.kind;
-            if args.len() == 1;
-            if let Some(def_id) = cx.qpath_res(qpath, path.hir_id).opt_def_id();
-            then {
-                let lint;
-                let msg;
-                let arg = &args[0];
-                let arg_ty = cx.typeck_results().expr_ty(arg);
-
-                if let ty::Ref(..) = arg_ty.kind() {
-                    match cx.tcx.get_diagnostic_name(def_id) {
-                        Some(sym::mem_drop) => {
-                            lint = DROP_REF;
-                            msg = DROP_REF_SUMMARY.to_string();
-                        },
-                        Some(sym::mem_forget) => {
-                            lint = FORGET_REF;
-                            msg = FORGET_REF_SUMMARY.to_string();
-                        },
-                        _ => return,
+        if let ExprKind::Call(path, [arg]) = expr.kind
+            && let ExprKind::Path(ref qpath) = path.kind
+            && let Some(def_id) = cx.qpath_res(qpath, path.hir_id).opt_def_id()
+            && let Some(fn_name) = cx.tcx.get_diagnostic_name(def_id)
+        {
+            let arg_ty = cx.typeck_results().expr_ty(arg);
+            let is_copy = is_copy(cx, arg_ty);
+            let drop_is_single_call_in_arm = is_single_call_in_arm(cx, arg, expr);
+            let (lint, msg, note_span) = match fn_name {
+                // early return for uplifted lints: dropping_references, dropping_copy_types, forgetting_references,
+                // forgetting_copy_types
+                sym::mem_drop if arg_ty.is_ref() && !drop_is_single_call_in_arm => return,
+                sym::mem_forget if arg_ty.is_ref() => return,
+                sym::mem_drop if is_copy && !drop_is_single_call_in_arm => return,
+                sym::mem_forget if is_copy => return,
+                sym::mem_drop if is_type_lang_item(cx, arg_ty, LangItem::ManuallyDrop) => return,
+                sym::mem_drop
+                    if !(arg_ty.needs_drop(cx.tcx, cx.typing_env())
+                        || is_must_use_func_call(cx, arg)
+                        || is_must_use_ty(cx, arg_ty)
+                        || drop_is_single_call_in_arm) =>
+                {
+                    (DROP_NON_DROP, DROP_NON_DROP_SUMMARY.into(), Some(arg.span))
+                },
+                sym::mem_forget => {
+                    if arg_ty.needs_drop(cx.tcx, cx.typing_env()) {
+                        (
+                            MEM_FORGET,
+                            Cow::Owned(format!(
+                                "usage of `mem::forget` on {}",
+                                if arg_ty.ty_adt_def().is_some_and(|def| def.has_dtor(cx.tcx)) {
+                                    "`Drop` type"
+                                } else {
+                                    "type with `Drop` fields"
+                                }
+                            )),
+                            None,
+                        )
+                    } else {
+                        (FORGET_NON_DROP, FORGET_NON_DROP_SUMMARY.into(), Some(arg.span))
                     }
-                    span_lint_and_note(cx,
-                                       lint,
-                                       expr.span,
-                                       &msg,
-                                       Some(arg.span),
-                                       &format!("argument has type `{}`", arg_ty));
-                } else if is_copy(cx, arg_ty) {
-                    match cx.tcx.get_diagnostic_name(def_id) {
-                        Some(sym::mem_drop) => {
-                            lint = DROP_COPY;
-                            msg = DROP_COPY_SUMMARY.to_string();
-                        },
-                        Some(sym::mem_forget) => {
-                            lint = FORGET_COPY;
-                            msg = FORGET_COPY_SUMMARY.to_string();
-                        },
-                        _ => return,
-                    }
-                    span_lint_and_note(cx,
-                                       lint,
-                                       expr.span,
-                                       &msg,
-                                       Some(arg.span),
-                                       &format!("argument has type {}", arg_ty));
+                },
+                _ => return,
+            };
+            span_lint_and_then(cx, lint, expr.span, msg, |diag| {
+                let note = format!("argument has type `{arg_ty}`");
+                if let Some(span) = note_span {
+                    diag.span_note(span, note);
+                } else {
+                    diag.note(note);
                 }
-            }
+            });
         }
     }
+}
+
+// dropping returned value of a function like in the following snippet is considered idiomatic, see
+// #9482 for examples match <var> {
+//     <pat> => drop(fn_with_side_effect_and_returning_some_value()),
+//     ..
+// }
+fn is_single_call_in_arm<'tcx>(cx: &LateContext<'tcx>, arg: &'tcx Expr<'_>, drop_expr: &'tcx Expr<'_>) -> bool {
+    if matches!(arg.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+        if let Node::Arm(Arm { body, .. }) = cx.tcx.parent_hir_node(drop_expr.hir_id) {
+            return body.hir_id == drop_expr.hir_id;
+        }
+    }
+    false
 }

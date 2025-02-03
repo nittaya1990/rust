@@ -1,5 +1,6 @@
-use crate::pp::Printer;
 use std::borrow::Cow;
+
+use crate::pp::Printer;
 
 impl Printer {
     pub fn word_space<W: Into<Cow<'static, str>>>(&mut self, w: W) {
@@ -36,8 +37,8 @@ impl Printer {
         self.nbsp()
     }
 
-    // Synthesizes a comment that was not textually present in the original
-    // source file.
+    /// Synthesizes a comment that was not textually present in the original
+    /// source file.
     pub fn synth_comment(&mut self, text: impl Into<Cow<'static, str>>) {
         self.word("/*");
         self.space();

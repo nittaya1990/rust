@@ -1,209 +1,91 @@
 // Not in interpret to make sure we do not use private implementation details
 
-use std::convert::TryFrom;
+use rustc_abi::VariantIdx;
+use rustc_middle::query::{Key, TyCtxtAt};
+use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::{bug, mir};
+use tracing::instrument;
 
-use rustc_hir::Mutability;
-use rustc_middle::ty::{self, TyCtxt};
-use rustc_middle::{
-    mir::{self, interpret::ConstAlloc},
-    ty::ScalarInt,
-};
-use rustc_span::{source_map::DUMMY_SP, symbol::Symbol};
+use crate::interpret::InterpCx;
 
-use crate::interpret::{
-    intern_const_alloc_recursive, ConstValue, InternKind, InterpCx, InterpResult, MPlaceTy,
-    MemPlaceMeta, Scalar,
-};
-
+mod dummy_machine;
 mod error;
 mod eval_queries;
 mod fn_queries;
 mod machine;
+mod valtrees;
 
-pub use error::*;
-pub use eval_queries::*;
-pub use fn_queries::*;
-pub use machine::*;
+pub use self::dummy_machine::*;
+pub use self::error::*;
+pub use self::eval_queries::*;
+pub use self::fn_queries::*;
+pub use self::machine::*;
+pub(crate) use self::valtrees::{eval_to_valtree, valtree_to_const_value};
 
-pub(crate) fn const_caller_location(
-    tcx: TyCtxt<'_>,
-    (file, line, col): (Symbol, u32, u32),
-) -> ConstValue<'_> {
-    trace!("const_caller_location: {}:{}:{}", file, line, col);
-    let mut ecx = mk_eval_cx(tcx, DUMMY_SP, ty::ParamEnv::reveal_all(), false);
+// We forbid type-level constants that contain more than `VALTREE_MAX_NODES` nodes.
+const VALTREE_MAX_NODES: usize = 100000;
 
-    let loc_place = ecx.alloc_caller_location(file, line, col);
-    if intern_const_alloc_recursive(&mut ecx, InternKind::Constant, &loc_place).is_err() {
-        bug!("intern_const_alloc_recursive should not error in this case")
-    }
-    ConstValue::Scalar(Scalar::from_pointer(loc_place.ptr.into_pointer_or_addr().unwrap(), &tcx))
+pub(crate) enum ValTreeCreationError<'tcx> {
+    NodesOverflow,
+    /// Values of this type, or this particular value, are not supported as valtrees.
+    NonSupportedType(Ty<'tcx>),
 }
+pub(crate) type ValTreeCreationResult<'tcx> = Result<ty::ValTree<'tcx>, ValTreeCreationError<'tcx>>;
 
-/// Convert an evaluated constant to a type level constant
-pub(crate) fn const_to_valtree<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    raw: ConstAlloc<'tcx>,
-) -> Option<ty::ValTree<'tcx>> {
-    let ecx = mk_eval_cx(
-        tcx, DUMMY_SP, param_env,
-        // It is absolutely crucial for soundness that
-        // we do not read from static items or other mutable memory.
-        false,
-    );
-    let place = ecx.raw_const_to_mplace(raw).unwrap();
-    const_to_valtree_inner(&ecx, &place)
-}
-
-fn const_to_valtree_inner<'tcx>(
-    ecx: &CompileTimeEvalContext<'tcx, 'tcx>,
-    place: &MPlaceTy<'tcx>,
-) -> Option<ty::ValTree<'tcx>> {
-    let branches = |n, variant| {
-        let place = match variant {
-            Some(variant) => ecx.mplace_downcast(&place, variant).unwrap(),
-            None => *place,
-        };
-        let variant =
-            variant.map(|variant| Some(ty::ValTree::Leaf(ScalarInt::from(variant.as_u32()))));
-        let fields = (0..n).map(|i| {
-            let field = ecx.mplace_field(&place, i).unwrap();
-            const_to_valtree_inner(ecx, &field)
-        });
-        // For enums, we preped their variant index before the variant's fields so we can figure out
-        // the variant again when just seeing a valtree.
-        let branches = variant.into_iter().chain(fields);
-        Some(ty::ValTree::Branch(
-            ecx.tcx.arena.alloc_from_iter(branches.collect::<Option<Vec<_>>>()?),
-        ))
-    };
-    match place.layout.ty.kind() {
-        ty::FnDef(..) => Some(ty::ValTree::zst()),
-        ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char => {
-            let val = ecx.read_immediate(&place.into()).unwrap();
-            let val = val.to_scalar().unwrap();
-            Some(ty::ValTree::Leaf(val.assert_int()))
-        }
-
-        // Raw pointers are not allowed in type level constants, as we cannot properly test them for
-        // equality at compile-time (see `ptr_guaranteed_eq`/`_ne`).
-        // Technically we could allow function pointers (represented as `ty::Instance`), but this is not guaranteed to
-        // agree with runtime equality tests.
-        ty::FnPtr(_) | ty::RawPtr(_) => None,
-        ty::Ref(..) => unimplemented!("need to use deref_const"),
-
-        // Trait objects are not allowed in type level constants, as we have no concept for
-        // resolving their backing type, even if we can do that at const eval time. We may
-        // hypothetically be able to allow `dyn StructuralEq` trait objects in the future,
-        // but it is unclear if this is useful.
-        ty::Dynamic(..) => None,
-
-        ty::Slice(_) | ty::Str => {
-            unimplemented!("need to find the backing data of the slice/str and recurse on that")
-        }
-        ty::Tuple(substs) => branches(substs.len(), None),
-        ty::Array(_, len) => branches(usize::try_from(len.eval_usize(ecx.tcx.tcx, ecx.param_env)).unwrap(), None),
-
-        ty::Adt(def, _) => {
-            if def.variants().is_empty() {
-                bug!("uninhabited types should have errored and never gotten converted to valtree")
-            }
-
-            let variant = ecx.read_discriminant(&place.into()).unwrap().1;
-
-            branches(def.variant(variant).fields.len(), def.is_enum().then_some(variant))
-        }
-
-        ty::Never
-        | ty::Error(_)
-        | ty::Foreign(..)
-        | ty::Infer(ty::FreshIntTy(_))
-        | ty::Infer(ty::FreshFloatTy(_))
-        | ty::Projection(..)
-        | ty::Param(_)
-        | ty::Bound(..)
-        | ty::Placeholder(..)
-        // FIXME(oli-obk): we could look behind opaque types
-        | ty::Opaque(..)
-        | ty::Infer(_)
-        // FIXME(oli-obk): we can probably encode closures just like structs
-        | ty::Closure(..)
-        | ty::Generator(..)
-        | ty::GeneratorWitness(..) => None,
-    }
-}
-
-/// This function should never fail for validated constants. However, it is also invoked from the
-/// pretty printer which might attempt to format invalid constants and in that case it might fail.
-pub(crate) fn try_destructure_const<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    val: ty::Const<'tcx>,
-) -> InterpResult<'tcx, mir::DestructuredConst<'tcx>> {
-    trace!("destructure_const: {:?}", val);
-    let ecx = mk_eval_cx(tcx, DUMMY_SP, param_env, false);
-    let op = ecx.const_to_op(val, None)?;
+#[instrument(skip(tcx), level = "debug")]
+pub(crate) fn try_destructure_mir_constant_for_user_output<'tcx>(
+    tcx: TyCtxtAt<'tcx>,
+    val: mir::ConstValue<'tcx>,
+    ty: Ty<'tcx>,
+) -> Option<mir::DestructuredConstant<'tcx>> {
+    let typing_env = ty::TypingEnv::fully_monomorphized();
+    let (ecx, op) = mk_eval_cx_for_const_val(tcx, typing_env, val, ty)?;
 
     // We go to `usize` as we cannot allocate anything bigger anyway.
-    let (field_count, variant, down) = match val.ty().kind() {
-        ty::Array(_, len) => (usize::try_from(len.eval_usize(tcx, param_env)).unwrap(), None, op),
-        // Checks if we have any variants, to avoid downcasting to a non-existing variant (when
-        // there are no variants `read_discriminant` successfully returns a non-existing variant
-        // index).
-        ty::Adt(def, _) if def.variants().is_empty() => throw_ub!(Unreachable),
-        ty::Adt(def, _) => {
-            let variant = ecx.read_discriminant(&op)?.1;
-            let down = ecx.operand_downcast(&op, variant)?;
-            (def.variant(variant).fields.len(), Some(variant), down)
+    let (field_count, variant, down) = match ty.kind() {
+        ty::Array(_, len) => (len.try_to_target_usize(tcx.tcx)? as usize, None, op),
+        ty::Adt(def, _) if def.variants().is_empty() => {
+            return None;
         }
-        ty::Tuple(substs) => (substs.len(), None, op),
-        _ => bug!("cannot destructure constant {:?}", val),
+        ty::Adt(def, _) => {
+            let variant = ecx.read_discriminant(&op).discard_err()?;
+            let down = ecx.project_downcast(&op, variant).discard_err()?;
+            (def.variants()[variant].fields.len(), Some(variant), down)
+        }
+        ty::Tuple(args) => (args.len(), None, op),
+        _ => bug!("cannot destructure mir constant {:?}", val),
     };
 
-    let fields = (0..field_count)
+    let fields_iter = (0..field_count)
         .map(|i| {
-            let field_op = ecx.operand_field(&down, i)?;
-            let val = op_to_const(&ecx, &field_op);
-            Ok(ty::Const::from_value(tcx, val, field_op.layout.ty))
+            let field_op = ecx.project_field(&down, i).discard_err()?;
+            let val = op_to_const(&ecx, &field_op, /* for diagnostics */ true);
+            Some((val, field_op.layout.ty))
         })
-        .collect::<InterpResult<'tcx, Vec<_>>>()?;
-    let fields = tcx.arena.alloc_from_iter(fields);
+        .collect::<Option<Vec<_>>>()?;
+    let fields = tcx.arena.alloc_from_iter(fields_iter);
 
-    Ok(mir::DestructuredConst { variant, fields })
+    Some(mir::DestructuredConstant { variant, fields })
 }
 
-pub(crate) fn deref_const<'tcx>(
+/// Computes the tag (if any) for a given type and variant.
+#[instrument(skip(tcx), level = "debug")]
+pub fn tag_for_variant_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    val: ty::Const<'tcx>,
-) -> ty::Const<'tcx> {
-    trace!("deref_const: {:?}", val);
-    let ecx = mk_eval_cx(tcx, DUMMY_SP, param_env, false);
-    let op = ecx.const_to_op(val, None).unwrap();
-    let mplace = ecx.deref_operand(&op).unwrap();
-    if let Some(alloc_id) = mplace.ptr.provenance {
-        assert_eq!(
-            tcx.get_global_alloc(alloc_id).unwrap().unwrap_memory().inner().mutability,
-            Mutability::Not,
-            "deref_const cannot be used with mutable allocations as \
-            that could allow pattern matching to observe mutable statics",
-        );
-    }
+    (ty, variant_index): (Ty<'tcx>, VariantIdx),
+) -> Option<ty::ScalarInt> {
+    assert!(ty.is_enum());
 
-    let ty = match mplace.meta {
-        MemPlaceMeta::None => mplace.layout.ty,
-        MemPlaceMeta::Poison => bug!("poison metadata in `deref_const`: {:#?}", mplace),
-        // In case of unsized types, figure out the real type behind.
-        MemPlaceMeta::Meta(scalar) => match mplace.layout.ty.kind() {
-            ty::Str => bug!("there's no sized equivalent of a `str`"),
-            ty::Slice(elem_ty) => tcx.mk_array(*elem_ty, scalar.to_machine_usize(&tcx).unwrap()),
-            _ => bug!(
-                "type {} should not have metadata, but had {:?}",
-                mplace.layout.ty,
-                mplace.meta
-            ),
-        },
-    };
+    // FIXME: This uses an empty `TypingEnv` even though
+    // it may be used by a generic CTFE.
+    let ecx = InterpCx::new(
+        tcx,
+        ty.default_span(tcx),
+        ty::TypingEnv::fully_monomorphized(),
+        crate::const_eval::DummyMachine,
+    );
 
-    tcx.mk_const(ty::ConstS { val: ty::ConstKind::Value(op_to_const(&ecx, &mplace.into())), ty })
+    let layout = ecx.layout_of(ty).unwrap();
+    ecx.tag_for_variant(layout, variant_index).unwrap().map(|(tag, _tag_field)| tag)
 }

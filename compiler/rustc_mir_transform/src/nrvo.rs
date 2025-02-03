@@ -1,12 +1,12 @@
 //! See the docs for [`RenameReturnPlace`].
 
 use rustc_hir::Mutability;
-use rustc_index::bit_set::HybridBitSet;
+use rustc_index::bit_set::DenseBitSet;
+use rustc_middle::bug;
 use rustc_middle::mir::visit::{MutVisitor, NonUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::{self, BasicBlock, Local, Location};
 use rustc_middle::ty::TyCtxt;
-
-use crate::MirPass;
+use tracing::{debug, trace};
 
 /// This pass looks for MIR that always copies the same local into the return place and eliminates
 /// the copy by renaming all uses of that local to `_0`.
@@ -30,11 +30,12 @@ use crate::MirPass;
 ///
 /// [#47954]: https://github.com/rust-lang/rust/pull/47954
 /// [#71003]: https://github.com/rust-lang/rust/pull/71003
-pub struct RenameReturnPlace;
+pub(super) struct RenameReturnPlace;
 
-impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
+impl<'tcx> crate::MirPass<'tcx> for RenameReturnPlace {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
-        sess.mir_opt_level() > 0
+        // unsound: #111005
+        sess.mir_opt_level() > 0 && sess.opts.unstable_opts.unsound_mir_opts
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut mir::Body<'tcx>) {
@@ -44,19 +45,15 @@ impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
             return;
         };
 
-        if !tcx.consider_optimizing(|| format!("RenameReturnPlace {:?}", def_id)) {
-            return;
-        }
-
         debug!(
             "`{:?}` was eligible for NRVO, making {:?} the return place",
             def_id, returned_local
         );
 
-        RenameToReturnPlace { tcx, to_rename: returned_local }.visit_body(body);
+        RenameToReturnPlace { tcx, to_rename: returned_local }.visit_body_preserves_cfg(body);
 
         // Clean up the `NOP`s we inserted for statements made useless by our renaming.
-        for block_data in body.basic_blocks_mut() {
+        for block_data in body.basic_blocks.as_mut_preserves_cfg() {
             block_data.statements.retain(|stmt| stmt.kind != mir::StatementKind::Nop);
         }
 
@@ -64,7 +61,7 @@ impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
         let (renamed_decl, ret_decl) =
             body.local_decls.pick2_mut(returned_local, mir::RETURN_PLACE);
 
-        // Sometimes, the return place is assigned a local of a different but coercable type, for
+        // Sometimes, the return place is assigned a local of a different but coercible type, for
         // example `&mut T` instead of `&T`. Overwriting the `LocalInfo` for the return place means
         // its type may no longer match the return type of its function. This doesn't cause a
         // problem in codegen because these two types are layout-compatible, but may be unexpected.
@@ -73,6 +70,10 @@ impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
 
         // The return place is always mutable.
         ret_decl.mutability = Mutability::Mut;
+    }
+
+    fn is_required(&self) -> bool {
+        false
     }
 }
 
@@ -83,13 +84,13 @@ impl<'tcx> MirPass<'tcx> for RenameReturnPlace {
 ///
 /// If the MIR fulfills both these conditions, this function returns the `Local` that is assigned
 /// to the return place along all possible paths through the control-flow graph.
-fn local_eligible_for_nrvo(body: &mut mir::Body<'_>) -> Option<Local> {
+fn local_eligible_for_nrvo(body: &mir::Body<'_>) -> Option<Local> {
     if IsReturnPlaceRead::run(body) {
         return None;
     }
 
     let mut copied_to_return_place = None;
-    for block in body.basic_blocks().indices() {
+    for block in body.basic_blocks.indices() {
         // Look for blocks with a `Return` terminator.
         if !matches!(body[block].terminator().kind, mir::TerminatorKind::Return) {
             continue;
@@ -102,12 +103,12 @@ fn local_eligible_for_nrvo(body: &mut mir::Body<'_>) -> Option<Local> {
             mir::LocalKind::Arg => return None,
 
             mir::LocalKind::ReturnPointer => bug!("Return place was assigned to itself?"),
-            mir::LocalKind::Var | mir::LocalKind::Temp => {}
+            mir::LocalKind::Temp => {}
         }
 
         // If multiple different locals are copied to the return place. We can't pick a
         // single one to rename.
-        if copied_to_return_place.map_or(false, |old| old != returned_local) {
+        if copied_to_return_place.is_some_and(|old| old != returned_local) {
             return None;
         }
 
@@ -117,12 +118,9 @@ fn local_eligible_for_nrvo(body: &mut mir::Body<'_>) -> Option<Local> {
     copied_to_return_place
 }
 
-fn find_local_assigned_to_return_place(
-    start: BasicBlock,
-    body: &mut mir::Body<'_>,
-) -> Option<Local> {
+fn find_local_assigned_to_return_place(start: BasicBlock, body: &mir::Body<'_>) -> Option<Local> {
     let mut block = start;
-    let mut seen = HybridBitSet::new_empty(body.basic_blocks().len());
+    let mut seen = DenseBitSet::new_empty(body.basic_blocks.len());
 
     // Iterate as long as `block` has exactly one predecessor that we have not yet visited.
     while seen.insert(block) {
@@ -133,7 +131,7 @@ fn find_local_assigned_to_return_place(
             return local;
         }
 
-        match body.predecessors()[block].as_slice() {
+        match body.basic_blocks.predecessors()[block].as_slice() {
             &[pred] => block = pred,
             _ => return None,
         }
@@ -219,7 +217,7 @@ impl IsReturnPlaceRead {
 }
 
 impl<'tcx> Visitor<'tcx> for IsReturnPlaceRead {
-    fn visit_local(&mut self, &l: &Local, ctxt: PlaceContext, _: Location) {
+    fn visit_local(&mut self, l: Local, ctxt: PlaceContext, _: Location) {
         if l == mir::RETURN_PLACE && ctxt.is_use() && !ctxt.is_place_assignment() {
             self.0 = true;
         }

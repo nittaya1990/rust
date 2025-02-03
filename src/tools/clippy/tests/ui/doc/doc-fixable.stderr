@@ -1,17 +1,18 @@
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:9:9
+  --> tests/ui/doc/doc-fixable.rs:9:9
    |
 LL | /// The foo_bar function does _nothing_. See also foo::bar. (note the dot there)
    |         ^^^^^^^
    |
    = note: `-D clippy::doc-markdown` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::doc_markdown)]`
 help: try
    |
 LL | /// The `foo_bar` function does _nothing_. See also foo::bar. (note the dot there)
    |         ~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:9:51
+  --> tests/ui/doc/doc-fixable.rs:9:51
    |
 LL | /// The foo_bar function does _nothing_. See also foo::bar. (note the dot there)
    |                                                   ^^^^^^^^
@@ -22,18 +23,18 @@ LL | /// The foo_bar function does _nothing_. See also `foo::bar`. (note the dot
    |                                                   ~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:10:83
+  --> tests/ui/doc/doc-fixable.rs:10:83
    |
-LL | /// Markdown is _weird_. I mean _really weird_. This /_ is ok. So is `_`. But not Foo::some_fun
+LL | /// Markdown is _weird_. I mean _really weird_. This \_ is ok. So is `_`. But not Foo::some_fun
    |                                                                                   ^^^^^^^^^^^^^
    |
 help: try
    |
-LL | /// Markdown is _weird_. I mean _really weird_. This /_ is ok. So is `_`. But not `Foo::some_fun`
+LL | /// Markdown is _weird_. I mean _really weird_. This \_ is ok. So is `_`. But not `Foo::some_fun`
    |                                                                                   ~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:12:13
+  --> tests/ui/doc/doc-fixable.rs:12:13
    |
 LL | /// Here be ::a::global:path, and _::another::global::path_.  :: is not a path though.
    |             ^^^^^^^^^^^^^^^^
@@ -44,7 +45,7 @@ LL | /// Here be `::a::global:path`, and _::another::global::path_.  :: is not a
    |             ~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:12:36
+  --> tests/ui/doc/doc-fixable.rs:12:36
    |
 LL | /// Here be ::a::global:path, and _::another::global::path_.  :: is not a path though.
    |                                    ^^^^^^^^^^^^^^^^^^^^^^^
@@ -55,7 +56,7 @@ LL | /// Here be ::a::global:path, and _`::another::global::path`_.  :: is not a
    |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:13:25
+  --> tests/ui/doc/doc-fixable.rs:13:25
    |
 LL | /// Import an item from ::awesome::global::blob:: (Intended postfix)
    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -66,7 +67,7 @@ LL | /// Import an item from `::awesome::global::blob::` (Intended postfix)
    |                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:14:31
+  --> tests/ui/doc/doc-fixable.rs:14:31
    |
 LL | /// These are the options for ::Cat: (Intended trailing single colon, shouldn't be linted)
    |                               ^^^^^
@@ -77,7 +78,7 @@ LL | /// These are the options for `::Cat`: (Intended trailing single colon, sho
    |                               ~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:15:22
+  --> tests/ui/doc/doc-fixable.rs:15:22
    |
 LL | /// That's not code ~NotInCodeBlock~.
    |                      ^^^^^^^^^^^^^^
@@ -88,7 +89,7 @@ LL | /// That's not code ~`NotInCodeBlock`~.
    |                      ~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:16:5
+  --> tests/ui/doc/doc-fixable.rs:16:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -99,7 +100,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:30:5
+  --> tests/ui/doc/doc-fixable.rs:30:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -110,7 +111,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:37:5
+  --> tests/ui/doc/doc-fixable.rs:37:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -121,7 +122,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:51:5
+  --> tests/ui/doc/doc-fixable.rs:51:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -132,7 +133,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:74:5
+  --> tests/ui/doc/doc-fixable.rs:79:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -143,29 +144,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:78:22
-   |
-LL | /// This test has [a link_with_underscores][chunked-example] inside it. See #823.
-   |                      ^^^^^^^^^^^^^^^^^^^^^
-   |
-help: try
-   |
-LL | /// This test has [a `link_with_underscores`][chunked-example] inside it. See #823.
-   |                      ~~~~~~~~~~~~~~~~~~~~~~~
-
-error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:81:21
-   |
-LL | /// It can also be [inline_link2].
-   |                     ^^^^^^^^^^^^
-   |
-help: try
-   |
-LL | /// It can also be [`inline_link2`].
-   |                     ~~~~~~~~~~~~~~
-
-error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:91:5
+  --> tests/ui/doc/doc-fixable.rs:96:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -176,7 +155,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:99:8
+  --> tests/ui/doc/doc-fixable.rs:104:8
    |
 LL | /// ## CamelCaseThing
    |        ^^^^^^^^^^^^^^
@@ -187,7 +166,7 @@ LL | /// ## `CamelCaseThing`
    |        ~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:102:7
+  --> tests/ui/doc/doc-fixable.rs:107:7
    |
 LL | /// # CamelCaseThing
    |       ^^^^^^^^^^^^^^
@@ -198,7 +177,7 @@ LL | /// # `CamelCaseThing`
    |       ~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:104:22
+  --> tests/ui/doc/doc-fixable.rs:109:22
    |
 LL | /// Not a title #897 CamelCaseThing
    |                      ^^^^^^^^^^^^^^
@@ -209,7 +188,7 @@ LL | /// Not a title #897 `CamelCaseThing`
    |                      ~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:105:5
+  --> tests/ui/doc/doc-fixable.rs:110:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -220,7 +199,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:112:5
+  --> tests/ui/doc/doc-fixable.rs:117:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -231,7 +210,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:125:5
+  --> tests/ui/doc/doc-fixable.rs:130:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -242,7 +221,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:136:43
+  --> tests/ui/doc/doc-fixable.rs:141:43
    |
 LL | /** E.g., serialization of an empty list: FooBar
    |                                           ^^^^^^
@@ -253,7 +232,7 @@ LL | /** E.g., serialization of an empty list: `FooBar`
    |                                           ~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:141:5
+  --> tests/ui/doc/doc-fixable.rs:146:5
    |
 LL | And BarQuz too.
    |     ^^^^^^
@@ -264,7 +243,7 @@ LL | And `BarQuz` too.
    |     ~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:142:1
+  --> tests/ui/doc/doc-fixable.rs:147:1
    |
 LL | be_sure_we_got_to_the_end_of_it
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -275,7 +254,7 @@ LL | `be_sure_we_got_to_the_end_of_it`
    |
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:147:43
+  --> tests/ui/doc/doc-fixable.rs:152:43
    |
 LL | /** E.g., serialization of an empty list: FooBar
    |                                           ^^^^^^
@@ -286,7 +265,7 @@ LL | /** E.g., serialization of an empty list: `FooBar`
    |                                           ~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:152:5
+  --> tests/ui/doc/doc-fixable.rs:157:5
    |
 LL | And BarQuz too.
    |     ^^^^^^
@@ -297,7 +276,7 @@ LL | And `BarQuz` too.
    |     ~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:153:1
+  --> tests/ui/doc/doc-fixable.rs:158:1
    |
 LL | be_sure_we_got_to_the_end_of_it
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -308,7 +287,7 @@ LL | `be_sure_we_got_to_the_end_of_it`
    |
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:164:5
+  --> tests/ui/doc/doc-fixable.rs:169:5
    |
 LL | /// be_sure_we_got_to_the_end_of_it
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -319,7 +298,7 @@ LL | /// `be_sure_we_got_to_the_end_of_it`
    |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 error: item in documentation is missing backticks
-  --> $DIR/doc-fixable.rs:183:22
+  --> tests/ui/doc/doc-fixable.rs:188:22
    |
 LL | /// An iterator over mycrate::Collection's values.
    |                      ^^^^^^^^^^^^^^^^^^^
@@ -329,5 +308,66 @@ help: try
 LL | /// An iterator over `mycrate::Collection`'s values.
    |                      ~~~~~~~~~~~~~~~~~~~~~
 
-error: aborting due to 30 previous errors
+error: item in documentation is missing backticks
+  --> tests/ui/doc/doc-fixable.rs:212:34
+   |
+LL | /// Foo \[bar\] \[baz\] \[qux\]. DocMarkdownLint
+   |                                  ^^^^^^^^^^^^^^^
+   |
+help: try
+   |
+LL | /// Foo \[bar\] \[baz\] \[qux\]. `DocMarkdownLint`
+   |                                  ~~~~~~~~~~~~~~~~~
+
+error: item in documentation is missing backticks
+  --> tests/ui/doc/doc-fixable.rs:235:22
+   |
+LL | /// There is no try (do() or do_not()).
+   |                      ^^^^
+   |
+help: try
+   |
+LL | /// There is no try (`do()` or do_not()).
+   |                      ~~~~~~
+
+error: item in documentation is missing backticks
+  --> tests/ui/doc/doc-fixable.rs:235:30
+   |
+LL | /// There is no try (do() or do_not()).
+   |                              ^^^^^^^^
+   |
+help: try
+   |
+LL | /// There is no try (do() or `do_not()`).
+   |                              ~~~~~~~~~~
+
+error: item in documentation is missing backticks
+  --> tests/ui/doc/doc-fixable.rs:238:5
+   |
+LL | /// ABes
+   |     ^^^^
+   |
+help: try
+   |
+LL | /// `ABes`
+   |     ~~~~~~
+
+error: item in documentation is missing backticks
+  --> tests/ui/doc/doc-fixable.rs:244:9
+   |
+LL |     /// foo()
+   |         ^^^^^
+   |
+help: try
+   |
+LL |     /// `foo()`
+   |         ~~~~~~~
+
+error: you should put bare URLs between `<`/`>` or make a proper Markdown link
+  --> tests/ui/doc/doc-fixable.rs:248:5
+   |
+LL | /// https://github.com/rust-lang/rust-clippy/pull/12836
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `<https://github.com/rust-lang/rust-clippy/pull/12836>`
+
+error: aborting due to 34 previous errors
 

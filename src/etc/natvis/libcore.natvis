@@ -7,15 +7,15 @@
     </Expand>
   </Type>
   <Type Name="core::cell::Ref&lt;*&gt;">
-    <DisplayString>{value}</DisplayString>
+    <DisplayString>{value.pointer}</DisplayString>
     <Expand>
-      <ExpandedItem>value</ExpandedItem>
+      <ExpandedItem>value.pointer</ExpandedItem>
     </Expand>
   </Type>
   <Type Name="core::cell::RefMut&lt;*&gt;">
-    <DisplayString>{value}</DisplayString>
+    <DisplayString>{value.pointer}</DisplayString>
     <Expand>
-      <ExpandedItem>value</ExpandedItem>
+      <ExpandedItem>value.pointer</ExpandedItem>
     </Expand>
   </Type>
   <Type Name="core::cell::RefCell&lt;*&gt;">
@@ -41,41 +41,11 @@
     </Expand>
   </Type>
 
-  <Type Name="core::num::nonzero::NonZeroI8">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroI16">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroI32">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroI64">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroI128">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroIsize">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroU8">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroU16">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroU32">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroU64">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroU128">
-    <DisplayString>{__0}</DisplayString>
-  </Type>
-  <Type Name="core::num::nonzero::NonZeroUsize">
-    <DisplayString>{__0}</DisplayString>
+  <Type Name="core::num::nonzero::NonZero&lt;*&gt;">
+    <DisplayString>{__0.__0}</DisplayString>
+    <Expand>
+      <ExpandedItem>__0.__0</ExpandedItem>
+    </Expand>
   </Type>
 
   <Type Name="core::num::wrapping::Wrapping&lt;*&gt;">
@@ -99,9 +69,9 @@
   </Type>
 
   <Type Name="core::pin::Pin&lt;*&gt;">
-    <DisplayString>Pin({(void*)pointer}: {pointer})</DisplayString>
+    <DisplayString>Pin({(void*)__pointer}: {__pointer})</DisplayString>
     <Expand>
-      <ExpandedItem>pointer</ExpandedItem>
+      <ExpandedItem>__pointer</ExpandedItem>
     </Expand>
   </Type>
 
@@ -113,7 +83,7 @@
   </Type>
 
   <Type Name="core::ptr::unique::Unique&lt;*&gt;">
-    <DisplayString>Unique({(void*)pointer}: {pointer})</DisplayString>
+    <DisplayString>Unique({(void*)pointer.pointer}: {pointer.pointer})</DisplayString>
     <Expand>
       <ExpandedItem>pointer</ExpandedItem>
     </Expand>
@@ -154,10 +124,10 @@
   </Type>
 
   <Type Name="core::time::Duration">
-    <DisplayString>{secs,d}s {nanos,d}ns</DisplayString>
+    <DisplayString>{secs,d}s {nanos.__0,d}ns</DisplayString>
     <Expand>
       <Item Name="seconds">secs,d</Item>
-      <Item Name="nanoseconds">nanos,d</Item>
+      <Item Name="nanoseconds">nanos.__0,d</Item>
     </Expand>
   </Type>
 </AutoVisualizer>

@@ -1,23 +1,19 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use rustc_errors::Diagnostic;
-use rustc_hir as hir;
-use rustc_hir::intravisit::{walk_body, walk_expr, walk_inf, walk_ty, Visitor};
-use rustc_hir::{Body, Expr, ExprKind, GenericArg, Item, ItemKind, QPath, TyKind};
-use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_errors::{Applicability, Diag};
+use rustc_hir::intravisit::{Visitor, VisitorExt, walk_body, walk_expr, walk_ty};
+use rustc_hir::{self as hir, AmbigArg, Body, Expr, ExprKind, GenericArg, Item, ItemKind, QPath, TyKind};
+use rustc_hir_analysis::lower_ty;
+use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{Ty, TypeckResults};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
 use rustc_span::symbol::sym;
-use rustc_typeck::hir_ty_to_ty;
 
-use if_chain::if_chain;
-
-use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
-use clippy_utils::source::{snippet, snippet_opt};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::source::{IntoSpan, SpanRangeExt, snippet};
 use clippy_utils::ty::is_type_diagnostic_item;
 
 declare_clippy_lint! {
@@ -36,7 +32,7 @@ declare_clippy_lint! {
     /// pieces of code, possibly including external crates.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # use std::hash::{Hash, BuildHasher};
     /// # trait Serialize {};
@@ -45,7 +41,7 @@ declare_clippy_lint! {
     /// pub fn foo(map: &mut HashMap<i32, i32>) { }
     /// ```
     /// could be rewritten as
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # use std::hash::{Hash, BuildHasher};
     /// # trait Serialize {};
@@ -62,13 +58,11 @@ declare_clippy_lint! {
 declare_lint_pass!(ImplicitHasher => [IMPLICIT_HASHER]);
 
 impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
-    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
-        use rustc_span::BytePos;
-
-        fn suggestion<'tcx>(
-            cx: &LateContext<'tcx>,
-            diag: &mut Diagnostic,
+        fn suggestion(
+            cx: &LateContext<'_>,
+            diag: &mut Diag<'_, ()>,
             generics_span: Span,
             generics_suggestion_span: Span,
             target: &ImplicitHasherType<'_>,
@@ -82,55 +76,54 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                 &generics_snip[1..generics_snip.len() - 1]
             };
 
-            multispan_sugg(
-                diag,
-                "consider adding a type parameter",
-                vec![
-                    (
-                        generics_suggestion_span,
-                        format!(
-                            "<{}{}S: ::std::hash::BuildHasher{}>",
-                            generics_snip,
-                            if generics_snip.is_empty() { "" } else { ", " },
-                            if vis.suggestions.is_empty() {
-                                ""
-                            } else {
-                                // request users to add `Default` bound so that generic constructors can be used
-                                " + Default"
-                            },
-                        ),
+            let mut suggestions = vec![
+                (
+                    generics_suggestion_span,
+                    format!(
+                        "<{generics_snip}{}S: ::std::hash::BuildHasher{}>",
+                        if generics_snip.is_empty() { "" } else { ", " },
+                        if vis.suggestions.is_empty() {
+                            ""
+                        } else {
+                            // request users to add `Default` bound so that generic constructors can be used
+                            " + Default"
+                        },
                     ),
-                    (
-                        target.span(),
-                        format!("{}<{}, S>", target.type_name(), target.type_arguments(),),
-                    ),
-                ],
-            );
+                ),
+                (
+                    target.span(),
+                    format!("{}<{}, S>", target.type_name(), target.type_arguments(),),
+                ),
+            ];
+            suggestions.extend(vis.suggestions);
 
-            if !vis.suggestions.is_empty() {
-                multispan_sugg(diag, "...and use generic constructor", vis.suggestions);
-            }
+            diag.multipart_suggestion(
+                "add a type parameter for `BuildHasher`",
+                suggestions,
+                Applicability::MaybeIncorrect,
+            );
         }
 
-        if !cx.access_levels.is_exported(item.def_id) {
+        if !cx.effective_visibilities.is_exported(item.owner_id.def_id) {
             return;
         }
 
         match item.kind {
-            ItemKind::Impl(ref impl_) => {
+            ItemKind::Impl(impl_) => {
                 let mut vis = ImplicitHasherTypeVisitor::new(cx);
-                vis.visit_ty(impl_.self_ty);
+                vis.visit_ty_unambig(impl_.self_ty);
 
                 for target in &vis.found {
-                    if item.span.ctxt() != target.span().ctxt() {
+                    if !item.span.eq_ctxt(target.span()) {
                         return;
                     }
 
                     let generics_suggestion_span = impl_.generics.span.substitute_dummy({
-                        let pos = snippet_opt(cx, item.span.until(target.span()))
-                            .and_then(|snip| Some(item.span.lo() + BytePos(snip.find("impl")? as u32 + 4)));
-                        if let Some(pos) = pos {
-                            Span::new(pos, pos, item.span.ctxt(), item.span.parent())
+                        let range = (item.span.lo()..target.span().lo()).map_range(cx, |src, range| {
+                            Some(src.get(range.clone())?.find("impl")? + 4..range.end)
+                        });
+                        if let Some(range) = range {
+                            range.with_ctxt(item.span.ctxt())
                         } else {
                             return;
                         }
@@ -145,7 +138,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                         cx,
                         IMPLICIT_HASHER,
                         target.span(),
-                        &format!(
+                        format!(
                             "impl for `{}` should be generalized over different hashers",
                             target.type_name()
                         ),
@@ -155,33 +148,33 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                     );
                 }
             },
-            ItemKind::Fn(ref sig, ref generics, body_id) => {
+            ItemKind::Fn {
+                ref sig,
+                generics,
+                body: body_id,
+                ..
+            } => {
                 let body = cx.tcx.hir().body(body_id);
 
                 for ty in sig.decl.inputs {
                     let mut vis = ImplicitHasherTypeVisitor::new(cx);
-                    vis.visit_ty(ty);
+                    vis.visit_ty_unambig(ty);
 
                     for target in &vis.found {
-                        if in_external_macro(cx.sess(), generics.span) {
+                        if generics.span.from_expansion() {
                             continue;
                         }
                         let generics_suggestion_span = generics.span.substitute_dummy({
-                            let pos = snippet_opt(
-                                cx,
-                                Span::new(
-                                    item.span.lo(),
-                                    body.params[0].pat.span.lo(),
-                                    item.span.ctxt(),
-                                    item.span.parent(),
-                                ),
-                            )
-                            .and_then(|snip| {
-                                let i = snip.find("fn")?;
-                                Some(item.span.lo() + BytePos((i + snip[i..].find('(')?) as u32))
-                            })
-                            .expect("failed to create span for type parameters");
-                            Span::new(pos, pos, item.span.ctxt(), item.span.parent())
+                            let range = (item.span.lo()..body.params[0].pat.span.lo()).map_range(cx, |src, range| {
+                                let (pre, post) = src.get(range.clone())?.split_once("fn")?;
+                                let pos = post.find('(')? + pre.len() + 2;
+                                Some(pos..pos)
+                            });
+                            if let Some(range) = range {
+                                range.with_ctxt(item.span.ctxt())
+                            } else {
+                                return;
+                            }
                         });
 
                         let mut ctr_vis = ImplicitHasherConstructorVisitor::new(cx, target);
@@ -191,7 +184,7 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitHasher {
                             cx,
                             IMPLICIT_HASHER,
                             target.span(),
-                            &format!(
+                            format!(
                                 "parameter of type `{}` should be generalized over different hashers",
                                 target.type_name()
                             ),
@@ -214,7 +207,7 @@ enum ImplicitHasherType<'tcx> {
 
 impl<'tcx> ImplicitHasherType<'tcx> {
     /// Checks that `ty` is a target type without a `BuildHasher`.
-    fn new(cx: &LateContext<'tcx>, hir_ty: &hir::Ty<'_>) -> Option<Self> {
+    fn new(cx: &LateContext<'tcx>, hir_ty: &hir::Ty<'tcx>) -> Option<Self> {
         if let TyKind::Path(QPath::Resolved(None, path)) = hir_ty.kind {
             let params: Vec<_> = path
                 .segments
@@ -231,7 +224,7 @@ impl<'tcx> ImplicitHasherType<'tcx> {
                 .collect();
             let params_len = params.len();
 
-            let ty = hir_ty_to_ty(cx.tcx, hir_ty);
+            let ty = lower_ty(cx.tcx, hir_ty);
 
             if is_type_diagnostic_item(cx, ty, sym::HashMap) && params_len == 2 {
                 Some(ImplicitHasherType::HashMap(
@@ -263,8 +256,8 @@ impl<'tcx> ImplicitHasherType<'tcx> {
 
     fn type_arguments(&self) -> String {
         match *self {
-            ImplicitHasherType::HashMap(.., ref k, ref v) => format!("{}, {}", k, v),
-            ImplicitHasherType::HashSet(.., ref t) => format!("{}", t),
+            ImplicitHasherType::HashMap(.., ref k, ref v) => format!("{k}, {v}"),
+            ImplicitHasherType::HashSet(.., ref t) => format!("{t}"),
         }
     }
 
@@ -292,21 +285,13 @@ impl<'a, 'tcx> ImplicitHasherTypeVisitor<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for ImplicitHasherTypeVisitor<'a, 'tcx> {
-    fn visit_ty(&mut self, t: &'tcx hir::Ty<'_>) {
-        if let Some(target) = ImplicitHasherType::new(self.cx, t) {
+impl<'tcx> Visitor<'tcx> for ImplicitHasherTypeVisitor<'_, 'tcx> {
+    fn visit_ty(&mut self, t: &'tcx hir::Ty<'_, AmbigArg>) {
+        if let Some(target) = ImplicitHasherType::new(self.cx, t.as_unambig_ty()) {
             self.found.push(target);
         }
 
         walk_ty(self, t);
-    }
-
-    fn visit_infer(&mut self, inf: &'tcx hir::InferArg) {
-        if let Some(target) = ImplicitHasherType::new(self.cx, &inf.to_ty()) {
-            self.found.push(target);
-        }
-
-        walk_inf(self, inf);
     }
 }
 
@@ -329,52 +314,48 @@ impl<'a, 'b, 'tcx> ImplicitHasherConstructorVisitor<'a, 'b, 'tcx> {
     }
 }
 
-impl<'a, 'b, 'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'a, 'b, 'tcx> {
+impl<'tcx> Visitor<'tcx> for ImplicitHasherConstructorVisitor<'_, '_, 'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn visit_body(&mut self, body: &'tcx Body<'_>) {
+    fn visit_body(&mut self, body: &Body<'tcx>) {
         let old_maybe_typeck_results = self.maybe_typeck_results.replace(self.cx.tcx.typeck_body(body.id()));
         walk_body(self, body);
         self.maybe_typeck_results = old_maybe_typeck_results;
     }
 
     fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
-        if_chain! {
-            if let ExprKind::Call(fun, args) = e.kind;
-            if let ExprKind::Path(QPath::TypeRelative(ty, method)) = fun.kind;
-            if let TyKind::Path(QPath::Resolved(None, ty_path)) = ty.kind;
-            if let Some(ty_did) = ty_path.res.opt_def_id();
-            then {
-                if self.target.ty() != self.maybe_typeck_results.unwrap().expr_ty(e) {
-                    return;
-                }
+        if let ExprKind::Call(fun, args) = e.kind
+            && let ExprKind::Path(QPath::TypeRelative(ty, method)) = fun.kind
+            && let TyKind::Path(QPath::Resolved(None, ty_path)) = ty.kind
+            && let Some(ty_did) = ty_path.res.opt_def_id()
+        {
+            if self.target.ty() != self.maybe_typeck_results.unwrap().expr_ty(e) {
+                return;
+            }
 
-                if self.cx.tcx.is_diagnostic_item(sym::HashMap, ty_did) {
-                    if method.ident.name == sym::new {
-                        self.suggestions
-                            .insert(e.span, "HashMap::default()".to_string());
-                    } else if method.ident.name == sym!(with_capacity) {
-                        self.suggestions.insert(
-                            e.span,
-                            format!(
-                                "HashMap::with_capacity_and_hasher({}, Default::default())",
-                                snippet(self.cx, args[0].span, "capacity"),
-                            ),
-                        );
-                    }
-                } else if self.cx.tcx.is_diagnostic_item(sym::HashSet, ty_did) {
-                    if method.ident.name == sym::new {
-                        self.suggestions
-                            .insert(e.span, "HashSet::default()".to_string());
-                    } else if method.ident.name == sym!(with_capacity) {
-                        self.suggestions.insert(
-                            e.span,
-                            format!(
-                                "HashSet::with_capacity_and_hasher({}, Default::default())",
-                                snippet(self.cx, args[0].span, "capacity"),
-                            ),
-                        );
-                    }
+            if self.cx.tcx.is_diagnostic_item(sym::HashMap, ty_did) {
+                if method.ident.name == sym::new {
+                    self.suggestions.insert(e.span, "HashMap::default()".to_string());
+                } else if method.ident.name.as_str() == "with_capacity" {
+                    self.suggestions.insert(
+                        e.span,
+                        format!(
+                            "HashMap::with_capacity_and_hasher({}, Default::default())",
+                            snippet(self.cx, args[0].span, "capacity"),
+                        ),
+                    );
+                }
+            } else if self.cx.tcx.is_diagnostic_item(sym::HashSet, ty_did) {
+                if method.ident.name == sym::new {
+                    self.suggestions.insert(e.span, "HashSet::default()".to_string());
+                } else if method.ident.name.as_str() == "with_capacity" {
+                    self.suggestions.insert(
+                        e.span,
+                        format!(
+                            "HashSet::with_capacity_and_hasher({}, Default::default())",
+                            snippet(self.cx, args[0].span, "capacity"),
+                        ),
+                    );
                 }
             }
         }

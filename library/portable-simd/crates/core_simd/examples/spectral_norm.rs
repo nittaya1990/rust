@@ -1,6 +1,6 @@
 #![feature(portable_simd)]
 
-use core_simd::simd::*;
+use core_simd::simd::prelude::*;
 
 fn a(i: usize, j: usize) -> f64 {
     ((i + j) * (i + j + 1) / 2 + i + 1) as f64
@@ -69,7 +69,7 @@ fn dot(x: &[f64], y: &[f64]) -> f64 {
 #[cfg(test)]
 #[test]
 fn test() {
-    assert_eq!(&format!("{:.9}", spectral_norm(100)), "1.274219991");
+    assert_eq!(format!("{:.9}", spectral_norm(100)), "1.274219991");
 }
 
 fn main() {

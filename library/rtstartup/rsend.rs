@@ -5,6 +5,8 @@
 #![feature(auto_traits)]
 #![crate_type = "rlib"]
 #![no_core]
+#![allow(internal_features)]
+#![warn(unreachable_pub)]
 
 #[lang = "sized"]
 trait Sized {}
@@ -15,6 +17,8 @@ impl<T> Sync for T {}
 trait Copy {}
 #[lang = "freeze"]
 auto trait Freeze {}
+
+impl<T: ?Sized> Copy for *mut T {}
 
 #[lang = "drop_in_place"]
 #[inline]

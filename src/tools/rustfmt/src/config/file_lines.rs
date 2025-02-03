@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::{cmp, fmt, iter, str};
 
 use rustc_data_structures::sync::Lrc;
-use rustc_span::{self, SourceFile};
-use serde::{ser, Deserialize, Deserializer, Serialize, Serializer};
+use rustc_span::SourceFile;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser};
 use serde_json as json;
 use thiserror::Error;
 
@@ -38,8 +38,8 @@ impl From<rustc_span::FileName> for FileName {
 impl fmt::Display for FileName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FileName::Real(p) => write!(f, "{}", p.to_str().unwrap()),
-            FileName::Stdin => write!(f, "stdin"),
+            FileName::Real(p) => write!(f, "{}", p.display()),
+            FileName::Stdin => write!(f, "<stdin>"),
         }
     }
 }
@@ -162,7 +162,7 @@ impl fmt::Display for FileLines {
             None => write!(f, "None")?,
             Some(map) => {
                 for (file_name, ranges) in map.iter() {
-                    write!(f, "{}: ", file_name)?;
+                    write!(f, "{file_name}: ")?;
                     write!(f, "{}\n", ranges.iter().format(", "))?;
                 }
             }
@@ -201,7 +201,7 @@ impl FileLines {
     }
 
     /// Returns `true` if this `FileLines` contains all lines in all files.
-    pub(crate) fn is_all(&self) -> bool {
+    pub fn is_all(&self) -> bool {
         self.0.is_none()
     }
 

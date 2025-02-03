@@ -1,5 +1,6 @@
+use tracing::debug;
+
 use crate::graph::implementation::*;
-use std::fmt::Debug;
 
 type TestGraph = Graph<&'static str, &'static str>;
 
@@ -70,8 +71,8 @@ fn test_adjacent_edges<N: PartialEq + Debug, E: PartialEq + Debug>(
             "counter={:?} expected={:?} edge_index={:?} edge={:?}",
             counter, expected_incoming[counter], edge_index, edge
         );
-        match expected_incoming[counter] {
-            (ref e, ref n) => {
+        match &expected_incoming[counter] {
+            (e, n) => {
                 assert!(e == &edge.data);
                 assert!(n == graph.node_data(edge.source()));
                 assert!(start_index == edge.target);
@@ -88,8 +89,8 @@ fn test_adjacent_edges<N: PartialEq + Debug, E: PartialEq + Debug>(
             "counter={:?} expected={:?} edge_index={:?} edge={:?}",
             counter, expected_outgoing[counter], edge_index, edge
         );
-        match expected_outgoing[counter] {
-            (ref e, ref n) => {
+        match &expected_outgoing[counter] {
+            (e, n) => {
                 assert!(e == &edge.data);
                 assert!(start_index == edge.source);
                 assert!(n == graph.node_data(edge.target));
@@ -109,13 +110,10 @@ fn each_adjacent_from_a() {
 #[test]
 fn each_adjacent_from_b() {
     let graph = create_graph();
-    test_adjacent_edges(
-        &graph,
-        NodeIndex(1),
-        "B",
-        &[("FB", "F"), ("AB", "A")],
-        &[("BD", "D"), ("BC", "C")],
-    );
+    test_adjacent_edges(&graph, NodeIndex(1), "B", &[("FB", "F"), ("AB", "A")], &[
+        ("BD", "D"),
+        ("BC", "C"),
+    ]);
 }
 
 #[test]

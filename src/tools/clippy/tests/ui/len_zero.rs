@@ -1,7 +1,14 @@
-// run-rustfix
-
 #![warn(clippy::len_zero)]
-#![allow(dead_code, unused, clippy::len_without_is_empty)]
+#![allow(
+    dead_code,
+    unused,
+    clippy::needless_if,
+    clippy::len_without_is_empty,
+    clippy::const_is_empty
+)]
+
+extern crate core;
+use core::ops::Deref;
 
 pub struct One;
 struct Wither;
@@ -56,6 +63,26 @@ impl WithIsEmpty for Wither {
     }
 }
 
+struct DerefToDerefToString;
+
+impl Deref for DerefToDerefToString {
+    type Target = DerefToString;
+
+    fn deref(&self) -> &Self::Target {
+        &DerefToString {}
+    }
+}
+
+struct DerefToString;
+
+impl Deref for DerefToString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        "Hello, world!"
+    }
+}
+
 fn main() {
     let x = [1, 2];
     if x.len() == 0 {
@@ -63,6 +90,25 @@ fn main() {
     }
 
     if "".len() == 0 {}
+
+    let s = "Hello, world!";
+    let s1 = &s;
+    let s2 = &s1;
+    let s3 = &s2;
+    let s4 = &s3;
+    let s5 = &s4;
+    let s6 = &s5;
+    println!("{}", *s1 == "");
+    println!("{}", **s2 == "");
+    println!("{}", ***s3 == "");
+    println!("{}", ****s4 == "");
+    println!("{}", *****s5 == "");
+    println!("{}", ******(s6) == "");
+
+    let d2s = DerefToDerefToString {};
+    println!("{}", &**d2s == "");
+
+    println!("{}", std::borrow::Cow::Borrowed("") == "");
 
     let y = One;
     if y.len() == 0 {
@@ -136,8 +182,69 @@ fn main() {
         // No error; `HasWrongIsEmpty` does not have `.is_empty()`.
         println!("Or this!");
     }
+
+    // issue #10529
+    (has_is_empty.len() > 0).then(|| println!("This can happen."));
+    (has_is_empty.len() == 0).then(|| println!("Or this!"));
 }
 
 fn test_slice(b: &[u8]) {
     if b.len() != 0 {}
+}
+
+// issue #11992
+fn binop_with_macros() {
+    macro_rules! len {
+        ($seq:ident) => {
+            $seq.len()
+        };
+    }
+
+    macro_rules! compare_to {
+        ($val:literal) => {
+            $val
+        };
+        ($val:expr) => {{ $val }};
+    }
+
+    macro_rules! zero {
+        () => {
+            0
+        };
+    }
+
+    let has_is_empty = HasIsEmpty;
+    // Don't lint, suggesting changes might break macro compatibility.
+    (len!(has_is_empty) > 0).then(|| println!("This can happen."));
+    // Don't lint, suggesting changes might break macro compatibility.
+    if len!(has_is_empty) == 0 {}
+    // Don't lint
+    if has_is_empty.len() == compare_to!(if true { 0 } else { 1 }) {}
+    // This is fine
+    if has_is_empty.len() == compare_to!(1) {}
+
+    if has_is_empty.len() == compare_to!(0) {}
+    if has_is_empty.len() == zero!() {}
+
+    (compare_to!(0) < has_is_empty.len()).then(|| println!("This can happen."));
+}
+
+fn no_infinite_recursion() -> bool {
+    struct S;
+
+    impl Deref for S {
+        type Target = Self;
+        fn deref(&self) -> &Self::Target {
+            self
+        }
+    }
+
+    impl PartialEq<&'static str> for S {
+        fn eq(&self, _other: &&'static str) -> bool {
+            false
+        }
+    }
+
+    // Do not crash while checking if S implements `.is_empty()`
+    S == ""
 }

@@ -1,11 +1,12 @@
 //! These structs are a subset of the ones found in `rustc_errors::json`.
-//! They are only used for deserialization of JSON output provided by libtest.
+
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use serde::Deserialize;
 
 use crate::errors::{Error, ErrorKind};
 use crate::runtest::ProcRes;
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 #[derive(Deserialize)]
 struct Diagnostic {
@@ -21,6 +22,14 @@ struct Diagnostic {
 struct ArtifactNotification {
     #[allow(dead_code)]
     artifact: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct UnusedExternNotification {
+    #[allow(dead_code)]
+    lint_level: String,
+    #[allow(dead_code)]
+    unused_extern_names: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -113,12 +122,14 @@ pub fn extract_rendered(output: &str) -> String {
                 } else if serde_json::from_str::<ArtifactNotification>(line).is_ok() {
                     // Ignore the notification.
                     None
+                } else if serde_json::from_str::<UnusedExternNotification>(line).is_ok() {
+                    // Ignore the notification.
+                    None
                 } else {
-                    print!(
-                        "failed to decode compiler output as json: line: {}\noutput: {}",
-                        line, output
-                    );
-                    panic!()
+                    // This function is called for both compiler and non-compiler output,
+                    // so if the line isn't recognized as JSON from the compiler then
+                    // just print it as-is.
+                    Some(format!("{line}\n"))
                 }
             } else {
                 // preserve non-JSON lines, such as ICEs
@@ -271,7 +282,7 @@ fn push_expected_errors(
 
     // Add notes for the backtrace
     for span in primary_spans {
-        for frame in &span.expansion {
+        if let Some(frame) = &span.expansion {
             push_backtrace(expected_errors, frame, file_name);
         }
     }
@@ -304,7 +315,7 @@ fn push_backtrace(
         });
     }
 
-    for previous_expansion in &expansion.span.expansion {
+    if let Some(previous_expansion) = &expansion.span.expansion {
         push_backtrace(expected_errors, previous_expansion, file_name);
     }
 }

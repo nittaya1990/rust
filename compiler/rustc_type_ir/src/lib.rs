@@ -1,129 +1,97 @@
-#![feature(min_specialization)]
+// tidy-alphabetical-start
+#![allow(rustc::usage_of_ty_tykind)]
+#![allow(rustc::usage_of_type_ir_inherent)]
+#![cfg_attr(
+    feature = "nightly",
+    feature(associated_type_defaults, never_type, rustc_attrs, negative_impls)
+)]
+#![cfg_attr(feature = "nightly", allow(internal_features))]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate bitflags;
-#[macro_use]
-extern crate rustc_macros;
+extern crate self as rustc_type_ir;
 
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::unify::{EqUnifyValue, UnifyKey};
 use std::fmt;
-use std::mem::discriminant;
+use std::hash::Hash;
 
-bitflags! {
-    /// Flags that we track on types. These flags are propagated upwards
-    /// through the type during type construction, so that we can quickly check
-    /// whether the type has various kinds of types in it without recursing
-    /// over the type itself.
-    pub struct TypeFlags: u32 {
-        // Does this have parameters? Used to determine whether substitution is
-        // required.
-        /// Does this have `Param`?
-        const HAS_TY_PARAM                = 1 << 0;
-        /// Does this have `ReEarlyBound`?
-        const HAS_RE_PARAM                = 1 << 1;
-        /// Does this have `ConstKind::Param`?
-        const HAS_CT_PARAM                = 1 << 2;
+#[cfg(feature = "nightly")]
+use rustc_macros::{Decodable, Encodable, HashStable_NoContext};
 
-        const NEEDS_SUBST                 = TypeFlags::HAS_TY_PARAM.bits
-                                          | TypeFlags::HAS_RE_PARAM.bits
-                                          | TypeFlags::HAS_CT_PARAM.bits;
+// These modules are `pub` since they are not glob-imported.
+#[macro_use]
+pub mod visit;
+#[cfg(feature = "nightly")]
+pub mod codec;
+pub mod data_structures;
+pub mod elaborate;
+pub mod error;
+pub mod fast_reject;
+pub mod fold;
+#[cfg_attr(feature = "nightly", rustc_diagnostic_item = "type_ir_inherent")]
+pub mod inherent;
+pub mod ir_print;
+pub mod lang_items;
+pub mod lift;
+pub mod outlives;
+pub mod relate;
+pub mod search_graph;
+pub mod solve;
 
-        /// Does this have `Infer`?
-        const HAS_TY_INFER                = 1 << 3;
-        /// Does this have `ReVar`?
-        const HAS_RE_INFER                = 1 << 4;
-        /// Does this have `ConstKind::Infer`?
-        const HAS_CT_INFER                = 1 << 5;
+// These modules are not `pub` since they are glob-imported.
+#[macro_use]
+mod macros;
+mod binder;
+mod canonical;
+mod const_kind;
+mod flags;
+mod generic_arg;
+mod infer_ctxt;
+mod interner;
+mod opaque_ty;
+mod predicate;
+mod predicate_kind;
+mod region_kind;
+mod ty_info;
+mod ty_kind;
+mod upcast;
 
-        /// Does this have inference variables? Used to determine whether
-        /// inference is required.
-        const NEEDS_INFER                 = TypeFlags::HAS_TY_INFER.bits
-                                          | TypeFlags::HAS_RE_INFER.bits
-                                          | TypeFlags::HAS_CT_INFER.bits;
-
-        /// Does this have `Placeholder`?
-        const HAS_TY_PLACEHOLDER          = 1 << 6;
-        /// Does this have `RePlaceholder`?
-        const HAS_RE_PLACEHOLDER          = 1 << 7;
-        /// Does this have `ConstKind::Placeholder`?
-        const HAS_CT_PLACEHOLDER          = 1 << 8;
-
-        /// `true` if there are "names" of regions and so forth
-        /// that are local to a particular fn/inferctxt
-        const HAS_FREE_LOCAL_REGIONS      = 1 << 9;
-
-        /// `true` if there are "names" of types and regions and so forth
-        /// that are local to a particular fn
-        const HAS_FREE_LOCAL_NAMES        = TypeFlags::HAS_TY_PARAM.bits
-                                          | TypeFlags::HAS_CT_PARAM.bits
-                                          | TypeFlags::HAS_TY_INFER.bits
-                                          | TypeFlags::HAS_CT_INFER.bits
-                                          | TypeFlags::HAS_TY_PLACEHOLDER.bits
-                                          | TypeFlags::HAS_CT_PLACEHOLDER.bits
-                                          // We consider 'freshened' types and constants
-                                          // to depend on a particular fn.
-                                          // The freshening process throws away information,
-                                          // which can make things unsuitable for use in a global
-                                          // cache. Note that there is no 'fresh lifetime' flag -
-                                          // freshening replaces all lifetimes with `ReErased`,
-                                          // which is different from how types/const are freshened.
-                                          | TypeFlags::HAS_TY_FRESH.bits
-                                          | TypeFlags::HAS_CT_FRESH.bits
-                                          | TypeFlags::HAS_FREE_LOCAL_REGIONS.bits;
-
-        /// Does this have `Projection`?
-        const HAS_TY_PROJECTION           = 1 << 10;
-        /// Does this have `Opaque`?
-        const HAS_TY_OPAQUE               = 1 << 11;
-        /// Does this have `ConstKind::Unevaluated`?
-        const HAS_CT_PROJECTION           = 1 << 12;
-
-        /// Could this type be normalized further?
-        const HAS_PROJECTION              = TypeFlags::HAS_TY_PROJECTION.bits
-                                          | TypeFlags::HAS_TY_OPAQUE.bits
-                                          | TypeFlags::HAS_CT_PROJECTION.bits;
-
-        /// Is an error type/const reachable?
-        const HAS_ERROR                   = 1 << 13;
-
-        /// Does this have any region that "appears free" in the type?
-        /// Basically anything but `ReLateBound` and `ReErased`.
-        const HAS_FREE_REGIONS            = 1 << 14;
-
-        /// Does this have any `ReLateBound` regions? Used to check
-        /// if a global bound is safe to evaluate.
-        const HAS_RE_LATE_BOUND           = 1 << 15;
-
-        /// Does this have any `ReErased` regions?
-        const HAS_RE_ERASED               = 1 << 16;
-
-        /// Does this value have parameters/placeholders/inference variables which could be
-        /// replaced later, in a way that would change the results of `impl` specialization?
-        const STILL_FURTHER_SPECIALIZABLE = 1 << 17;
-
-        /// Does this value have `InferTy::FreshTy/FreshIntTy/FreshFloatTy`?
-        const HAS_TY_FRESH                = 1 << 18;
-
-        /// Does this value have `InferConst::Fresh`?
-        const HAS_CT_FRESH                = 1 << 19;
-    }
-}
+pub use AliasTyKind::*;
+pub use DynKind::*;
+pub use InferTy::*;
+pub use RegionKind::*;
+pub use TyKind::*;
+pub use Variance::*;
+pub use binder::*;
+pub use canonical::*;
+#[cfg(feature = "nightly")]
+pub use codec::*;
+pub use const_kind::*;
+pub use flags::*;
+pub use generic_arg::*;
+pub use infer_ctxt::*;
+pub use interner::*;
+pub use opaque_ty::*;
+pub use predicate::*;
+pub use predicate_kind::*;
+pub use region_kind::*;
+pub use ty_info::*;
+pub use ty_kind::*;
+pub use upcast::*;
 
 rustc_index::newtype_index! {
     /// A [De Bruijn index][dbi] is a standard means of representing
     /// regions (and perhaps later types) in a higher-ranked setting. In
     /// particular, imagine a type like this:
-    ///
-    ///     for<'a> fn(for<'b> fn(&'b isize, &'a isize), &'a char)
-    ///     ^          ^            |          |           |
-    ///     |          |            |          |           |
-    ///     |          +------------+ 0        |           |
-    ///     |                                  |           |
-    ///     +----------------------------------+ 1         |
-    ///     |                                              |
-    ///     +----------------------------------------------+ 0
-    ///
+    /// ```ignore (illustrative)
+    ///    for<'a> fn(for<'b> fn(&'b isize, &'a isize), &'a char)
+    /// // ^          ^            |          |           |
+    /// // |          |            |          |           |
+    /// // |          +------------+ 0        |           |
+    /// // |                                  |           |
+    /// // +----------------------------------+ 1         |
+    /// // |                                              |
+    /// // +----------------------------------------------+ 0
+    /// ```
     /// In this type, there are two binders (the outer fn and the inner
     /// fn). We need to be able to determine, for any given region, which
     /// fn type it is bound by, the inner or the outer one. There are
@@ -150,9 +118,13 @@ rustc_index::newtype_index! {
     /// is the outer fn.
     ///
     /// [dbi]: https://en.wikipedia.org/wiki/De_Bruijn_index
+    #[cfg_attr(feature = "nightly", derive(HashStable_NoContext))]
+    #[encodable]
+    #[orderable]
+    #[debug_format = "DebruijnIndex({})"]
+    #[gate_rustc_only]
     pub struct DebruijnIndex {
-        DEBUG_FORMAT = "DebruijnIndex({})",
-        const INNERMOST = 0,
+        const INNERMOST = 0;
     }
 }
 
@@ -167,6 +139,7 @@ impl DebruijnIndex {
     ///    for<'a> fn(for<'b> fn(&'a x))
     ///
     /// you would need to shift the index for `'a` into a new binder.
+    #[inline]
     #[must_use]
     pub fn shifted_in(self, amount: u32) -> DebruijnIndex {
         DebruijnIndex::from_u32(self.as_u32() + amount)
@@ -174,18 +147,21 @@ impl DebruijnIndex {
 
     /// Update this index in place by shifting it "in" through
     /// `amount` number of binders.
+    #[inline]
     pub fn shift_in(&mut self, amount: u32) {
         *self = self.shifted_in(amount);
     }
 
     /// Returns the resulting index when this value is moved out from
     /// `amount` number of new binders.
+    #[inline]
     #[must_use]
     pub fn shifted_out(self, amount: u32) -> DebruijnIndex {
         DebruijnIndex::from_u32(self.as_u32() - amount)
     }
 
     /// Update in place by shifting out from `amount` binders.
+    #[inline]
     pub fn shift_out(&mut self, amount: u32) {
         *self = self.shifted_out(amount);
     }
@@ -195,7 +171,7 @@ impl DebruijnIndex {
     /// it will now be bound at INNERMOST. This is an appropriate thing to do
     /// when moving a region out from inside binders:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     ///             for<'a>   fn(for<'b>   for<'c>   fn(&'a u32), _)
     /// // Binder:  D3           D2        D1            ^^
     /// ```
@@ -210,244 +186,27 @@ impl DebruijnIndex {
     /// If we invoke `shift_out_to_binder` and the region is in fact
     /// bound by one of the binders we are shifting out of, that is an
     /// error (and should fail an assertion failure).
+    #[inline]
     pub fn shifted_out_to_binder(self, to_binder: DebruijnIndex) -> Self {
         self.shifted_out(to_binder.as_u32() - INNERMOST.as_u32())
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[derive(Encodable, Decodable)]
-pub enum IntTy {
-    Isize,
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-}
-
-impl IntTy {
-    pub fn name_str(&self) -> &'static str {
-        match *self {
-            IntTy::Isize => "isize",
-            IntTy::I8 => "i8",
-            IntTy::I16 => "i16",
-            IntTy::I32 => "i32",
-            IntTy::I64 => "i64",
-            IntTy::I128 => "i128",
-        }
-    }
-
-    pub fn bit_width(&self) -> Option<u64> {
-        Some(match *self {
-            IntTy::Isize => return None,
-            IntTy::I8 => 8,
-            IntTy::I16 => 16,
-            IntTy::I32 => 32,
-            IntTy::I64 => 64,
-            IntTy::I128 => 128,
-        })
-    }
-
-    pub fn normalize(&self, target_width: u32) -> Self {
-        match self {
-            IntTy::Isize => match target_width {
-                16 => IntTy::I16,
-                32 => IntTy::I32,
-                64 => IntTy::I64,
-                _ => unreachable!(),
-            },
-            _ => *self,
-        }
+pub fn debug_bound_var<T: std::fmt::Write>(
+    fmt: &mut T,
+    debruijn: DebruijnIndex,
+    var: impl std::fmt::Debug,
+) -> Result<(), std::fmt::Error> {
+    if debruijn == INNERMOST {
+        write!(fmt, "^{var:?}")
+    } else {
+        write!(fmt, "^{}_{:?}", debruijn.index(), var)
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Debug)]
-#[derive(Encodable, Decodable)]
-pub enum UintTy {
-    Usize,
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-}
-
-impl UintTy {
-    pub fn name_str(&self) -> &'static str {
-        match *self {
-            UintTy::Usize => "usize",
-            UintTy::U8 => "u8",
-            UintTy::U16 => "u16",
-            UintTy::U32 => "u32",
-            UintTy::U64 => "u64",
-            UintTy::U128 => "u128",
-        }
-    }
-
-    pub fn bit_width(&self) -> Option<u64> {
-        Some(match *self {
-            UintTy::Usize => return None,
-            UintTy::U8 => 8,
-            UintTy::U16 => 16,
-            UintTy::U32 => 32,
-            UintTy::U64 => 64,
-            UintTy::U128 => 128,
-        })
-    }
-
-    pub fn normalize(&self, target_width: u32) -> Self {
-        match self {
-            UintTy::Usize => match target_width {
-                16 => UintTy::U16,
-                32 => UintTy::U32,
-                64 => UintTy::U64,
-                _ => unreachable!(),
-            },
-            _ => *self,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[derive(Encodable, Decodable)]
-pub enum FloatTy {
-    F32,
-    F64,
-}
-
-impl FloatTy {
-    pub fn name_str(self) -> &'static str {
-        match self {
-            FloatTy::F32 => "f32",
-            FloatTy::F64 => "f64",
-        }
-    }
-
-    pub fn bit_width(self) -> u64 {
-        match self {
-            FloatTy::F32 => 32,
-            FloatTy::F64 => 64,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum IntVarValue {
-    IntType(IntTy),
-    UintType(UintTy),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct FloatVarValue(pub FloatTy);
-
-rustc_index::newtype_index! {
-    /// A **ty**pe **v**ariable **ID**.
-    pub struct TyVid {
-        DEBUG_FORMAT = "_#{}t"
-    }
-}
-
-/// An **int**egral (`u32`, `i32`, `usize`, etc.) type **v**ariable **ID**.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
-pub struct IntVid {
-    pub index: u32,
-}
-
-/// An **float**ing-point (`f32` or `f64`) type **v**ariable **ID**.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
-pub struct FloatVid {
-    pub index: u32,
-}
-
-/// A placeholder for a type that hasn't been inferred yet.
-///
-/// E.g., if we have an empty array (`[]`), then we create a fresh
-/// type variable for the element type since we won't know until it's
-/// used what the element type is supposed to be.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
-pub enum InferTy {
-    /// A type variable.
-    TyVar(TyVid),
-    /// An integral type variable (`{integer}`).
-    ///
-    /// These are created when the compiler sees an integer literal like
-    /// `1` that could be several different types (`u8`, `i32`, `u32`, etc.).
-    /// We don't know until it's used what type it's supposed to be, so
-    /// we create a fresh type variable.
-    IntVar(IntVid),
-    /// A floating-point type variable (`{float}`).
-    ///
-    /// These are created when the compiler sees an float literal like
-    /// `1.0` that could be either an `f32` or an `f64`.
-    /// We don't know until it's used what type it's supposed to be, so
-    /// we create a fresh type variable.
-    FloatVar(FloatVid),
-
-    /// A [`FreshTy`][Self::FreshTy] is one that is generated as a replacement
-    /// for an unbound type variable. This is convenient for caching etc. See
-    /// `rustc_infer::infer::freshen` for more details.
-    ///
-    /// Compare with [`TyVar`][Self::TyVar].
-    FreshTy(u32),
-    /// Like [`FreshTy`][Self::FreshTy], but as a replacement for [`IntVar`][Self::IntVar].
-    FreshIntTy(u32),
-    /// Like [`FreshTy`][Self::FreshTy], but as a replacement for [`FloatVar`][Self::FloatVar].
-    FreshFloatTy(u32),
-}
-
-/// Raw `TyVid` are used as the unification key for `sub_relations`;
-/// they carry no values.
-impl UnifyKey for TyVid {
-    type Value = ();
-    #[inline]
-    fn index(&self) -> u32 {
-        self.as_u32()
-    }
-    #[inline]
-    fn from_index(i: u32) -> TyVid {
-        TyVid::from_u32(i)
-    }
-    fn tag() -> &'static str {
-        "TyVid"
-    }
-}
-
-impl EqUnifyValue for IntVarValue {}
-
-impl UnifyKey for IntVid {
-    type Value = Option<IntVarValue>;
-    #[inline] // make this function eligible for inlining - it is quite hot.
-    fn index(&self) -> u32 {
-        self.index
-    }
-    #[inline]
-    fn from_index(i: u32) -> IntVid {
-        IntVid { index: i }
-    }
-    fn tag() -> &'static str {
-        "IntVid"
-    }
-}
-
-impl EqUnifyValue for FloatVarValue {}
-
-impl UnifyKey for FloatVid {
-    type Value = Option<FloatVarValue>;
-    #[inline]
-    fn index(&self) -> u32 {
-        self.index
-    }
-    #[inline]
-    fn from_index(i: u32) -> FloatVid {
-        FloatVid { index: i }
-    }
-    fn tag() -> &'static str {
-        "FloatVid"
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Decodable, Encodable, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "nightly", derive(Decodable, Encodable, HashStable_NoContext))]
+#[cfg_attr(feature = "nightly", rustc_pass_by_value)]
 pub enum Variance {
     Covariant,     // T<A> <: T<B> iff A <: B -- e.g., function return type
     Invariant,     // T<A> <: T<B> iff B == A -- e.g., type of mutable cell
@@ -463,9 +222,9 @@ impl Variance {
     /// variance with which the argument appears.
     ///
     /// Example 1:
-    ///
-    ///     *mut Vec<i32>
-    ///
+    /// ```ignore (illustrative)
+    /// *mut Vec<i32>
+    /// ```
     /// Here, the "ambient" variance starts as covariant. `*mut T` is
     /// invariant with respect to `T`, so the variance in which the
     /// `Vec<i32>` appears is `Covariant.xform(Invariant)`, which
@@ -475,9 +234,9 @@ impl Variance {
     /// (again) in `Invariant`.
     ///
     /// Example 2:
-    ///
-    ///     fn(*const Vec<i32>, *mut Vec<i32)
-    ///
+    /// ```ignore (illustrative)
+    /// fn(*const Vec<i32>, *mut Vec<i32)
+    /// ```
     /// The ambient variance is covariant. A `fn` type is
     /// contravariant with respect to its parameters, so the variance
     /// within which both pointer types appear is
@@ -515,90 +274,6 @@ impl Variance {
     }
 }
 
-impl<CTX> HashStable<CTX> for DebruijnIndex {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        self.as_u32().hash_stable(ctx, hasher);
-    }
-}
-
-impl<CTX> HashStable<CTX> for IntTy {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        discriminant(self).hash_stable(ctx, hasher);
-    }
-}
-
-impl<CTX> HashStable<CTX> for UintTy {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        discriminant(self).hash_stable(ctx, hasher);
-    }
-}
-
-impl<CTX> HashStable<CTX> for FloatTy {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        discriminant(self).hash_stable(ctx, hasher);
-    }
-}
-
-impl<CTX> HashStable<CTX> for InferTy {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        use InferTy::*;
-        discriminant(self).hash_stable(ctx, hasher);
-        match self {
-            TyVar(v) => v.as_u32().hash_stable(ctx, hasher),
-            IntVar(v) => v.index.hash_stable(ctx, hasher),
-            FloatVar(v) => v.index.hash_stable(ctx, hasher),
-            FreshTy(v) | FreshIntTy(v) | FreshFloatTy(v) => v.hash_stable(ctx, hasher),
-        }
-    }
-}
-
-impl<CTX> HashStable<CTX> for Variance {
-    fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
-        discriminant(self).hash_stable(ctx, hasher);
-    }
-}
-
-impl fmt::Debug for IntVarValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            IntVarValue::IntType(ref v) => v.fmt(f),
-            IntVarValue::UintType(ref v) => v.fmt(f),
-        }
-    }
-}
-
-impl fmt::Debug for FloatVarValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl fmt::Debug for IntVid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "_#{}i", self.index)
-    }
-}
-
-impl fmt::Debug for FloatVid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "_#{}f", self.index)
-    }
-}
-
-impl fmt::Debug for InferTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use InferTy::*;
-        match *self {
-            TyVar(ref v) => v.fmt(f),
-            IntVar(ref v) => v.fmt(f),
-            FloatVar(ref v) => v.fmt(f),
-            FreshTy(v) => write!(f, "FreshTy({:?})", v),
-            FreshIntTy(v) => write!(f, "FreshIntTy({:?})", v),
-            FreshFloatTy(v) => write!(f, "FreshFloatTy({:?})", v),
-        }
-    }
-}
-
 impl fmt::Debug for Variance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match *self {
@@ -610,16 +285,157 @@ impl fmt::Debug for Variance {
     }
 }
 
-impl fmt::Display for InferTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use InferTy::*;
-        match *self {
-            TyVar(_) => write!(f, "_"),
-            IntVar(_) => write!(f, "{}", "{integer}"),
-            FloatVar(_) => write!(f, "{}", "{float}"),
-            FreshTy(v) => write!(f, "FreshTy({})", v),
-            FreshIntTy(v) => write!(f, "FreshIntTy({})", v),
-            FreshFloatTy(v) => write!(f, "FreshFloatTy({})", v),
+rustc_index::newtype_index! {
+    /// "Universes" are used during type- and trait-checking in the
+    /// presence of `for<..>` binders to control what sets of names are
+    /// visible. Universes are arranged into a tree: the root universe
+    /// contains names that are always visible. Each child then adds a new
+    /// set of names that are visible, in addition to those of its parent.
+    /// We say that the child universe "extends" the parent universe with
+    /// new names.
+    ///
+    /// To make this more concrete, consider this program:
+    ///
+    /// ```ignore (illustrative)
+    /// struct Foo { }
+    /// fn bar<T>(x: T) {
+    ///   let y: for<'a> fn(&'a u8, Foo) = ...;
+    /// }
+    /// ```
+    ///
+    /// The struct name `Foo` is in the root universe U0. But the type
+    /// parameter `T`, introduced on `bar`, is in an extended universe U1
+    /// -- i.e., within `bar`, we can name both `T` and `Foo`, but outside
+    /// of `bar`, we cannot name `T`. Then, within the type of `y`, the
+    /// region `'a` is in a universe U2 that extends U1, because we can
+    /// name it inside the fn type but not outside.
+    ///
+    /// Universes are used to do type- and trait-checking around these
+    /// "forall" binders (also called **universal quantification**). The
+    /// idea is that when, in the body of `bar`, we refer to `T` as a
+    /// type, we aren't referring to any type in particular, but rather a
+    /// kind of "fresh" type that is distinct from all other types we have
+    /// actually declared. This is called a **placeholder** type, and we
+    /// use universes to talk about this. In other words, a type name in
+    /// universe 0 always corresponds to some "ground" type that the user
+    /// declared, but a type name in a non-zero universe is a placeholder
+    /// type -- an idealized representative of "types in general" that we
+    /// use for checking generic functions.
+    #[cfg_attr(feature = "nightly", derive(HashStable_NoContext))]
+    #[encodable]
+    #[orderable]
+    #[debug_format = "U{}"]
+    #[gate_rustc_only]
+    pub struct UniverseIndex {}
+}
+
+impl UniverseIndex {
+    pub const ROOT: UniverseIndex = UniverseIndex::ZERO;
+
+    /// Returns the "next" universe index in order -- this new index
+    /// is considered to extend all previous universes. This
+    /// corresponds to entering a `forall` quantifier. So, for
+    /// example, suppose we have this type in universe `U`:
+    ///
+    /// ```ignore (illustrative)
+    /// for<'a> fn(&'a u32)
+    /// ```
+    ///
+    /// Once we "enter" into this `for<'a>` quantifier, we are in a
+    /// new universe that extends `U` -- in this new universe, we can
+    /// name the region `'a`, but that region was not nameable from
+    /// `U` because it was not in scope there.
+    pub fn next_universe(self) -> UniverseIndex {
+        UniverseIndex::from_u32(self.as_u32().checked_add(1).unwrap())
+    }
+
+    /// Returns `true` if `self` can name a name from `other` -- in other words,
+    /// if the set of names in `self` is a superset of those in
+    /// `other` (`self >= other`).
+    pub fn can_name(self, other: UniverseIndex) -> bool {
+        self >= other
+    }
+
+    /// Returns `true` if `self` cannot name some names from `other` -- in other
+    /// words, if the set of names in `self` is a strict subset of
+    /// those in `other` (`self < other`).
+    pub fn cannot_name(self, other: UniverseIndex) -> bool {
+        self < other
+    }
+
+    /// Returns `true` if `self` is the root universe, otherwise false.
+    pub fn is_root(self) -> bool {
+        self == Self::ROOT
+    }
+}
+
+impl Default for UniverseIndex {
+    fn default() -> Self {
+        Self::ROOT
+    }
+}
+
+rustc_index::newtype_index! {
+    #[cfg_attr(feature = "nightly", derive(HashStable_NoContext))]
+    #[encodable]
+    #[orderable]
+    #[debug_format = "{}"]
+    #[gate_rustc_only]
+    pub struct BoundVar {}
+}
+
+impl<I: Interner> inherent::BoundVarLike<I> for BoundVar {
+    fn var(self) -> BoundVar {
+        self
+    }
+
+    fn assert_eq(self, _var: I::BoundVarKind) {
+        unreachable!("FIXME: We really should have a separate `BoundConst` for consts")
+    }
+}
+
+/// Represents the various closure traits in the language. This
+/// will determine the type of the environment (`self`, in the
+/// desugaring) argument that the closure expects.
+///
+/// You can get the environment type of a closure using
+/// `tcx.closure_env_ty()`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
+pub enum ClosureKind {
+    Fn,
+    FnMut,
+    FnOnce,
+}
+
+impl ClosureKind {
+    /// This is the initial value used when doing upvar inference.
+    pub const LATTICE_BOTTOM: ClosureKind = ClosureKind::Fn;
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ClosureKind::Fn => "Fn",
+            ClosureKind::FnMut => "FnMut",
+            ClosureKind::FnOnce => "FnOnce",
         }
+    }
+
+    /// Returns `true` if a type that impls this closure kind
+    /// must also implement `other`.
+    #[rustfmt::skip]
+    pub fn extends(self, other: ClosureKind) -> bool {
+        use ClosureKind::*;
+        match (self, other) {
+              (Fn, Fn | FnMut | FnOnce)
+            | (FnMut,   FnMut | FnOnce)
+            | (FnOnce,          FnOnce) => true,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for ClosureKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
     }
 }

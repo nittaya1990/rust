@@ -6,7 +6,8 @@ extern crate serde;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct A {}
+//~^ ERROR: you are deriving `serde::Deserialize` on a type that has methods using `unsafe
+pub struct A;
 impl A {
     pub unsafe fn new(_a: i32, _b: i32) -> Self {
         Self {}
@@ -14,13 +15,15 @@ impl A {
 }
 
 #[derive(Deserialize)]
-pub struct B {}
+//~^ ERROR: you are deriving `serde::Deserialize` on a type that has methods using `unsafe
+pub struct B;
 impl B {
     pub unsafe fn unsafe_method(&self) {}
 }
 
 #[derive(Deserialize)]
-pub struct C {}
+//~^ ERROR: you are deriving `serde::Deserialize` on a type that has methods using `unsafe
+pub struct C;
 impl C {
     pub fn unsafe_block(&self) {
         unsafe {}
@@ -28,7 +31,8 @@ impl C {
 }
 
 #[derive(Deserialize)]
-pub struct D {}
+//~^ ERROR: you are deriving `serde::Deserialize` on a type that has methods using `unsafe
+pub struct D;
 impl D {
     pub fn inner_unsafe_fn(&self) {
         unsafe fn inner() {}
@@ -36,7 +40,7 @@ impl D {
 }
 
 // Does not derive `Deserialize`, should be ignored
-pub struct E {}
+pub struct E;
 impl E {
     pub unsafe fn new(_a: i32, _b: i32) -> Self {
         Self {}
@@ -55,13 +59,23 @@ impl E {
 
 // Does not have methods using `unsafe`, should be ignored
 #[derive(Deserialize)]
-pub struct F {}
+pub struct F;
 
 // Check that we honor the `allow` attribute on the ADT
 #[allow(clippy::unsafe_derive_deserialize)]
 #[derive(Deserialize)]
-pub struct G {}
+pub struct G;
 impl G {
+    pub fn unsafe_block(&self) {
+        unsafe {}
+    }
+}
+
+// Check that we honor the `expect` attribute on the ADT
+#[expect(clippy::unsafe_derive_deserialize)]
+#[derive(Deserialize)]
+pub struct H;
+impl H {
     pub fn unsafe_block(&self) {
         unsafe {}
     }

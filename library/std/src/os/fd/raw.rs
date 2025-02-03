@@ -2,20 +2,29 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use crate::fs;
-use crate::io;
+#[cfg(target_os = "hermit")]
+use hermit_abi as libc;
+
+#[cfg(target_os = "hermit")]
+use crate::os::hermit::io::OwnedFd;
+#[cfg(not(target_os = "hermit"))]
 use crate::os::raw;
-#[cfg(doc)]
+#[cfg(all(doc, not(target_arch = "wasm32")))]
 use crate::os::unix::io::AsFd;
 #[cfg(unix)]
 use crate::os::unix::io::OwnedFd;
 #[cfg(target_os = "wasi")]
 use crate::os::wasi::io::OwnedFd;
 use crate::sys_common::{AsInner, IntoInner};
+use crate::{fs, io};
 
 /// Raw file descriptors.
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg(not(target_os = "hermit"))]
 pub type RawFd = raw::c_int;
+#[stable(feature = "rust1", since = "1.0.0")]
+#[cfg(target_os = "hermit")]
+pub type RawFd = i32;
 
 /// A trait to extract the raw file descriptor from an underlying object.
 ///
@@ -40,10 +49,8 @@ pub trait AsRawFd {
     /// ```no_run
     /// use std::fs::File;
     /// # use std::io;
-    /// #[cfg(unix)]
-    /// use std::os::unix::io::{AsRawFd, RawFd};
-    /// #[cfg(target_os = "wasi")]
-    /// use std::os::wasi::io::{AsRawFd, RawFd};
+    /// #[cfg(any(unix, target_os = "wasi"))]
+    /// use std::os::fd::{AsRawFd, RawFd};
     ///
     /// let mut f = File::open("foo.txt")?;
     /// // Note that `raw_fd` is only valid as long as `f` exists.
@@ -73,17 +80,18 @@ pub trait FromRawFd {
     ///
     /// # Safety
     ///
-    /// The `fd` passed in must be a valid an open file descriptor.
+    /// The `fd` passed in must be an [owned file descriptor][io-safety];
+    /// in particular, it must be open.
+    ///
+    /// [io-safety]: io#io-safety
     ///
     /// # Example
     ///
     /// ```no_run
     /// use std::fs::File;
     /// # use std::io;
-    /// #[cfg(unix)]
-    /// use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
-    /// #[cfg(target_os = "wasi")]
-    /// use std::os::wasi::io::{FromRawFd, IntoRawFd, RawFd};
+    /// #[cfg(any(unix, target_os = "wasi"))]
+    /// use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
     ///
     /// let f = File::open("foo.txt")?;
     /// # #[cfg(any(unix, target_os = "wasi"))]
@@ -117,16 +125,15 @@ pub trait IntoRawFd {
     /// ```no_run
     /// use std::fs::File;
     /// # use std::io;
-    /// #[cfg(unix)]
-    /// use std::os::unix::io::{IntoRawFd, RawFd};
-    /// #[cfg(target_os = "wasi")]
-    /// use std::os::wasi::io::{IntoRawFd, RawFd};
+    /// #[cfg(any(unix, target_os = "wasi"))]
+    /// use std::os::fd::{IntoRawFd, RawFd};
     ///
     /// let f = File::open("foo.txt")?;
     /// #[cfg(any(unix, target_os = "wasi"))]
     /// let raw_fd: RawFd = f.into_raw_fd();
     /// # Ok::<(), io::Error>(())
     /// ```
+    #[must_use = "losing the raw file descriptor may leak resources"]
     #[stable(feature = "into_raw_os", since = "1.4.0")]
     fn into_raw_fd(self) -> RawFd;
 }
@@ -220,5 +227,52 @@ impl<'a> AsRawFd for io::StderrLock<'a> {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
         libc::STDERR_FILENO
+    }
+}
+
+/// This impl allows implementing traits that require `AsRawFd` on Arc.
+/// ```
+/// # #[cfg(any(unix, target_os = "wasi"))] mod group_cfg {
+/// # #[cfg(target_os = "wasi")]
+/// # use std::os::wasi::io::AsRawFd;
+/// # #[cfg(unix)]
+/// # use std::os::unix::io::AsRawFd;
+/// use std::net::UdpSocket;
+/// use std::sync::Arc;
+/// trait MyTrait: AsRawFd {
+/// }
+/// impl MyTrait for Arc<UdpSocket> {}
+/// impl MyTrait for Box<UdpSocket> {}
+/// # }
+/// ```
+#[stable(feature = "asrawfd_ptrs", since = "1.63.0")]
+impl<T: AsRawFd> AsRawFd for crate::sync::Arc<T> {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        (**self).as_raw_fd()
+    }
+}
+
+#[stable(feature = "asfd_rc", since = "1.69.0")]
+impl<T: AsRawFd> AsRawFd for crate::rc::Rc<T> {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        (**self).as_raw_fd()
+    }
+}
+
+#[unstable(feature = "unique_rc_arc", issue = "112566")]
+impl<T: AsRawFd + ?Sized> AsRawFd for crate::rc::UniqueRc<T> {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        (**self).as_raw_fd()
+    }
+}
+
+#[stable(feature = "asrawfd_ptrs", since = "1.63.0")]
+impl<T: AsRawFd> AsRawFd for Box<T> {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        (**self).as_raw_fd()
     }
 }

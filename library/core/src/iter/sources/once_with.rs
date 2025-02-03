@@ -1,9 +1,10 @@
+use crate::fmt;
 use crate::iter::{FusedIterator, TrustedLen};
 
 /// Creates an iterator that lazily generates a value exactly once by invoking
 /// the provided closure.
 ///
-/// This is commonly used to adapt a single value generator into a [`chain()`] of
+/// This is commonly used to adapt a single value coroutine into a [`chain()`] of
 /// other kinds of iteration. Maybe you have an iterator that covers almost
 /// everything, but you need an extra special case. Maybe you have a function
 /// which works on iterators, but you only need to process one value.
@@ -66,10 +67,21 @@ pub fn once_with<A, F: FnOnce() -> A>(gen: F) -> OnceWith<F> {
 ///
 /// This `struct` is created by the [`once_with()`] function.
 /// See its documentation for more.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[stable(feature = "iter_once_with", since = "1.43.0")]
 pub struct OnceWith<F> {
     gen: Option<F>,
+}
+
+#[stable(feature = "iter_once_with_debug", since = "1.68.0")]
+impl<F> fmt::Debug for OnceWith<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.gen.is_some() {
+            f.write_str("OnceWith(Some(_))")
+        } else {
+            f.write_str("OnceWith(None)")
+        }
+    }
 }
 
 #[stable(feature = "iter_once_with", since = "1.43.0")]

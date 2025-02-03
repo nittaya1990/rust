@@ -1,9 +1,10 @@
-use jsonpath_lib::select;
-use once_cell::sync::Lazy;
+use std::borrow::Cow;
+use std::process::ExitCode;
+use std::sync::OnceLock;
+use std::{env, fs};
+
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
-use std::borrow::Cow;
-use std::{env, fmt, fs};
 
 mod cache;
 mod config;
@@ -13,91 +14,149 @@ use cache::Cache;
 use config::parse_config;
 use error::CkError;
 
-fn main() -> Result<(), String> {
+fn main() -> ExitCode {
     let config = parse_config(env::args().collect());
 
     let mut failed = Vec::new();
-    let mut cache = Cache::new(&config.doc_dir);
-    let commands = get_commands(&config.template)
-        .map_err(|_| format!("Jsondocck failed for {}", &config.template))?;
+    let mut cache = Cache::new(&config);
+    let Ok(commands) = get_commands(&config.template) else {
+        eprintln!("Jsondocck failed for {}", &config.template);
+        return ExitCode::FAILURE;
+    };
 
     for command in commands {
-        if let Err(e) = check_command(command, &mut cache) {
-            failed.push(e);
+        if let Err(message) = check_command(&command, &mut cache) {
+            failed.push(CkError { command, message });
         }
     }
 
     if failed.is_empty() {
-        Ok(())
+        ExitCode::SUCCESS
     } else {
         for i in failed {
-            eprintln!("{}", i);
+            eprintln!("{}:{}, command failed", config.template, i.command.lineno);
+            eprintln!("{}", i.message)
         }
-        Err(format!("Jsondocck failed for {}", &config.template))
+        ExitCode::FAILURE
     }
 }
 
 #[derive(Debug)]
 pub struct Command {
-    negated: bool,
     kind: CommandKind,
-    args: Vec<String>,
+    path: String,
     lineno: usize,
 }
 
 #[derive(Debug)]
-pub enum CommandKind {
-    Has,
-    Count,
-    Is,
-    Set,
+enum CommandKind {
+    /// `//@ has <path>`
+    ///
+    /// Checks the path exists.
+    HasPath,
+
+    /// `//@ has <path> <value>`
+    ///
+    /// Check one thing at the path  is equal to the value.
+    HasValue { value: String },
+
+    /// `//@ !has <path>`
+    ///
+    /// Checks the path doesn't exist.
+    HasNotPath,
+
+    /// `//@ !has <path> <value>`
+    ///
+    /// Checks the path exists, but doesn't have the given value.
+    HasNotValue { value: String },
+
+    /// `//@ is <path> <value>`
+    ///
+    /// Check the path is the given value.
+    Is { value: String },
+
+    /// `//@ is <path> <value> <value>...`
+    ///
+    /// Check that the path matches to exactly every given value.
+    IsMany { values: Vec<String> },
+
+    /// `//@ !is <path> <value>`
+    ///
+    /// Check the path isn't the given value.
+    IsNot { value: String },
+
+    /// `//@ count <path> <value>`
+    ///
+    /// Check the path has the expected number of matches.
+    CountIs { expected: usize },
+
+    /// `//@ set <name> = <path>`
+    Set { variable: String },
 }
 
 impl CommandKind {
-    fn validate(&self, args: &[String], command_num: usize, lineno: usize) -> bool {
-        let count = match self {
-            CommandKind::Has => (1..=3).contains(&args.len()),
-            CommandKind::Count | CommandKind::Is => 3 == args.len(),
-            CommandKind::Set => 4 == args.len(),
-        };
-
-        if !count {
-            print_err(&format!("Incorrect number of arguments to `@{}`", self), lineno);
-            return false;
-        }
-
-        if args[0] == "-" && command_num == 0 {
-            print_err(&format!("Tried to use the previous path in the first command"), lineno);
-            return false;
-        }
-
-        if let CommandKind::Count = self {
-            if args[2].parse::<usize>().is_err() {
-                print_err(&format!("Third argument to @count must be a valid usize"), lineno);
-                return false;
+    /// Returns both the kind and the path.
+    ///
+    /// Returns `None` if the command isn't from jsondocck (e.g. from compiletest).
+    fn parse<'a>(command_name: &str, negated: bool, args: &'a [String]) -> Option<(Self, &'a str)> {
+        let kind = match (command_name, negated) {
+            ("count", false) => {
+                assert_eq!(args.len(), 2);
+                let expected = args[1].parse().expect("invalid number for `count`");
+                Self::CountIs { expected }
             }
-        }
 
-        true
-    }
-}
+            ("ismany", false) => {
+                // FIXME: Make this >= 3, and migrate len(values)==1 cases to @is
+                assert!(args.len() >= 2, "Not enough args to `ismany`");
+                let values = args[1..].to_owned();
+                Self::IsMany { values }
+            }
 
-impl fmt::Display for CommandKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = match self {
-            CommandKind::Has => "has",
-            CommandKind::Count => "count",
-            CommandKind::Is => "is",
-            CommandKind::Set => "set",
+            ("is", false) => {
+                assert_eq!(args.len(), 2);
+                Self::Is { value: args[1].clone() }
+            }
+            ("is", true) => {
+                assert_eq!(args.len(), 2);
+                Self::IsNot { value: args[1].clone() }
+            }
+
+            ("set", false) => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[1], "=");
+                return Some((Self::Set { variable: args[0].clone() }, &args[2]));
+            }
+
+            ("has", false) => match args {
+                [_path] => Self::HasPath,
+                [_path, value] => Self::HasValue { value: value.clone() },
+                _ => panic!("`//@ has` must have 2 or 3 arguments, but got {args:?}"),
+            },
+            ("has", true) => match args {
+                [_path] => Self::HasNotPath,
+                [_path, value] => Self::HasNotValue { value: value.clone() },
+                _ => panic!("`//@ !has` must have 2 or 3 arguments, but got {args:?}"),
+            },
+
+            (_, false) if KNOWN_DIRECTIVE_NAMES.contains(&command_name) => {
+                return None;
+            }
+            _ => {
+                panic!("Invalid command `//@ {}{command_name}`", if negated { "!" } else { "" })
+            }
         };
-        write!(f, "{}", text)
+
+        Some((kind, &args[0]))
     }
 }
 
-static LINE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static LINE_PATTERN: OnceLock<Regex> = OnceLock::new();
+fn line_pattern() -> Regex {
     RegexBuilder::new(
         r#"
-        \s(?P<invalid>!?)@(?P<negated>!?)
+        //@\s+
+        (?P<negated>!?)
         (?P<cmd>[A-Za-z]+(?:-[A-Za-z]+)*)
         (?P<args>.*)$
     "#,
@@ -106,14 +165,17 @@ static LINE_PATTERN: Lazy<Regex> = Lazy::new(|| {
     .unicode(true)
     .build()
     .unwrap()
-});
+}
 
 fn print_err(msg: &str, lineno: usize) {
     eprintln!("Invalid command: {} on line {}", msg, lineno)
 }
 
-/// Get a list of commands from a file. Does the work of ensuring the commands
-/// are syntactically valid.
+// FIXME: This setup is temporary until we figure out how to improve this situation.
+//        See <https://github.com/rust-lang/rust/issues/125813#issuecomment-2141953780>.
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../compiletest/src/directive-list.rs"));
+
+/// Get a list of commands from a file.
 fn get_commands(template: &str) -> Result<Vec<Command>, ()> {
     let mut commands = Vec::new();
     let mut errors = false;
@@ -122,205 +184,122 @@ fn get_commands(template: &str) -> Result<Vec<Command>, ()> {
     for (lineno, line) in file.split('\n').enumerate() {
         let lineno = lineno + 1;
 
-        let cap = match LINE_PATTERN.captures(line) {
+        let cap = match LINE_PATTERN.get_or_init(line_pattern).captures(line) {
             Some(c) => c,
             None => continue,
         };
 
         let negated = cap.name("negated").unwrap().as_str() == "!";
-        let cmd = cap.name("cmd").unwrap().as_str();
 
-        let cmd = match cmd {
-            "has" => CommandKind::Has,
-            "count" => CommandKind::Count,
-            "is" => CommandKind::Is,
-            "set" => CommandKind::Set,
-            _ => {
-                print_err(&format!("Unrecognized command name `@{}`", cmd), lineno);
-                errors = true;
-                continue;
-            }
-        };
-
-        if let Some(m) = cap.name("invalid") {
-            if m.as_str() == "!" {
-                print_err(
-                    &format!(
-                        "`!@{0}{1}`, (help: try with `@!{1}`)",
-                        if negated { "!" } else { "" },
-                        cmd,
-                    ),
-                    lineno,
-                );
-                errors = true;
-                continue;
-            }
-        }
-
-        let args = cap.name("args").map_or(Some(vec![]), |m| shlex::split(m.as_str()));
-
-        let args = match args {
+        let args_str = &cap["args"];
+        let args = match shlex::split(args_str) {
             Some(args) => args,
             None => {
-                print_err(
-                    &format!(
-                        "Invalid arguments to shlex::split: `{}`",
-                        cap.name("args").unwrap().as_str()
-                    ),
-                    lineno,
-                );
+                print_err(&format!("Invalid arguments to shlex::split: `{args_str}`",), lineno);
                 errors = true;
                 continue;
             }
         };
 
-        if !cmd.validate(&args, commands.len(), lineno) {
-            errors = true;
-            continue;
+        if let Some((kind, path)) = CommandKind::parse(&cap["cmd"], negated, &args) {
+            commands.push(Command { kind, lineno, path: path.to_owned() })
         }
-
-        commands.push(Command { negated, kind: cmd, args, lineno })
     }
 
     if !errors { Ok(commands) } else { Err(()) }
 }
 
-/// Performs the actual work of ensuring a command passes. Generally assumes the command
-/// is syntactically valid.
-fn check_command(command: Command, cache: &mut Cache) -> Result<(), CkError> {
-    // FIXME: Be more granular about why, (e.g. syntax error, count not equal)
-    let result = match command.kind {
-        CommandKind::Has => {
-            match command.args.len() {
-                // @has <path> = file existence
-                1 => cache.get_file(&command.args[0]).is_ok(),
-                // @has <path> <jsonpath> = check path exists
-                2 => {
-                    let val = cache.get_value(&command.args[0])?;
-                    let results = select(&val, &command.args[1]).unwrap();
-                    !results.is_empty()
-                }
-                // @has <path> <jsonpath> <value> = check *any* item matched by path equals value
-                3 => {
-                    let val = cache.get_value(&command.args[0])?;
-                    let results = select(&val, &command.args[1]).unwrap();
-                    let pat = string_to_value(&command.args[2], cache);
-                    let has = results.contains(&pat.as_ref());
-                    // Give better error for when @has check fails
-                    if !command.negated && !has {
-                        return Err(CkError::FailedCheck(
-                            format!(
-                                "{} matched to {:?} but didn't have {:?}",
-                                &command.args[1],
-                                results,
-                                pat.as_ref()
-                            ),
-                            command,
-                        ));
-                    } else {
-                        has
-                    }
-                }
-                _ => unreachable!(),
+/// Performs the actual work of ensuring a command passes.
+fn check_command(command: &Command, cache: &mut Cache) -> Result<(), String> {
+    let matches = cache.select(&command.path);
+    match &command.kind {
+        CommandKind::HasPath => {
+            if matches.is_empty() {
+                return Err("matched to no values".to_owned());
             }
         }
-        CommandKind::Count => {
-            // @count <path> <jsonpath> <count> = Check that the jsonpath matches exactly [count] times
-            assert_eq!(command.args.len(), 3);
-            let expected: usize = command.args[2].parse().unwrap();
-
-            let val = cache.get_value(&command.args[0])?;
-            let results = select(&val, &command.args[1]).unwrap();
-            let eq = results.len() == expected;
-            if !command.negated && !eq {
-                return Err(CkError::FailedCheck(
-                    format!(
-                        "`{}` matched to `{:?}` with length {}, but expected length {}",
-                        &command.args[1],
-                        results,
-                        results.len(),
-                        expected
-                    ),
-                    command,
+        CommandKind::HasNotPath => {
+            if !matches.is_empty() {
+                return Err(format!("matched to {matches:?}, but wanted no matches"));
+            }
+        }
+        CommandKind::HasValue { value } => {
+            let want_value = string_to_value(value, cache);
+            if !matches.contains(&want_value.as_ref()) {
+                return Err(format!("matched to {matches:?}, which didn't contain {want_value:?}"));
+            }
+        }
+        CommandKind::HasNotValue { value } => {
+            let wantnt_value = string_to_value(value, cache);
+            if matches.contains(&wantnt_value.as_ref()) {
+                return Err(format!(
+                    "matched to {matches:?}, which contains unwanted {wantnt_value:?}"
                 ));
-            } else {
-                eq
-            }
-        }
-        CommandKind::Is => {
-            // @has <path> <jsonpath> <value> = check *exactly one* item matched by path, and it equals value
-            assert_eq!(command.args.len(), 3);
-            let val = cache.get_value(&command.args[0])?;
-            let results = select(&val, &command.args[1]).unwrap();
-            let pat = string_to_value(&command.args[2], cache);
-            let is = results.len() == 1 && results[0] == pat.as_ref();
-            if !command.negated && !is {
-                return Err(CkError::FailedCheck(
-                    format!(
-                        "{} matched to {:?}, but expected {:?}",
-                        &command.args[1],
-                        results,
-                        pat.as_ref()
-                    ),
-                    command,
+            } else if matches.is_empty() {
+                return Err(format!(
+                    "got no matches, but expected some matched (not containing {wantnt_value:?}"
                 ));
-            } else {
-                is
             }
         }
-        CommandKind::Set => {
-            // @set <name> = <path> <jsonpath>
-            assert_eq!(command.args.len(), 4);
-            assert_eq!(command.args[1], "=", "Expected an `=`");
-            let val = cache.get_value(&command.args[2])?;
-            let results = select(&val, &command.args[3]).unwrap();
-            assert_eq!(
-                results.len(),
-                1,
-                "Didn't get 1 result for `{}`: got {:?}",
-                command.args[3],
-                results
-            );
-            match results.len() {
-                0 => false,
-                1 => {
-                    let r = cache.variables.insert(command.args[0].clone(), results[0].clone());
-                    assert!(r.is_none(), "Name collision: {} is duplicated", command.args[0]);
-                    true
-                }
-                _ => {
-                    panic!(
-                        "Got multiple results in `@set` for `{}`: {:?}",
-                        &command.args[3], results
-                    );
-                }
-            }
-        }
-    };
 
-    if result == command.negated {
-        if command.negated {
-            Err(CkError::FailedCheck(
-                format!(
-                    "`@!{} {}` matched when it shouldn't",
-                    command.kind,
-                    command.args.join(" ")
-                ),
-                command,
-            ))
-        } else {
-            // FIXME: In the future, try 'peeling back' each step, and see at what level the match failed
-            Err(CkError::FailedCheck(
-                format!(
-                    "`@{} {}` didn't match when it should",
-                    command.kind,
-                    command.args.join(" ")
-                ),
-                command,
-            ))
+        CommandKind::Is { value } => {
+            let want_value = string_to_value(value, cache);
+            let matched = get_one(&matches)?;
+            if matched != want_value.as_ref() {
+                return Err(format!("matched to {matched:?} but want {want_value:?}"));
+            }
         }
-    } else {
-        Ok(())
+        CommandKind::IsNot { value } => {
+            let wantnt_value = string_to_value(value, cache);
+            let matched = get_one(&matches)?;
+            if matched == wantnt_value.as_ref() {
+                return Err(format!("got value {wantnt_value:?}, but want anything else"));
+            }
+        }
+
+        CommandKind::IsMany { values } => {
+            // Serde json doesn't implement Ord or Hash for Value, so we must
+            // use a Vec here. While in theory that makes setwize equality
+            // O(n^2), in practice n will never be large enough to matter.
+            let expected_values =
+                values.iter().map(|v| string_to_value(v, cache)).collect::<Vec<_>>();
+            if expected_values.len() != matches.len() {
+                return Err(format!(
+                    "Expected {} values, but matched to {} values ({:?})",
+                    expected_values.len(),
+                    matches.len(),
+                    matches
+                ));
+            };
+            for got_value in matches {
+                if !expected_values.iter().any(|exp| &**exp == got_value) {
+                    return Err(format!("has match {got_value:?}, which was not expected",));
+                }
+            }
+        }
+        CommandKind::CountIs { expected } => {
+            if *expected != matches.len() {
+                return Err(format!(
+                    "matched to `{matches:?}` with length {}, but expected length {expected}",
+                    matches.len(),
+                ));
+            }
+        }
+        CommandKind::Set { variable } => {
+            let value = get_one(&matches)?;
+            let r = cache.variables.insert(variable.to_owned(), value.clone());
+            assert!(r.is_none(), "name collision: {variable:?} is duplicated");
+        }
+    }
+
+    Ok(())
+}
+
+fn get_one<'a>(matches: &[&'a Value]) -> Result<&'a Value, String> {
+    match matches {
+        [] => Err("matched to no values".to_owned()),
+        [matched] => Ok(matched),
+        _ => Err(format!("matched to multiple values {matches:?}, but want exactly 1")),
     }
 }
 

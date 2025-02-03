@@ -2,12 +2,13 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::ops::{Bound, RangeBounds};
 
-use super::node::{marker, ForceResult::*, Handle, NodeRef};
-
 use SearchBound::*;
 use SearchResult::*;
 
-pub enum SearchBound<T> {
+use super::node::ForceResult::*;
+use super::node::{Handle, NodeRef, marker};
+
+pub(super) enum SearchBound<T> {
     /// An inclusive bound to look for, just like `Bound::Included(T)`.
     Included(T),
     /// An exclusive bound to look for, just like `Bound::Excluded(T)`.
@@ -19,7 +20,7 @@ pub enum SearchBound<T> {
 }
 
 impl<T> SearchBound<T> {
-    pub fn from_range(range_bound: Bound<T>) -> Self {
+    pub(super) fn from_range(range_bound: Bound<T>) -> Self {
         match range_bound {
             Bound::Included(t) => Included(t),
             Bound::Excluded(t) => Excluded(t),
@@ -28,12 +29,12 @@ impl<T> SearchBound<T> {
     }
 }
 
-pub enum SearchResult<BorrowType, K, V, FoundType, GoDownType> {
+pub(super) enum SearchResult<BorrowType, K, V, FoundType, GoDownType> {
     Found(Handle<NodeRef<BorrowType, K, V, FoundType>, marker::KV>),
     GoDown(Handle<NodeRef<BorrowType, K, V, GoDownType>, marker::Edge>),
 }
 
-pub enum IndexResult {
+pub(super) enum IndexResult {
     KV(usize),
     Edge(usize),
 }
@@ -45,7 +46,7 @@ impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Lea
     ///
     /// The result is meaningful only if the tree is ordered by key, like the tree
     /// in a `BTreeMap` is.
-    pub fn search_tree<Q: ?Sized>(
+    pub(super) fn search_tree<Q: ?Sized>(
         mut self,
         key: &Q,
     ) -> SearchResult<BorrowType, K, V, marker::LeafOrInternal, marker::Leaf>
@@ -79,7 +80,7 @@ impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Lea
     /// As a diagnostic service, panics if the range specifies impossible bounds.
     ///
     /// The result is meaningful only if the tree is ordered by key.
-    pub fn search_tree_for_bifurcation<'r, Q: ?Sized, R>(
+    pub(super) fn search_tree_for_bifurcation<'r, Q: ?Sized, R>(
         mut self,
         range: &'r R,
     ) -> Result<
@@ -97,17 +98,28 @@ impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Lea
         K: Borrow<Q>,
         R: RangeBounds<Q>,
     {
+        // Determine if map or set is being searched
+        let is_set = <V as super::set_val::IsSetVal>::is_set_val();
+
         // Inlining these variables should be avoided. We assume the bounds reported by `range`
         // remain the same, but an adversarial implementation could change between calls (#81138).
         let (start, end) = (range.start_bound(), range.end_bound());
         match (start, end) {
             (Bound::Excluded(s), Bound::Excluded(e)) if s == e => {
-                panic!("range start and end are equal and excluded in BTreeMap")
+                if is_set {
+                    panic!("range start and end are equal and excluded in BTreeSet")
+                } else {
+                    panic!("range start and end are equal and excluded in BTreeMap")
+                }
             }
             (Bound::Included(s) | Bound::Excluded(s), Bound::Included(e) | Bound::Excluded(e))
                 if s > e =>
             {
-                panic!("range start is greater than range end in BTreeMap")
+                if is_set {
+                    panic!("range start is greater than range end in BTreeSet")
+                } else {
+                    panic!("range start is greater than range end in BTreeMap")
+                }
             }
             _ => {}
         }
@@ -144,7 +156,7 @@ impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Lea
     /// the matching child node, if `self` is an internal node.
     ///
     /// The result is meaningful only if the tree is ordered by key.
-    pub fn find_lower_bound_edge<'r, Q>(
+    pub(super) fn find_lower_bound_edge<'r, Q>(
         self,
         bound: SearchBound<&'r Q>,
     ) -> (Handle<Self, marker::Edge>, SearchBound<&'r Q>)
@@ -158,7 +170,7 @@ impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Lea
     }
 
     /// Clone of `find_lower_bound_edge` for the upper bound.
-    pub fn find_upper_bound_edge<'r, Q>(
+    pub(super) fn find_upper_bound_edge<'r, Q>(
         self,
         bound: SearchBound<&'r Q>,
     ) -> (Handle<Self, marker::Edge>, SearchBound<&'r Q>)
@@ -180,7 +192,10 @@ impl<BorrowType, K, V, Type> NodeRef<BorrowType, K, V, Type> {
     ///
     /// The result is meaningful only if the tree is ordered by key, like the tree
     /// in a `BTreeMap` is.
-    pub fn search_node<Q: ?Sized>(self, key: &Q) -> SearchResult<BorrowType, K, V, Type, Type>
+    pub(super) fn search_node<Q: ?Sized>(
+        self,
+        key: &Q,
+    ) -> SearchResult<BorrowType, K, V, Type, Type>
     where
         Q: Ord,
         K: Borrow<Q>,

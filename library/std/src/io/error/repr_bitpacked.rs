@@ -28,7 +28,7 @@
 //!
 //! # Layout
 //! Tagged values are 64 bits, with the 2 least significant bits used for the
-//! tag. This means there are there are 4 "variants":
+//! tag. This means there are 4 "variants":
 //!
 //! - **Tag 0b00**: The first variant is equivalent to
 //!   `ErrorData::SimpleMessage`, and holds a `&'static SimpleMessage` directly.
@@ -73,7 +73,7 @@
 //! union Repr {
 //!     // holds integer (Simple/Os) variants, and
 //!     // provides access to the tag bits.
-//!     bits: NonZeroU64,
+//!     bits: NonZero<u64>,
 //!     // Tag is 0, so this is stored untagged.
 //!     msg: &'static SimpleMessage,
 //!     // Tagged (offset) `Box<Custom>` pointer.
@@ -93,7 +93,7 @@
 //!    `io::Result<()>` and `io::Result<usize>` larger, which defeats part of
 //!    the motivation of this bitpacking.
 //!
-//! Storing everything in a `NonZeroUsize` (or some other integer) would be a
+//! Storing everything in a `NonZero<usize>` (or some other integer) would be a
 //! bit more traditional for pointer tagging, but it would lose provenance
 //! information, couldn't be constructed from a `const fn`, and would probably
 //! run into other issues as well.
@@ -102,10 +102,11 @@
 //! to use a pointer type to store something that may hold an integer, some of
 //! the time.
 
-use super::{Custom, ErrorData, ErrorKind, SimpleMessage};
-use alloc::boxed::Box;
-use core::mem::{align_of, size_of};
+use core::marker::PhantomData;
+use core::num::NonZeroUsize;
 use core::ptr::NonNull;
+
+use super::{Custom, ErrorData, ErrorKind, RawOsError, SimpleMessage};
 
 // The 2 least-significant bits are used as tag.
 const TAG_MASK: usize = 0b11;
@@ -114,19 +115,38 @@ const TAG_CUSTOM: usize = 0b01;
 const TAG_OS: usize = 0b10;
 const TAG_SIMPLE: usize = 0b11;
 
+/// The internal representation.
+///
+/// See the module docs for more, this is just a way to hack in a check that we
+/// indeed are not unwind-safe.
+///
+/// ```compile_fail,E0277
+/// fn is_unwind_safe<T: core::panic::UnwindSafe>() {}
+/// is_unwind_safe::<std::io::Error>();
+/// ```
 #[repr(transparent)]
-pub(super) struct Repr(NonNull<()>);
+#[rustc_insignificant_dtor]
+pub(super) struct Repr(NonNull<()>, PhantomData<ErrorData<Box<Custom>>>);
 
 // All the types `Repr` stores internally are Send + Sync, and so is it.
 unsafe impl Send for Repr {}
 unsafe impl Sync for Repr {}
 
 impl Repr {
+    pub(super) fn new(dat: ErrorData<Box<Custom>>) -> Self {
+        match dat {
+            ErrorData::Os(code) => Self::new_os(code),
+            ErrorData::Simple(kind) => Self::new_simple(kind),
+            ErrorData::SimpleMessage(simple_message) => Self::new_simple_message(simple_message),
+            ErrorData::Custom(b) => Self::new_custom(b),
+        }
+    }
+
     pub(super) fn new_custom(b: Box<Custom>) -> Self {
         let p = Box::into_raw(b).cast::<u8>();
         // Should only be possible if an allocator handed out a pointer with
         // wrong alignment.
-        debug_assert_eq!((p as usize & TAG_MASK), 0);
+        debug_assert_eq!(p.addr() & TAG_MASK, 0);
         // Note: We know `TAG_CUSTOM <= size_of::<Custom>()` (static_assert at
         // end of file), and both the start and end of the expression must be
         // valid without address space wraparound due to `Box`'s semantics.
@@ -145,20 +165,23 @@ impl Repr {
         // box, and `TAG_CUSTOM` just... isn't zero -- it's `0b01`). Therefore,
         // `TAG_CUSTOM + p` isn't zero and so `tagged` can't be, and the
         // `new_unchecked` is safe.
-        let res = Self(unsafe { NonNull::new_unchecked(tagged) });
+        let res = Self(unsafe { NonNull::new_unchecked(tagged) }, PhantomData);
         // quickly smoke-check we encoded the right thing (This generally will
-        // only run in libstd's tests, unless the user uses -Zbuild-std)
+        // only run in std's tests, unless the user uses -Zbuild-std)
         debug_assert!(matches!(res.data(), ErrorData::Custom(_)), "repr(custom) encoding failed");
         res
     }
 
     #[inline]
-    pub(super) fn new_os(code: i32) -> Self {
+    pub(super) fn new_os(code: RawOsError) -> Self {
         let utagged = ((code as usize) << 32) | TAG_OS;
         // Safety: `TAG_OS` is not zero, so the result of the `|` is not 0.
-        let res = Self(unsafe { NonNull::new_unchecked(utagged as *mut ()) });
+        let res = Self(
+            NonNull::without_provenance(unsafe { NonZeroUsize::new_unchecked(utagged) }),
+            PhantomData,
+        );
         // quickly smoke-check we encoded the right thing (This generally will
-        // only run in libstd's tests, unless the user uses -Zbuild-std)
+        // only run in std's tests, unless the user uses -Zbuild-std)
         debug_assert!(
             matches!(res.data(), ErrorData::Os(c) if c == code),
             "repr(os) encoding failed for {code}"
@@ -170,9 +193,12 @@ impl Repr {
     pub(super) fn new_simple(kind: ErrorKind) -> Self {
         let utagged = ((kind as usize) << 32) | TAG_SIMPLE;
         // Safety: `TAG_SIMPLE` is not zero, so the result of the `|` is not 0.
-        let res = Self(unsafe { NonNull::new_unchecked(utagged as *mut ()) });
+        let res = Self(
+            NonNull::without_provenance(unsafe { NonZeroUsize::new_unchecked(utagged) }),
+            PhantomData,
+        );
         // quickly smoke-check we encoded the right thing (This generally will
-        // only run in libstd's tests, unless the user uses -Zbuild-std)
+        // only run in std's tests, unless the user uses -Zbuild-std)
         debug_assert!(
             matches!(res.data(), ErrorData::Simple(k) if k == kind),
             "repr(simple) encoding failed {:?}",
@@ -184,7 +210,7 @@ impl Repr {
     #[inline]
     pub(super) const fn new_simple_message(m: &'static SimpleMessage) -> Self {
         // Safety: References are never null.
-        Self(unsafe { NonNull::new_unchecked(m as *const _ as *mut ()) })
+        Self(unsafe { NonNull::new_unchecked(m as *const _ as *mut ()) }, PhantomData)
     }
 
     #[inline]
@@ -228,10 +254,10 @@ unsafe fn decode_repr<C, F>(ptr: NonNull<()>, make_custom: F) -> ErrorData<C>
 where
     F: FnOnce(*mut Custom) -> C,
 {
-    let bits = ptr.as_ptr() as usize;
+    let bits = ptr.as_ptr().addr();
     match bits & TAG_MASK {
         TAG_OS => {
-            let code = ((bits as i64) >> 32) as i32;
+            let code = ((bits as i64) >> 32) as RawOsError;
             ErrorData::Os(code)
         }
         TAG_SIMPLE => {
@@ -244,16 +270,19 @@ where
                 // Using this rather than unwrap meaningfully improves the code
                 // for callers which only care about one variant (usually
                 // `Custom`)
-                core::hint::unreachable_unchecked();
+                unsafe { core::hint::unreachable_unchecked() };
             });
             ErrorData::Simple(kind)
         }
-        TAG_SIMPLE_MESSAGE => ErrorData::SimpleMessage(&*ptr.cast::<SimpleMessage>().as_ptr()),
+        TAG_SIMPLE_MESSAGE => {
+            // SAFETY: per tag
+            unsafe { ErrorData::SimpleMessage(&*ptr.cast::<SimpleMessage>().as_ptr()) }
+        }
         TAG_CUSTOM => {
-            // It would be correct for us to use `ptr::sub` here (see the
+            // It would be correct for us to use `ptr::byte_sub` here (see the
             // comment above the `wrapping_add` call in `new_custom` for why),
             // but it isn't clear that it makes a difference, so we don't.
-            let custom = ptr.as_ptr().cast::<u8>().wrapping_sub(TAG_CUSTOM).cast::<Custom>();
+            let custom = ptr.as_ptr().wrapping_byte_sub(TAG_CUSTOM).cast::<Custom>();
             ErrorData::Custom(make_custom(custom))
         }
         _ => {
@@ -307,7 +336,7 @@ fn kind_from_prim(ek: u32) -> Option<ErrorKind> {
         WriteZero,
         StorageFull,
         NotSeekable,
-        FilesystemQuotaExceeded,
+        QuotaExceeded,
         FileTooLarge,
         ResourceBusy,
         ExecutableFileBusy,
@@ -321,6 +350,7 @@ fn kind_from_prim(ek: u32) -> Option<ErrorKind> {
         UnexpectedEof,
         Unsupported,
         OutOfMemory,
+        InProgress,
         Uncategorized,
     })
 }
@@ -329,7 +359,7 @@ fn kind_from_prim(ek: u32) -> Option<ErrorKind> {
 // that our encoding relies on for correctness and soundness. (Some of these are
 // a bit overly thorough/cautious, admittedly)
 //
-// If any of these are hit on a platform that libstd supports, we should likely
+// If any of these are hit on a platform that std supports, we should likely
 // just use `repr_unpacked.rs` there instead (unless the fix is easy).
 macro_rules! static_assert {
     ($condition:expr) => {
@@ -355,10 +385,10 @@ static_assert!((TAG_MASK + 1).is_power_of_two());
 static_assert!(align_of::<SimpleMessage>() >= TAG_MASK + 1);
 static_assert!(align_of::<Custom>() >= TAG_MASK + 1);
 
-static_assert!(@usize_eq: (TAG_MASK & TAG_SIMPLE_MESSAGE), TAG_SIMPLE_MESSAGE);
-static_assert!(@usize_eq: (TAG_MASK & TAG_CUSTOM), TAG_CUSTOM);
-static_assert!(@usize_eq: (TAG_MASK & TAG_OS), TAG_OS);
-static_assert!(@usize_eq: (TAG_MASK & TAG_SIMPLE), TAG_SIMPLE);
+static_assert!(@usize_eq: TAG_MASK & TAG_SIMPLE_MESSAGE, TAG_SIMPLE_MESSAGE);
+static_assert!(@usize_eq: TAG_MASK & TAG_CUSTOM, TAG_CUSTOM);
+static_assert!(@usize_eq: TAG_MASK & TAG_OS, TAG_OS);
+static_assert!(@usize_eq: TAG_MASK & TAG_SIMPLE, TAG_SIMPLE);
 
 // This is obviously true (`TAG_CUSTOM` is `0b01`), but in `Repr::new_custom` we
 // offset a pointer by this value, and expect it to both be within the same

@@ -1,48 +1,65 @@
-use crate::{ImplTraitContext, Resolver};
-use rustc_ast::visit::{self, FnKind};
-use rustc_ast::walk_list;
+use std::mem;
+
+use rustc_ast::visit::FnKind;
 use rustc_ast::*;
-use rustc_ast_lowering::ResolverAstLowering;
+use rustc_ast_pretty::pprust;
 use rustc_expand::expand::AstFragment;
+use rustc_hir as hir;
+use rustc_hir::def::{CtorKind, CtorOf, DefKind};
 use rustc_hir::def_id::LocalDefId;
-use rustc_hir::definitions::*;
 use rustc_span::hygiene::LocalExpnId;
-use rustc_span::symbol::sym;
-use rustc_span::Span;
+use rustc_span::{Span, Symbol, kw, sym};
 use tracing::debug;
 
-crate fn collect_definitions(
-    resolver: &mut Resolver<'_>,
+use crate::{ImplTraitContext, InvocationParent, Resolver};
+
+pub(crate) fn collect_definitions(
+    resolver: &mut Resolver<'_, '_>,
     fragment: &AstFragment,
     expansion: LocalExpnId,
 ) {
-    let (parent_def, impl_trait_context) = resolver.invocation_parents[&expansion];
-    fragment.visit_with(&mut DefCollector { resolver, parent_def, expansion, impl_trait_context });
+    let InvocationParent { parent_def, impl_trait_context, in_attr } =
+        resolver.invocation_parents[&expansion];
+    let mut visitor = DefCollector { resolver, parent_def, expansion, impl_trait_context, in_attr };
+    fragment.visit_with(&mut visitor);
 }
 
 /// Creates `DefId`s for nodes in the AST.
-struct DefCollector<'a, 'b> {
-    resolver: &'a mut Resolver<'b>,
+struct DefCollector<'a, 'ra, 'tcx> {
+    resolver: &'a mut Resolver<'ra, 'tcx>,
     parent_def: LocalDefId,
     impl_trait_context: ImplTraitContext,
+    in_attr: bool,
     expansion: LocalExpnId,
 }
 
-impl<'a, 'b> DefCollector<'a, 'b> {
-    fn create_def(&mut self, node_id: NodeId, data: DefPathData, span: Span) -> LocalDefId {
+impl<'a, 'ra, 'tcx> DefCollector<'a, 'ra, 'tcx> {
+    fn create_def(
+        &mut self,
+        node_id: NodeId,
+        name: Symbol,
+        def_kind: DefKind,
+        span: Span,
+    ) -> LocalDefId {
         let parent_def = self.parent_def;
-        debug!("create_def(node_id={:?}, data={:?}, parent_def={:?})", node_id, data, parent_def);
-        self.resolver.create_def(
-            parent_def,
-            node_id,
-            data,
-            self.expansion.to_expn_id(),
-            span.with_parent(None),
-        )
+        debug!(
+            "create_def(node_id={:?}, def_kind={:?}, parent_def={:?})",
+            node_id, def_kind, parent_def
+        );
+        self.resolver
+            .create_def(
+                parent_def,
+                node_id,
+                name,
+                def_kind,
+                self.expansion.to_expn_id(),
+                span.with_parent(None),
+            )
+            .def_id()
     }
 
     fn with_parent<F: FnOnce(&mut Self)>(&mut self, parent_def: LocalDefId, f: F) {
-        let orig_parent_def = std::mem::replace(&mut self.parent_def, parent_def);
+        let orig_parent_def = mem::replace(&mut self.parent_def, parent_def);
         f(self);
         self.parent_def = orig_parent_def;
     }
@@ -52,7 +69,7 @@ impl<'a, 'b> DefCollector<'a, 'b> {
         impl_trait_context: ImplTraitContext,
         f: F,
     ) {
-        let orig_itc = std::mem::replace(&mut self.impl_trait_context, impl_trait_context);
+        let orig_itc = mem::replace(&mut self.impl_trait_context, impl_trait_context);
         f(self);
         self.impl_trait_context = orig_itc;
     }
@@ -71,58 +88,77 @@ impl<'a, 'b> DefCollector<'a, 'b> {
             self.visit_macro_invoc(field.id);
         } else {
             let name = field.ident.map_or_else(|| sym::integer(index(self)), |ident| ident.name);
-            let def = self.create_def(field.id, DefPathData::ValueNs(name), field.span);
+            let def = self.create_def(field.id, name, DefKind::Field, field.span);
             self.with_parent(def, |this| visit::walk_field_def(this, field));
         }
     }
 
     fn visit_macro_invoc(&mut self, id: NodeId) {
         let id = id.placeholder_to_expn_id();
-        let old_parent =
-            self.resolver.invocation_parents.insert(id, (self.parent_def, self.impl_trait_context));
+        let old_parent = self.resolver.invocation_parents.insert(id, InvocationParent {
+            parent_def: self.parent_def,
+            impl_trait_context: self.impl_trait_context,
+            in_attr: self.in_attr,
+        });
         assert!(old_parent.is_none(), "parent `LocalDefId` is reset for an invocation");
     }
 }
 
-impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
+impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
     fn visit_item(&mut self, i: &'a Item) {
-        debug!("visit_item: {:?}", i);
-
         // Pick the def data. This need not be unique, but the more
         // information we encapsulate into, the better
-        let def_data = match &i.kind {
-            ItemKind::Impl { .. } => DefPathData::Impl,
-            ItemKind::ForeignMod(..) => DefPathData::ForeignMod,
-            ItemKind::Mod(..)
-            | ItemKind::Trait(..)
-            | ItemKind::TraitAlias(..)
-            | ItemKind::Enum(..)
-            | ItemKind::Struct(..)
-            | ItemKind::Union(..)
-            | ItemKind::ExternCrate(..)
-            | ItemKind::TyAlias(..) => DefPathData::TypeNs(i.ident.name),
-            ItemKind::Static(..) | ItemKind::Const(..) | ItemKind::Fn(..) => {
-                DefPathData::ValueNs(i.ident.name)
+        let mut opt_macro_data = None;
+        let def_kind = match &i.kind {
+            ItemKind::Impl(i) => DefKind::Impl { of_trait: i.of_trait.is_some() },
+            ItemKind::ForeignMod(..) => DefKind::ForeignMod,
+            ItemKind::Mod(..) => DefKind::Mod,
+            ItemKind::Trait(..) => DefKind::Trait,
+            ItemKind::TraitAlias(..) => DefKind::TraitAlias,
+            ItemKind::Enum(..) => DefKind::Enum,
+            ItemKind::Struct(..) => DefKind::Struct,
+            ItemKind::Union(..) => DefKind::Union,
+            ItemKind::ExternCrate(..) => DefKind::ExternCrate,
+            ItemKind::TyAlias(..) => DefKind::TyAlias,
+            ItemKind::Static(s) => DefKind::Static {
+                safety: hir::Safety::Safe,
+                mutability: s.mutability,
+                nested: false,
+            },
+            ItemKind::Const(..) => DefKind::Const,
+            ItemKind::Fn(..) | ItemKind::Delegation(..) => DefKind::Fn,
+            ItemKind::MacroDef(def) => {
+                let edition = i.span.edition();
+                let macro_data =
+                    self.resolver.compile_macro(def, i.ident, &i.attrs, i.span, i.id, edition);
+                let macro_kind = macro_data.ext.macro_kind();
+                opt_macro_data = Some(macro_data);
+                DefKind::Macro(macro_kind)
             }
-            ItemKind::MacroDef(..) => DefPathData::MacroNs(i.ident.name),
-            ItemKind::MacCall(..) => {
-                visit::walk_item(self, i);
+            ItemKind::GlobalAsm(..) => DefKind::GlobalAsm,
+            ItemKind::Use(..) => return visit::walk_item(self, i),
+            ItemKind::MacCall(..) | ItemKind::DelegationMac(..) => {
                 return self.visit_macro_invoc(i.id);
             }
-            ItemKind::GlobalAsm(..) => DefPathData::Misc,
-            ItemKind::Use(..) => {
-                return visit::walk_item(self, i);
-            }
         };
-        let def = self.create_def(i.id, def_data, i.span);
+        let def_id = self.create_def(i.id, i.ident.name, def_kind, i.span);
 
-        self.with_parent(def, |this| {
+        if let Some(macro_data) = opt_macro_data {
+            self.resolver.macro_map.insert(def_id.to_def_id(), macro_data);
+        }
+
+        self.with_parent(def_id, |this| {
             this.with_impl_trait(ImplTraitContext::Existential, |this| {
                 match i.kind {
                     ItemKind::Struct(ref struct_def, _) | ItemKind::Union(ref struct_def, _) => {
                         // If this is a unit or tuple-like struct, register the constructor.
-                        if let Some(ctor_hir_id) = struct_def.ctor_id() {
-                            this.create_def(ctor_hir_id, DefPathData::Ctor, i.span);
+                        if let Some((ctor_kind, ctor_node_id)) = CtorKind::from_ast(struct_def) {
+                            this.create_def(
+                                ctor_node_id,
+                                kw::Empty,
+                                DefKind::Ctor(CtorOf::Struct, ctor_kind),
+                                i.span,
+                            );
                         }
                     }
                     _ => {}
@@ -133,67 +169,94 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
     }
 
     fn visit_fn(&mut self, fn_kind: FnKind<'a>, span: Span, _: NodeId) {
-        if let FnKind::Fn(_, _, sig, _, body) = fn_kind {
-            if let Async::Yes { closure_id, return_impl_trait_id, .. } = sig.header.asyncness {
-                let return_impl_trait_id =
-                    self.create_def(return_impl_trait_id, DefPathData::ImplTrait, span);
+        match fn_kind {
+            FnKind::Fn(
+                _ctxt,
+                _ident,
+                _vis,
+                Fn { sig: FnSig { header, decl, span: _ }, generics, body, .. },
+            ) if let Some(coroutine_kind) = header.coroutine_kind => {
+                self.visit_fn_header(header);
+                self.visit_generics(generics);
 
                 // For async functions, we need to create their inner defs inside of a
                 // closure to match their desugared representation. Besides that,
                 // we must mirror everything that `visit::walk_fn` below does.
-                self.visit_fn_header(&sig.header);
-                for param in &sig.decl.inputs {
+                let FnDecl { inputs, output } = &**decl;
+                for param in inputs {
                     self.visit_param(param);
                 }
-                self.with_parent(return_impl_trait_id, |this| {
-                    this.visit_fn_ret_ty(&sig.decl.output)
-                });
-                let closure_def = self.create_def(closure_id, DefPathData::ClosureExpr, span);
-                self.with_parent(closure_def, |this| walk_list!(this, visit_block, body));
-                return;
-            }
-        }
 
-        visit::walk_fn(self, fn_kind, span);
+                let (return_id, return_span) = coroutine_kind.return_id();
+                let return_def =
+                    self.create_def(return_id, kw::Empty, DefKind::OpaqueTy, return_span);
+                self.with_parent(return_def, |this| this.visit_fn_ret_ty(output));
+
+                // If this async fn has no body (i.e. it's an async fn signature in a trait)
+                // then the closure_def will never be used, and we should avoid generating a
+                // def-id for it.
+                if let Some(body) = body {
+                    let closure_def = self.create_def(
+                        coroutine_kind.closure_id(),
+                        kw::Empty,
+                        DefKind::Closure,
+                        span,
+                    );
+                    self.with_parent(closure_def, |this| this.visit_block(body));
+                }
+            }
+            FnKind::Closure(binder, Some(coroutine_kind), decl, body) => {
+                self.visit_closure_binder(binder);
+                visit::walk_fn_decl(self, decl);
+
+                // Async closures desugar to closures inside of closures, so
+                // we must create two defs.
+                let coroutine_def =
+                    self.create_def(coroutine_kind.closure_id(), kw::Empty, DefKind::Closure, span);
+                self.with_parent(coroutine_def, |this| this.visit_expr(body));
+            }
+            _ => visit::walk_fn(self, fn_kind),
+        }
     }
 
     fn visit_use_tree(&mut self, use_tree: &'a UseTree, id: NodeId, _nested: bool) {
-        self.create_def(id, DefPathData::Misc, use_tree.span);
-        match use_tree.kind {
-            UseTreeKind::Simple(_, id1, id2) => {
-                self.create_def(id1, DefPathData::Misc, use_tree.prefix.span);
-                self.create_def(id2, DefPathData::Misc, use_tree.prefix.span);
-            }
-            UseTreeKind::Glob => (),
-            UseTreeKind::Nested(..) => {}
-        }
+        self.create_def(id, kw::Empty, DefKind::Use, use_tree.span);
         visit::walk_use_tree(self, use_tree, id);
     }
 
-    fn visit_foreign_item(&mut self, foreign_item: &'a ForeignItem) {
-        if let ForeignItemKind::MacCall(_) = foreign_item.kind {
-            return self.visit_macro_invoc(foreign_item.id);
-        }
+    fn visit_foreign_item(&mut self, fi: &'a ForeignItem) {
+        let def_kind = match fi.kind {
+            ForeignItemKind::Static(box StaticItem { ty: _, mutability, expr: _, safety }) => {
+                let safety = match safety {
+                    ast::Safety::Unsafe(_) | ast::Safety::Default => hir::Safety::Unsafe,
+                    ast::Safety::Safe(_) => hir::Safety::Safe,
+                };
 
-        let def = self.create_def(
-            foreign_item.id,
-            DefPathData::ValueNs(foreign_item.ident.name),
-            foreign_item.span,
-        );
+                DefKind::Static { safety, mutability, nested: false }
+            }
+            ForeignItemKind::Fn(_) => DefKind::Fn,
+            ForeignItemKind::TyAlias(_) => DefKind::ForeignTy,
+            ForeignItemKind::MacCall(_) => return self.visit_macro_invoc(fi.id),
+        };
 
-        self.with_parent(def, |this| {
-            visit::walk_foreign_item(this, foreign_item);
-        });
+        let def = self.create_def(fi.id, fi.ident.name, def_kind, fi.span);
+
+        self.with_parent(def, |this| visit::walk_item(this, fi));
     }
 
     fn visit_variant(&mut self, v: &'a Variant) {
         if v.is_placeholder {
             return self.visit_macro_invoc(v.id);
         }
-        let def = self.create_def(v.id, DefPathData::TypeNs(v.ident.name), v.span);
+        let def = self.create_def(v.id, v.ident.name, DefKind::Variant, v.span);
         self.with_parent(def, |this| {
-            if let Some(ctor_hir_id) = v.data.ctor_id() {
-                this.create_def(ctor_hir_id, DefPathData::Ctor, v.span);
+            if let Some((ctor_kind, ctor_node_id)) = CtorKind::from_ast(&v.data) {
+                this.create_def(
+                    ctor_node_id,
+                    kw::Empty,
+                    DefKind::Ctor(CtorOf::Variant, ctor_kind),
+                    v.span,
+                );
             }
             visit::walk_variant(this, v)
         });
@@ -213,13 +276,12 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
             self.visit_macro_invoc(param.id);
             return;
         }
-        let name = param.ident.name;
-        let def_path_data = match param.kind {
-            GenericParamKind::Lifetime { .. } => DefPathData::LifetimeNs(name),
-            GenericParamKind::Type { .. } => DefPathData::TypeNs(name),
-            GenericParamKind::Const { .. } => DefPathData::ValueNs(name),
+        let def_kind = match param.kind {
+            GenericParamKind::Lifetime { .. } => DefKind::LifetimeParam,
+            GenericParamKind::Type { .. } => DefKind::TyParam,
+            GenericParamKind::Const { .. } => DefKind::ConstParam,
         };
-        self.create_def(param.id, def_path_data, param.ident.span);
+        self.create_def(param.id, param.ident.name, def_kind, param.ident.span);
 
         // impl-Trait can happen inside generic parameters, like
         // ```
@@ -227,19 +289,22 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
         // ```
         //
         // In that case, the impl-trait is lowered as an additional generic parameter.
-        self.with_impl_trait(ImplTraitContext::Universal(self.parent_def), |this| {
+        self.with_impl_trait(ImplTraitContext::Universal, |this| {
             visit::walk_generic_param(this, param)
         });
     }
 
     fn visit_assoc_item(&mut self, i: &'a AssocItem, ctxt: visit::AssocCtxt) {
-        let def_data = match &i.kind {
-            AssocItemKind::Fn(..) | AssocItemKind::Const(..) => DefPathData::ValueNs(i.ident.name),
-            AssocItemKind::TyAlias(..) => DefPathData::TypeNs(i.ident.name),
-            AssocItemKind::MacCall(..) => return self.visit_macro_invoc(i.id),
+        let def_kind = match &i.kind {
+            AssocItemKind::Fn(..) | AssocItemKind::Delegation(..) => DefKind::AssocFn,
+            AssocItemKind::Const(..) => DefKind::AssocConst,
+            AssocItemKind::Type(..) => DefKind::AssocTy,
+            AssocItemKind::MacCall(..) | AssocItemKind::DelegationMac(..) => {
+                return self.visit_macro_invoc(i.id);
+            }
         };
 
-        let def = self.create_def(i.id, def_data, i.span);
+        let def = self.create_def(i.id, i.ident.name, def_kind, i.span);
         self.with_parent(def, |this| visit::walk_assoc_item(this, i, ctxt));
     }
 
@@ -251,50 +316,60 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
     }
 
     fn visit_anon_const(&mut self, constant: &'a AnonConst) {
-        let def = self.create_def(constant.id, DefPathData::AnonConst, constant.value.span);
-        self.with_parent(def, |this| visit::walk_anon_const(this, constant));
+        let parent =
+            self.create_def(constant.id, kw::Empty, DefKind::AnonConst, constant.value.span);
+        self.with_parent(parent, |this| visit::walk_anon_const(this, constant));
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
         let parent_def = match expr.kind {
             ExprKind::MacCall(..) => return self.visit_macro_invoc(expr.id),
-            ExprKind::Closure(_, asyncness, ..) => {
-                // Async closures desugar to closures inside of closures, so
-                // we must create two defs.
-                let closure_def = self.create_def(expr.id, DefPathData::ClosureExpr, expr.span);
-                match asyncness {
-                    Async::Yes { closure_id, .. } => {
-                        self.create_def(closure_id, DefPathData::ClosureExpr, expr.span)
-                    }
-                    Async::No => closure_def,
-                }
+            ExprKind::Closure(..) | ExprKind::Gen(..) => {
+                self.create_def(expr.id, kw::Empty, DefKind::Closure, expr.span)
             }
-            ExprKind::Async(_, async_id, _) => {
-                self.create_def(async_id, DefPathData::ClosureExpr, expr.span)
+            ExprKind::ConstBlock(ref constant) => {
+                for attr in &expr.attrs {
+                    visit::walk_attribute(self, attr);
+                }
+                let def = self.create_def(
+                    constant.id,
+                    kw::Empty,
+                    DefKind::InlineConst,
+                    constant.value.span,
+                );
+                self.with_parent(def, |this| visit::walk_anon_const(this, constant));
+                return;
             }
             _ => self.parent_def,
         };
 
-        self.with_parent(parent_def, |this| visit::walk_expr(this, expr));
+        self.with_parent(parent_def, |this| visit::walk_expr(this, expr))
     }
 
     fn visit_ty(&mut self, ty: &'a Ty) {
-        match ty.kind {
+        match &ty.kind {
             TyKind::MacCall(..) => self.visit_macro_invoc(ty.id),
-            TyKind::ImplTrait(node_id, _) => {
-                let parent_def = match self.impl_trait_context {
-                    ImplTraitContext::Universal(item_def) => self.resolver.create_def(
-                        item_def,
-                        node_id,
-                        DefPathData::ImplTrait,
-                        self.expansion.to_expn_id(),
-                        ty.span,
-                    ),
-                    ImplTraitContext::Existential => {
-                        self.create_def(node_id, DefPathData::ImplTrait, ty.span)
-                    }
+            TyKind::ImplTrait(id, _) => {
+                // HACK: pprust breaks strings with newlines when the type
+                // gets too long. We don't want these to show up in compiler
+                // output or built artifacts, so replace them here...
+                // Perhaps we should instead format APITs more robustly.
+                let name = Symbol::intern(&pprust::ty_to_string(ty).replace('\n', " "));
+                let kind = match self.impl_trait_context {
+                    ImplTraitContext::Universal => DefKind::TyParam,
+                    ImplTraitContext::Existential => DefKind::OpaqueTy,
+                    ImplTraitContext::InBinding => return visit::walk_ty(self, ty),
                 };
-                self.with_parent(parent_def, |this| visit::walk_ty(this, ty))
+                let id = self.create_def(*id, name, kind, ty.span);
+                match self.impl_trait_context {
+                    // Do not nest APIT, as we desugar them as `impl_trait: bounds`,
+                    // so the `impl_trait` node is not a parent to `bounds`.
+                    ImplTraitContext::Universal => visit::walk_ty(self, ty),
+                    ImplTraitContext::Existential => {
+                        self.with_parent(id, |this| visit::walk_ty(this, ty))
+                    }
+                    ImplTraitContext::InBinding => unreachable!(),
+                };
             }
             _ => visit::walk_ty(self, ty),
         }
@@ -303,6 +378,13 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         match stmt.kind {
             StmtKind::MacCall(..) => self.visit_macro_invoc(stmt.id),
+            // FIXME(impl_trait_in_bindings): We don't really have a good way of
+            // introducing the right `ImplTraitContext` here for all the cases we
+            // care about, in case we want to introduce ITIB to other positions
+            // such as turbofishes (e.g. `foo::<impl Fn()>(|| {})`).
+            StmtKind::Let(ref local) => self.with_impl_trait(ImplTraitContext::InBinding, |this| {
+                visit::walk_local(this, local)
+            }),
             _ => visit::walk_stmt(self, stmt),
         }
     }
@@ -331,9 +413,7 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
         if p.is_placeholder {
             self.visit_macro_invoc(p.id)
         } else {
-            self.with_impl_trait(ImplTraitContext::Universal(self.parent_def), |this| {
-                visit::walk_param(this, p)
-            })
+            self.with_impl_trait(ImplTraitContext::Universal, |this| visit::walk_param(this, p))
         }
     }
 
@@ -349,5 +429,11 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
         } else {
             visit::walk_crate(self, krate)
         }
+    }
+
+    fn visit_attribute(&mut self, attr: &'a Attribute) -> Self::Result {
+        let orig_in_attr = mem::replace(&mut self.in_attr, true);
+        visit::walk_attribute(self, attr);
+        self.in_attr = orig_in_attr;
     }
 }

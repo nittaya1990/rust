@@ -4,11 +4,11 @@ use rustc_hir::intravisit::nested_filter::NestedFilter;
 /// that are inside of an item-like.
 ///
 /// Notably, possible occurrences of bodies in non-item-like things
-/// include: closures/generators, inline `const {}` blocks, and
+/// include: closures/coroutines, inline `const {}` blocks, and
 /// constant arguments of types, e.g. in `let _: [(); /* HERE */];`.
 ///
 /// **This is the most common choice.** A very common pattern is
-/// to use `visit_all_item_likes()` as an outer loop,
+/// to use `visit_all_item_likes_in_crate()` as an outer loop,
 /// and to have the visitor that visits the contents of each item
 /// using this setting.
 pub struct OnlyBodies(());

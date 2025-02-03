@@ -1,7 +1,5 @@
-// run-rustfix
-
 #![warn(clippy::strlen_on_c_strings)]
-#![allow(dead_code)]
+#![allow(dead_code, clippy::manual_c_str_literals)]
 #![feature(rustc_private)]
 extern crate libc;
 

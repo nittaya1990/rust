@@ -1,5 +1,4 @@
-// run-rustfix
-// aux-build:proc_macro_derive.rs
+//@aux-build:proc_macro_derive.rs
 
 #![warn(clippy::use_self)]
 #![allow(dead_code, unreachable_code)]
@@ -7,7 +6,9 @@
     clippy::should_implement_trait,
     clippy::upper_case_acronyms,
     clippy::from_over_into,
-    clippy::self_named_constructors
+    clippy::self_named_constructors,
+    clippy::needless_lifetimes,
+    clippy::missing_transmute_annotations
 )]
 
 #[macro_use]
@@ -16,7 +17,7 @@ extern crate proc_macro_derive;
 fn main() {}
 
 mod use_self {
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         fn new() -> Foo {
@@ -35,7 +36,7 @@ mod use_self {
 }
 
 mod better {
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         fn new() -> Self {
@@ -54,6 +55,7 @@ mod better {
 }
 
 mod lifetimes {
+    #[derive(Clone, Copy)]
     struct Foo<'a> {
         foo_str: &'a str,
     }
@@ -69,10 +71,18 @@ mod lifetimes {
             Foo { foo_str: "foo" }
         }
 
-        // FIXME: the lint does not handle lifetimed struct
-        // `Self` should be applicable here
         fn clone(&self) -> Foo<'a> {
             Foo { foo_str: self.foo_str }
+        }
+
+        // Cannot replace with `Self` because the lifetime is not `'a`.
+        fn eq<'b>(&self, other: Foo<'b>) -> bool {
+            let x: Foo<'_> = other;
+            self.foo_str == other.foo_str
+        }
+
+        fn f(&self) -> Foo<'_> {
+            *self
         }
     }
 }
@@ -123,7 +133,7 @@ mod macros {
         };
     }
 
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         use_self_expand!(); // Should not lint in local macros
@@ -134,7 +144,7 @@ mod macros {
 }
 
 mod nesting {
-    struct Foo {}
+    struct Foo;
     impl Foo {
         fn foo() {
             #[allow(unused_imports)]
@@ -209,7 +219,7 @@ mod issue3410 {
 #[allow(clippy::no_effect, path_statements)]
 mod rustfix {
     mod nested {
-        pub struct A {}
+        pub struct A;
     }
 
     impl nested::A {
@@ -227,7 +237,7 @@ mod rustfix {
 }
 
 mod issue3567 {
-    struct TestStruct {}
+    struct TestStruct;
     impl TestStruct {
         fn from_something() -> Self {
             Self {}
@@ -248,7 +258,7 @@ mod issue3567 {
 mod paths_created_by_lowering {
     use std::ops::Range;
 
-    struct S {}
+    struct S;
 
     impl S {
         const A: usize = 0;
@@ -382,7 +392,7 @@ mod issue4305 {
 }
 
 mod lint_at_item_level {
-    struct Foo {}
+    struct Foo;
 
     #[allow(clippy::use_self)]
     impl Foo {
@@ -400,7 +410,7 @@ mod lint_at_item_level {
 }
 
 mod lint_at_impl_item_level {
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         #[allow(clippy::use_self)]
@@ -433,8 +443,8 @@ mod issue4734 {
 mod nested_paths {
     use std::convert::Into;
     mod submod {
-        pub struct B {}
-        pub struct C {}
+        pub struct B;
+        pub struct C;
 
         impl Into<C> for B {
             fn into(self) -> C {
@@ -539,6 +549,121 @@ mod use_self_in_pat {
             if let Foo::Bar = self {
                 unimplemented!()
             }
+        }
+    }
+}
+
+mod issue8845 {
+    pub enum Something {
+        Num(u8),
+        TupleNums(u8, u8),
+        StructNums { one: u8, two: u8 },
+    }
+
+    struct Foo(u8);
+
+    struct Bar {
+        x: u8,
+        y: usize,
+    }
+
+    impl Something {
+        fn get_value(&self) -> u8 {
+            match self {
+                Something::Num(n) => *n,
+                Something::TupleNums(n, _m) => *n,
+                Something::StructNums { one, two: _ } => *one,
+            }
+        }
+
+        fn use_crate(&self) -> u8 {
+            match self {
+                crate::issue8845::Something::Num(n) => *n,
+                crate::issue8845::Something::TupleNums(n, _m) => *n,
+                crate::issue8845::Something::StructNums { one, two: _ } => *one,
+            }
+        }
+
+        fn imported_values(&self) -> u8 {
+            use Something::*;
+            match self {
+                Num(n) => *n,
+                TupleNums(n, _m) => *n,
+                StructNums { one, two: _ } => *one,
+            }
+        }
+    }
+
+    impl Foo {
+        fn get_value(&self) -> u8 {
+            let Foo(x) = self;
+            *x
+        }
+
+        fn use_crate(&self) -> u8 {
+            let crate::issue8845::Foo(x) = self;
+            *x
+        }
+    }
+
+    impl Bar {
+        fn get_value(&self) -> u8 {
+            let Bar { x, .. } = self;
+            *x
+        }
+
+        fn use_crate(&self) -> u8 {
+            let crate::issue8845::Bar { x, .. } = self;
+            *x
+        }
+    }
+}
+
+mod issue6902 {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub enum Foo {
+        Bar = 1,
+    }
+}
+
+#[clippy::msrv = "1.36"]
+fn msrv_1_36() {
+    enum E {
+        A,
+    }
+
+    impl E {
+        fn foo(self) {
+            match self {
+                E::A => {},
+            }
+        }
+    }
+}
+
+#[clippy::msrv = "1.37"]
+fn msrv_1_37() {
+    enum E {
+        A,
+    }
+
+    impl E {
+        fn foo(self) {
+            match self {
+                E::A => {},
+            }
+        }
+    }
+}
+
+mod issue_10371 {
+    struct Val<const V: i32> {}
+
+    impl<const V: i32> From<Val<V>> for i32 {
+        fn from(_: Val<V>) -> Self {
+            todo!()
         }
     }
 }

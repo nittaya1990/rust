@@ -1,36 +1,37 @@
 error: this closure returns the unit type which also implements Ord
-  --> $DIR/unit_return_expecting_ord.rs:18:25
+  --> tests/ui/unit_return_expecting_ord.rs:18:25
    |
 LL |     structs.sort_by_key(|s| {
    |                         ^^^
    |
-   = note: `-D clippy::unit-return-expecting-ord` implied by `-D warnings`
 help: probably caused by this trailing semicolon
-  --> $DIR/unit_return_expecting_ord.rs:19:24
+  --> tests/ui/unit_return_expecting_ord.rs:20:24
    |
 LL |         double(s.field);
    |                        ^
+   = note: `-D clippy::unit-return-expecting-ord` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::unit_return_expecting_ord)]`
 
 error: this closure returns the unit type which also implements PartialOrd
-  --> $DIR/unit_return_expecting_ord.rs:22:30
+  --> tests/ui/unit_return_expecting_ord.rs:23:30
    |
 LL |     structs.is_sorted_by_key(|s| {
    |                              ^^^
    |
 help: probably caused by this trailing semicolon
-  --> $DIR/unit_return_expecting_ord.rs:23:24
+  --> tests/ui/unit_return_expecting_ord.rs:25:24
    |
 LL |         double(s.field);
    |                        ^
 
 error: this closure returns the unit type which also implements PartialOrd
-  --> $DIR/unit_return_expecting_ord.rs:25:30
+  --> tests/ui/unit_return_expecting_ord.rs:27:30
    |
 LL |     structs.is_sorted_by_key(|s| {
    |                              ^^^
 
 error: this closure returns the unit type which also implements Ord
-  --> $DIR/unit_return_expecting_ord.rs:35:25
+  --> tests/ui/unit_return_expecting_ord.rs:38:25
    |
 LL |     structs.sort_by_key(|s| unit(s.field));
    |                         ^^^

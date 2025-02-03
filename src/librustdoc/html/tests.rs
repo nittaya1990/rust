@@ -1,5 +1,6 @@
+use rustc_span::{Symbol, sym};
+
 use crate::html::format::href_relative_parts;
-use rustc_span::{sym, Symbol};
 
 fn assert_relative_path(expected: &[Symbol], relative_to_fqp: &[Symbol], fqp: &[Symbol]) {
     // No `create_default_session_globals_then` call is needed here because all

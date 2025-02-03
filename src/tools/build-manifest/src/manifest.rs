@@ -1,7 +1,10 @@
-use crate::Builder;
-use serde::{Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use serde::{Serialize, Serializer};
+
+use crate::Builder;
+use crate::versions::PkgType;
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -87,7 +90,7 @@ impl Target {
         let gz = tarball_variant(builder, &base_path, "gz");
         let xz = tarball_variant(builder, &base_path, "xz");
 
-        if gz.is_none() {
+        if gz.is_none() && xz.is_none() {
             return Self::unavailable();
         }
 
@@ -116,8 +119,8 @@ pub(crate) struct Component {
 }
 
 impl Component {
-    pub(crate) fn from_str(pkg: &str, target: &str) -> Self {
-        Self { pkg: pkg.to_string(), target: target.to_string() }
+    pub(crate) fn from_pkg(pkg: &PkgType, target: &str) -> Self {
+        Self { pkg: pkg.manifest_component_name(), target: target.to_string() }
     }
 }
 

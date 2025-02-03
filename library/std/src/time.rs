@@ -1,6 +1,6 @@
 //! Temporal quantification.
 //!
-//! # Examples:
+//! # Examples
 //!
 //! There are multiple ways to create a new [`Duration`]:
 //!
@@ -34,17 +34,16 @@
 #[cfg(test)]
 mod tests;
 
+#[stable(feature = "time", since = "1.3.0")]
+pub use core::time::Duration;
+#[stable(feature = "duration_checked_float", since = "1.66.0")]
+pub use core::time::TryFromFloatSecsError;
+
 use crate::error::Error;
 use crate::fmt;
 use crate::ops::{Add, AddAssign, Sub, SubAssign};
 use crate::sys::time;
-use crate::sys_common::FromInner;
-
-#[stable(feature = "time", since = "1.3.0")]
-pub use core::time::Duration;
-
-#[unstable(feature = "duration_checked_float", issue = "83400")]
-pub use core::time::FromFloatSecsError;
+use crate::sys_common::{FromInner, IntoInner};
 
 /// A measurement of a monotonically nondecreasing clock.
 /// Opaque and useful only with [`Duration`].
@@ -58,6 +57,8 @@ pub use core::time::FromFloatSecsError;
 /// some seconds may be longer than others). An instant may jump forwards or
 /// experience time dilation (slow down or speed up), but it will never go
 /// backwards.
+/// As part of this non-guarantee it is also not specified whether system suspends count as
+/// elapsed time or not. The behavior varies across platforms and Rust versions.
 ///
 /// Instants are opaque types that can only be compared to one another. There is
 /// no method to get "the number of seconds" from an instant. Instead, it only
@@ -95,30 +96,32 @@ pub use core::time::FromFloatSecsError;
 /// use std::time::{Instant, Duration};
 ///
 /// let now = Instant::now();
-/// let max_nanoseconds = u64::MAX / 1_000_000_000;
-/// let duration = Duration::new(max_nanoseconds, 0);
+/// let max_seconds = u64::MAX / 1_000_000_000;
+/// let duration = Duration::new(max_seconds, 0);
 /// println!("{:?}", now + duration);
 /// ```
 ///
 /// # Underlying System calls
-/// Currently, the following system calls are being used to get the current time using `now()`:
+///
+/// The following system calls are [currently] being used by `now()` to find out
+/// the current time:
 ///
 /// |  Platform |               System call                                            |
 /// |-----------|----------------------------------------------------------------------|
 /// | SGX       | [`insecure_time` usercall]. More information on [timekeeping in SGX] |
 /// | UNIX      | [clock_gettime (Monotonic Clock)]                                    |
-/// | Darwin    | [mach_absolute_time]                                                 |
+/// | Darwin    | [clock_gettime (Monotonic Clock)]                                    |
 /// | VXWorks   | [clock_gettime (Monotonic Clock)]                                    |
 /// | SOLID     | `get_tim`                                                            |
 /// | WASI      | [__wasi_clock_time_get (Monotonic Clock)]                            |
 /// | Windows   | [QueryPerformanceCounter]                                            |
 ///
+/// [currently]: crate::io#platform-specific-behavior
 /// [QueryPerformanceCounter]: https://docs.microsoft.com/en-us/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter
 /// [`insecure_time` usercall]: https://edp.fortanix.com/docs/api/fortanix_sgx_abi/struct.Usercalls.html#method.insecure_time
 /// [timekeeping in SGX]: https://edp.fortanix.com/docs/concepts/rust-std/#codestdtimecode
-/// [__wasi_clock_time_get (Monotonic Clock)]: https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/docs.md#clock_time_get
+/// [__wasi_clock_time_get (Monotonic Clock)]: https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md#clock_time_get
 /// [clock_gettime (Monotonic Clock)]: https://linux.die.net/man/3/clock_gettime
-/// [mach_absolute_time]: https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/KernelProgramming/services/services.html
 ///
 /// **Disclaimer:** These system calls might change over time.
 ///
@@ -138,7 +141,7 @@ pub use core::time::FromFloatSecsError;
 /// where monotonicity is violated, or `Instant`s are subtracted in the wrong order.
 ///
 /// This workaround obscures programming errors where earlier and later instants are accidentally
-/// swapped. For this reason future rust versions may reintroduce panics.
+/// swapped. For this reason future Rust versions may reintroduce panics.
 ///
 /// [tier 1]: https://doc.rust-lang.org/rustc/platform-support.html
 /// [`duration_since`]: Instant::duration_since
@@ -148,6 +151,7 @@ pub use core::time::FromFloatSecsError;
 ///
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[stable(feature = "time2", since = "1.8.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Instant")]
 pub struct Instant(time::Instant);
 
 /// A measurement of the system clock, useful for talking to
@@ -172,6 +176,14 @@ pub struct Instant(time::Instant);
 ///
 /// The size of a `SystemTime` struct may vary depending on the target operating
 /// system.
+///
+/// A `SystemTime` does not count leap seconds.
+/// `SystemTime::now()`'s behavior around a leap second
+/// is the same as the operating system's wall clock.
+/// The precise behavior near a leap second
+/// (e.g. whether the clock appears to run slow or fast, or stop, or jump)
+/// depends on platform and configuration,
+/// so should not be relied on.
 ///
 /// Example:
 ///
@@ -203,23 +215,24 @@ pub struct Instant(time::Instant);
 /// For example, on Windows the time is represented in 100 nanosecond intervals whereas Linux
 /// can represent nanosecond intervals.
 ///
-/// Currently, the following system calls are being used to get the current time using `now()`:
+/// The following system calls are [currently] being used by `now()` to find out
+/// the current time:
 ///
 /// |  Platform |               System call                                            |
 /// |-----------|----------------------------------------------------------------------|
 /// | SGX       | [`insecure_time` usercall]. More information on [timekeeping in SGX] |
 /// | UNIX      | [clock_gettime (Realtime Clock)]                                     |
-/// | Darwin    | [gettimeofday]                                                       |
+/// | Darwin    | [clock_gettime (Realtime Clock)]                                     |
 /// | VXWorks   | [clock_gettime (Realtime Clock)]                                     |
 /// | SOLID     | `SOLID_RTC_ReadTime`                                                 |
 /// | WASI      | [__wasi_clock_time_get (Realtime Clock)]                             |
 /// | Windows   | [GetSystemTimePreciseAsFileTime] / [GetSystemTimeAsFileTime]         |
 ///
+/// [currently]: crate::io#platform-specific-behavior
 /// [`insecure_time` usercall]: https://edp.fortanix.com/docs/api/fortanix_sgx_abi/struct.Usercalls.html#method.insecure_time
 /// [timekeeping in SGX]: https://edp.fortanix.com/docs/concepts/rust-std/#codestdtimecode
-/// [gettimeofday]: https://man7.org/linux/man-pages/man2/gettimeofday.2.html
 /// [clock_gettime (Realtime Clock)]: https://linux.die.net/man/3/clock_gettime
-/// [__wasi_clock_time_get (Realtime Clock)]: https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/docs.md#clock_time_get
+/// [__wasi_clock_time_get (Realtime Clock)]: https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md#clock_time_get
 /// [GetSystemTimePreciseAsFileTime]: https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime
 /// [GetSystemTimeAsFileTime]: https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimeasfiletime
 ///
@@ -267,6 +280,7 @@ impl Instant {
     /// ```
     #[must_use]
     #[stable(feature = "time2", since = "1.8.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "instant_now")]
     pub fn now() -> Instant {
         Instant(time::Instant::now())
     }
@@ -276,7 +290,7 @@ impl Instant {
     ///
     /// # Panics
     ///
-    /// Previous rust versions panicked when `earlier` was later than `self`. Currently this
+    /// Previous Rust versions panicked when `earlier` was later than `self`. Currently this
     /// method saturates. Future versions may reintroduce the panic in some circumstances.
     /// See [Monotonicity].
     ///
@@ -347,11 +361,11 @@ impl Instant {
         self.checked_duration_since(earlier).unwrap_or_default()
     }
 
-    /// Returns the amount of time elapsed since this instant was created.
+    /// Returns the amount of time elapsed since this instant.
     ///
     /// # Panics
     ///
-    /// Previous rust versions panicked when self was earlier than the current time. Currently this
+    /// Previous Rust versions panicked when the current time was earlier than self. Currently this
     /// method returns a Duration of zero in that case. Future versions may reintroduce the panic.
     /// See [Monotonicity].
     ///
@@ -436,7 +450,7 @@ impl Sub<Instant> for Instant {
     ///
     /// # Panics
     ///
-    /// Previous rust versions panicked when `other` was later than `self`. Currently this
+    /// Previous Rust versions panicked when `other` was later than `self`. Currently this
     /// method saturates. Future versions may reintroduce the panic in some circumstances.
     /// See [Monotonicity].
     ///
@@ -456,12 +470,20 @@ impl fmt::Debug for Instant {
 impl SystemTime {
     /// An anchor in time which can be used to create new `SystemTime` instances or
     /// learn about where in time a `SystemTime` lies.
+    //
+    // NOTE! this documentation is duplicated, here and in std::time::UNIX_EPOCH.
+    // The two copies are not quite identical, because of the difference in naming.
     ///
     /// This constant is defined to be "1970-01-01 00:00:00 UTC" on all systems with
     /// respect to the system clock. Using `duration_since` on an existing
     /// `SystemTime` instance can tell how far away from this point in time a
     /// measurement lies, and using `UNIX_EPOCH + duration` can be used to create a
     /// `SystemTime` instance to represent another fixed point in time.
+    ///
+    /// `duration_since(UNIX_EPOCH).unwrap().as_secs()` returns
+    /// the number of non-leap seconds since the start of 1970 UTC.
+    /// This is a POSIX `time_t` (as a `u64`),
+    /// and is the same time representation as used in many Internet protocols.
     ///
     /// # Examples
     ///
@@ -520,8 +542,8 @@ impl SystemTime {
         self.0.sub_time(&earlier.0).map_err(SystemTimeError)
     }
 
-    /// Returns the difference between the clock time when this
-    /// system time was created, and the current clock time.
+    /// Returns the difference from this system time to the
+    /// current clock time.
     ///
     /// This function may fail as the underlying system clock is susceptible to
     /// drift and updates (e.g., the system clock could go backwards), so this
@@ -612,12 +634,20 @@ impl fmt::Debug for SystemTime {
 
 /// An anchor in time which can be used to create new `SystemTime` instances or
 /// learn about where in time a `SystemTime` lies.
+//
+// NOTE! this documentation is duplicated, here and in SystemTime::UNIX_EPOCH.
+// The two copies are not quite identical, because of the difference in naming.
 ///
 /// This constant is defined to be "1970-01-01 00:00:00 UTC" on all systems with
 /// respect to the system clock. Using `duration_since` on an existing
 /// [`SystemTime`] instance can tell how far away from this point in time a
 /// measurement lies, and using `UNIX_EPOCH + duration` can be used to create a
 /// [`SystemTime`] instance to represent another fixed point in time.
+///
+/// `duration_since(UNIX_EPOCH).unwrap().as_secs()` returns
+/// the number of non-leap seconds since the start of 1970 UTC.
+/// This is a POSIX `time_t` (as a `u64`),
+/// and is the same time representation as used in many Internet protocols.
 ///
 /// # Examples
 ///
@@ -679,5 +709,11 @@ impl fmt::Display for SystemTimeError {
 impl FromInner<time::SystemTime> for SystemTime {
     fn from_inner(time: time::SystemTime) -> SystemTime {
         SystemTime(time)
+    }
+}
+
+impl IntoInner<time::SystemTime> for SystemTime {
+    fn into_inner(self) -> time::SystemTime {
+        self.0
     }
 }

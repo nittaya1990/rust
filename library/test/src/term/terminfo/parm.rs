@@ -1,9 +1,9 @@
 //! Parameterized string expansion
 
+use std::iter::repeat;
+
 use self::Param::*;
 use self::States::*;
-
-use std::iter::repeat;
 
 #[cfg(test)]
 mod tests;
@@ -282,14 +282,14 @@ pub(crate) fn expand(
                 );
             }
             SetVar => {
-                if cur >= 'A' && cur <= 'Z' {
+                if cur.is_ascii_uppercase() {
                     if let Some(arg) = stack.pop() {
                         let idx = (cur as u8) - b'A';
                         vars.sta_va[idx as usize] = arg;
                     } else {
                         return Err("stack is empty".to_string());
                     }
-                } else if cur >= 'a' && cur <= 'z' {
+                } else if cur.is_ascii_lowercase() {
                     if let Some(arg) = stack.pop() {
                         let idx = (cur as u8) - b'a';
                         vars.dyn_va[idx as usize] = arg;
@@ -301,10 +301,10 @@ pub(crate) fn expand(
                 }
             }
             GetVar => {
-                if cur >= 'A' && cur <= 'Z' {
+                if cur.is_ascii_uppercase() {
                     let idx = (cur as u8) - b'A';
                     stack.push(vars.sta_va[idx as usize].clone());
-                } else if cur >= 'a' && cur <= 'z' {
+                } else if cur.is_ascii_lowercase() {
                     let idx = (cur as u8) - b'a';
                     stack.push(vars.dyn_va[idx as usize].clone());
                 } else {
@@ -524,7 +524,7 @@ fn format(val: Param, op: FormatOp, flags: Flags) -> Result<Vec<u8>, String> {
         } else {
             let mut s_ = Vec::with_capacity(flags.width);
             s_.extend(repeat(b' ').take(n));
-            s_.extend(s.into_iter());
+            s_.extend(s);
             s = s_;
         }
     }

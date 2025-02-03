@@ -3,44 +3,99 @@
 //! Rust memory safety is based on this rule: Given an object `T`, it is only possible to
 //! have one of the following:
 //!
-//! - Having several immutable references (`&T`) to the object (also known as **aliasing**).
-//! - Having one mutable reference (`&mut T`) to the object (also known as **mutability**).
+//! - Several immutable references (`&T`) to the object (also known as **aliasing**).
+//! - One mutable reference (`&mut T`) to the object (also known as **mutability**).
 //!
 //! This is enforced by the Rust compiler. However, there are situations where this rule is not
 //! flexible enough. Sometimes it is required to have multiple references to an object and yet
 //! mutate it.
 //!
 //! Shareable mutable containers exist to permit mutability in a controlled manner, even in the
-//! presence of aliasing. Both [`Cell<T>`] and [`RefCell<T>`] allow doing this in a single-threaded
-//! way. However, neither `Cell<T>` nor `RefCell<T>` are thread safe (they do not implement
-//! [`Sync`]). If you need to do aliasing and mutation between multiple threads it is possible to
-//! use [`Mutex<T>`], [`RwLock<T>`] or [`atomic`] types.
+//! presence of aliasing. [`Cell<T>`], [`RefCell<T>`], and [`OnceCell<T>`] allow doing this in
+//! a single-threaded way—they do not implement [`Sync`]. (If you need to do aliasing and
+//! mutation among multiple threads, [`Mutex<T>`], [`RwLock<T>`], [`OnceLock<T>`] or [`atomic`]
+//! types are the correct data structures to do so).
 //!
-//! Values of the `Cell<T>` and `RefCell<T>` types may be mutated through shared references (i.e.
-//! the common `&T` type), whereas most Rust types can only be mutated through unique (`&mut T`)
-//! references. We say that `Cell<T>` and `RefCell<T>` provide 'interior mutability', in contrast
-//! with typical Rust types that exhibit 'inherited mutability'.
+//! Values of the `Cell<T>`, `RefCell<T>`, and `OnceCell<T>` types may be mutated through shared
+//! references (i.e. the common `&T` type), whereas most Rust types can only be mutated through
+//! unique (`&mut T`) references. We say these cell types provide 'interior mutability'
+//! (mutable via `&T`), in contrast with typical Rust types that exhibit 'inherited mutability'
+//! (mutable only via `&mut T`).
 //!
-//! Cell types come in two flavors: `Cell<T>` and `RefCell<T>`. `Cell<T>` implements interior
-//! mutability by moving values in and out of the `Cell<T>`. To use references instead of values,
-//! one must use the `RefCell<T>` type, acquiring a write lock before mutating. `Cell<T>` provides
-//! methods to retrieve and change the current interior value:
+//! Cell types come in four flavors: `Cell<T>`, `RefCell<T>`, `OnceCell<T>`, and `LazyCell<T>`.
+//! Each provides a different way of providing safe interior mutability.
+//!
+//! ## `Cell<T>`
+//!
+//! [`Cell<T>`] implements interior mutability by moving values in and out of the cell. That is, an
+//! `&mut T` to the inner value can never be obtained, and the value itself cannot be directly
+//! obtained without replacing it with something else. Both of these rules ensure that there is
+//! never more than one reference pointing to the inner value. This type provides the following
+//! methods:
 //!
 //!  - For types that implement [`Copy`], the [`get`](Cell::get) method retrieves the current
-//!    interior value.
+//!    interior value by duplicating it.
 //!  - For types that implement [`Default`], the [`take`](Cell::take) method replaces the current
 //!    interior value with [`Default::default()`] and returns the replaced value.
-//!  - For all types, the [`replace`](Cell::replace) method replaces the current interior value and
-//!    returns the replaced value and the [`into_inner`](Cell::into_inner) method consumes the
-//!    `Cell<T>` and returns the interior value. Additionally, the [`set`](Cell::set) method
-//!    replaces the interior value, dropping the replaced value.
+//!  - All types have:
+//!    - [`replace`](Cell::replace): replaces the current interior value and returns the replaced
+//!      value.
+//!    - [`into_inner`](Cell::into_inner): this method consumes the `Cell<T>` and returns the
+//!      interior value.
+//!    - [`set`](Cell::set): this method replaces the interior value, dropping the replaced value.
 //!
-//! `RefCell<T>` uses Rust's lifetimes to implement 'dynamic borrowing', a process whereby one can
+//! `Cell<T>` is typically used for more simple types where copying or moving values isn't too
+//! resource intensive (e.g. numbers), and should usually be preferred over other cell types when
+//! possible. For larger and non-copy types, `RefCell` provides some advantages.
+//!
+//! ## `RefCell<T>`
+//!
+//! [`RefCell<T>`] uses Rust's lifetimes to implement "dynamic borrowing", a process whereby one can
 //! claim temporary, exclusive, mutable access to the inner value. Borrows for `RefCell<T>`s are
-//! tracked 'at runtime', unlike Rust's native reference types which are entirely tracked
-//! statically, at compile time. Because `RefCell<T>` borrows are dynamic it is possible to attempt
-//! to borrow a value that is already mutably borrowed; when this happens it results in thread
-//! panic.
+//! tracked at _runtime_, unlike Rust's native reference types which are entirely tracked
+//! statically, at compile time.
+//!
+//! An immutable reference to a `RefCell`'s inner value (`&T`) can be obtained with
+//! [`borrow`](`RefCell::borrow`), and a mutable borrow (`&mut T`) can be obtained with
+//! [`borrow_mut`](`RefCell::borrow_mut`). When these functions are called, they first verify that
+//! Rust's borrow rules will be satisfied: any number of immutable borrows are allowed or a
+//! single mutable borrow is allowed, but never both. If a borrow is attempted that would violate
+//! these rules, the thread will panic.
+//!
+//! The corresponding [`Sync`] version of `RefCell<T>` is [`RwLock<T>`].
+//!
+//! ## `OnceCell<T>`
+//!
+//! [`OnceCell<T>`] is somewhat of a hybrid of `Cell` and `RefCell` that works for values that
+//! typically only need to be set once. This means that a reference `&T` can be obtained without
+//! moving or copying the inner value (unlike `Cell`) but also without runtime checks (unlike
+//! `RefCell`). However, its value can also not be updated once set unless you have a mutable
+//! reference to the `OnceCell`.
+//!
+//! `OnceCell` provides the following methods:
+//!
+//! - [`get`](OnceCell::get): obtain a reference to the inner value
+//! - [`set`](OnceCell::set): set the inner value if it is unset (returns a `Result`)
+//! - [`get_or_init`](OnceCell::get_or_init): return the inner value, initializing it if needed
+//! - [`get_mut`](OnceCell::get_mut): provide a mutable reference to the inner value, only available
+//!   if you have a mutable reference to the cell itself.
+//!
+//! The corresponding [`Sync`] version of `OnceCell<T>` is [`OnceLock<T>`].
+//!
+//! ## `LazyCell<T, F>`
+//!
+//! A common pattern with OnceCell is, for a given OnceCell, to use the same function on every
+//! call to [`OnceCell::get_or_init`] with that cell. This is what is offered by [`LazyCell`],
+//! which pairs cells of `T` with functions of `F`, and always calls `F` before it yields `&T`.
+//! This happens implicitly by simply attempting to dereference the LazyCell to get its contents,
+//! so its use is much more transparent with a place which has been initialized by a constant.
+//!
+//! More complicated patterns that don't fit this description can be built on `OnceCell<T>` instead.
+//!
+//! `LazyCell` works by providing an implementation of `impl Deref` that calls the function,
+//! so you can just use it by dereference (e.g. `*lazy_cell` or `lazy_cell.deref()`).
+//!
+//! The corresponding [`Sync`] version of `LazyCell<T, F>` is [`LazyLock<T, F>`].
 //!
 //! # When to choose interior mutability
 //!
@@ -74,7 +129,7 @@
 //!     let shared_map: Rc<RefCell<_>> = Rc::new(RefCell::new(HashMap::new()));
 //!     // Create a new block to limit the scope of the dynamic borrow
 //!     {
-//!         let mut map: RefMut<_> = shared_map.borrow_mut();
+//!         let mut map: RefMut<'_, _> = shared_map.borrow_mut();
 //!         map.insert("africa", 92388);
 //!         map.insert("kyoto", 11837);
 //!         map.insert("piccadilly", 11826);
@@ -102,17 +157,17 @@
 //!
 //! ```
 //! # #![allow(dead_code)]
-//! use std::cell::RefCell;
+//! use std::cell::OnceCell;
 //!
 //! struct Graph {
 //!     edges: Vec<(i32, i32)>,
-//!     span_tree_cache: RefCell<Option<Vec<(i32, i32)>>>
+//!     span_tree_cache: OnceCell<Vec<(i32, i32)>>
 //! }
 //!
 //! impl Graph {
 //!     fn minimum_spanning_tree(&self) -> Vec<(i32, i32)> {
-//!         self.span_tree_cache.borrow_mut()
-//!             .get_or_insert_with(|| self.calc_span_tree())
+//!         self.span_tree_cache
+//!             .get_or_init(|| self.calc_span_tree())
 //!             .clone()
 //!     }
 //!
@@ -138,11 +193,11 @@
 //! use std::marker::PhantomData;
 //!
 //! struct Rc<T: ?Sized> {
-//!     ptr: NonNull<RcBox<T>>,
-//!     phantom: PhantomData<RcBox<T>>,
+//!     ptr: NonNull<RcInner<T>>,
+//!     phantom: PhantomData<RcInner<T>>,
 //! }
 //!
-//! struct RcBox<T: ?Sized> {
+//! struct RcInner<T: ?Sized> {
 //!     strong: Cell<usize>,
 //!     refcount: Cell<usize>,
 //!     value: T,
@@ -158,9 +213,9 @@
 //!     }
 //! }
 //!
-//! trait RcBoxPtr<T: ?Sized> {
+//! trait RcInnerPtr<T: ?Sized> {
 //!
-//!     fn inner(&self) -> &RcBox<T>;
+//!     fn inner(&self) -> &RcInner<T>;
 //!
 //!     fn strong(&self) -> usize {
 //!         self.inner().strong.get()
@@ -175,8 +230,8 @@
 //!     }
 //! }
 //!
-//! impl<T: ?Sized> RcBoxPtr<T> for Rc<T> {
-//!    fn inner(&self) -> &RcBox<T> {
+//! impl<T: ?Sized> RcInnerPtr<T> for Rc<T> {
+//!    fn inner(&self) -> &RcInner<T> {
 //!        unsafe {
 //!            self.ptr.as_ref()
 //!        }
@@ -188,18 +243,36 @@
 //! [`Rc<T>`]: ../../std/rc/struct.Rc.html
 //! [`RwLock<T>`]: ../../std/sync/struct.RwLock.html
 //! [`Mutex<T>`]: ../../std/sync/struct.Mutex.html
+//! [`OnceLock<T>`]: ../../std/sync/struct.OnceLock.html
+//! [`LazyLock<T, F>`]: ../../std/sync/struct.LazyLock.html
+//! [`Sync`]: ../../std/marker/trait.Sync.html
 //! [`atomic`]: crate::sync::atomic
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use crate::cmp::Ordering;
 use crate::fmt::{self, Debug, Display};
-use crate::marker::Unsize;
+use crate::marker::{PhantomData, PointerLike, Unsize};
 use crate::mem;
-use crate::ops::{CoerceUnsized, Deref, DerefMut};
-use crate::ptr;
+use crate::ops::{CoerceUnsized, Deref, DerefMut, DerefPure, DispatchFromDyn};
+use crate::pin::PinCoerceUnsized;
+use crate::ptr::{self, NonNull};
+
+mod lazy;
+mod once;
+
+#[stable(feature = "lazy_cell", since = "1.80.0")]
+pub use lazy::LazyCell;
+#[stable(feature = "once_cell", since = "1.70.0")]
+pub use once::OnceCell;
 
 /// A mutable memory location.
+///
+/// # Memory layout
+///
+/// `Cell<T>` has the same [memory layout and caveats as
+/// `UnsafeCell<T>`](UnsafeCell#memory-layout). In particular, this means that
+/// `Cell<T>` has the same in-memory representation as its inner type `T`.
 ///
 /// # Examples
 ///
@@ -231,8 +304,10 @@ use crate::ptr;
 /// ```
 ///
 /// See the [module-level documentation](self) for more.
+#[cfg_attr(not(test), rustc_diagnostic_item = "Cell")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[repr(transparent)]
+#[rustc_pub_transparent]
 pub struct Cell<T: ?Sized> {
     value: UnsafeCell<T>,
 }
@@ -313,8 +388,7 @@ impl<T: Ord + Copy> Ord for Cell<T> {
 }
 
 #[stable(feature = "cell_from", since = "1.12.0")]
-#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
-impl<T> const From<T> for Cell<T> {
+impl<T> From<T> for Cell<T> {
     /// Creates a new `Cell<T>` containing the given value.
     fn from(t: T) -> Cell<T> {
         Cell::new(t)
@@ -352,12 +426,19 @@ impl<T> Cell<T> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn set(&self, val: T) {
-        let old = self.replace(val);
-        drop(old);
+        self.replace(val);
     }
 
     /// Swaps the values of two `Cell`s.
-    /// Difference with `std::mem::swap` is that this function doesn't require `&mut` reference.
+    ///
+    /// The difference with `std::mem::swap` is that this function doesn't
+    /// require a `&mut` reference.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if `self` and `other` are different `Cell`s that partially overlap.
+    /// (Using just standard library methods, it is impossible to create such partially overlapping `Cell`s.
+    /// However, unsafe code is allowed to e.g. create two `&Cell<[i32; 2]>` that partially overlap.)
     ///
     /// # Examples
     ///
@@ -373,15 +454,30 @@ impl<T> Cell<T> {
     #[inline]
     #[stable(feature = "move_cell", since = "1.17.0")]
     pub fn swap(&self, other: &Self) {
+        // This function documents that it *will* panic, and intrinsics::is_nonoverlapping doesn't
+        // do the check in const, so trying to use it here would be inviting unnecessary fragility.
+        fn is_nonoverlapping<T>(src: *const T, dst: *const T) -> bool {
+            let src_usize = src.addr();
+            let dst_usize = dst.addr();
+            let diff = src_usize.abs_diff(dst_usize);
+            diff >= size_of::<T>()
+        }
+
         if ptr::eq(self, other) {
+            // Swapping wouldn't change anything.
             return;
+        }
+        if !is_nonoverlapping(self, other) {
+            // See <https://github.com/rust-lang/rust/issues/80778> for why we need to stop here.
+            panic!("`Cell::swap` on overlapping non-identical `Cell`s");
         }
         // SAFETY: This can be risky if called from separate threads, but `Cell`
         // is `!Sync` so this won't happen. This also won't invalidate any
         // pointers since `Cell` makes sure nothing else will be pointing into
-        // either of these `Cell`s.
+        // either of these `Cell`s. We also excluded shenanigans like partially overlapping `Cell`s,
+        // so `swap` will just properly copy two full values of type `T` back and forth.
         unsafe {
-            ptr::swap(self.value.get(), other.value.get());
+            mem::swap(&mut *self.value.get(), &mut *other.value.get());
         }
     }
 
@@ -397,14 +493,17 @@ impl<T> Cell<T> {
     /// assert_eq!(cell.replace(10), 5);
     /// assert_eq!(cell.get(), 10);
     /// ```
+    #[inline]
     #[stable(feature = "move_cell", since = "1.17.0")]
-    pub fn replace(&self, val: T) -> T {
+    #[rustc_const_unstable(feature = "const_cell", issue = "131283")]
+    #[rustc_confusables("swap")]
+    pub const fn replace(&self, val: T) -> T {
         // SAFETY: This can cause data races if called from a separate thread,
         // but `Cell` is `!Sync` so this won't happen.
         mem::replace(unsafe { &mut *self.value.get() }, val)
     }
 
-    /// Unwraps the value.
+    /// Unwraps the value, consuming the cell.
     ///
     /// # Examples
     ///
@@ -417,7 +516,8 @@ impl<T> Cell<T> {
     /// assert_eq!(five, 5);
     /// ```
     #[stable(feature = "move_cell", since = "1.17.0")]
-    #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
+    #[rustc_const_stable(feature = "const_cell_into_inner", since = "1.83.0")]
+    #[rustc_allow_const_fn_unstable(const_precise_live_drops)]
     pub const fn into_inner(self) -> T {
         self.value.into_inner()
     }
@@ -437,7 +537,8 @@ impl<T: Copy> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn get(&self) -> T {
+    #[rustc_const_unstable(feature = "const_cell", issue = "131283")]
+    pub const fn get(&self) -> T {
         // SAFETY: This can cause data races if called from a separate thread,
         // but `Cell` is `!Sync` so this won't happen.
         unsafe { *self.value.get() }
@@ -486,6 +587,8 @@ impl<T: ?Sized> Cell<T> {
     #[inline]
     #[stable(feature = "cell_as_ptr", since = "1.12.0")]
     #[rustc_const_stable(feature = "const_cell_as_ptr", since = "1.32.0")]
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
@@ -514,7 +617,8 @@ impl<T: ?Sized> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "cell_get_mut", since = "1.11.0")]
-    pub fn get_mut(&mut self) -> &mut T {
+    #[rustc_const_unstable(feature = "const_cell", issue = "131283")]
+    pub const fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
 
@@ -533,7 +637,8 @@ impl<T: ?Sized> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "as_cell", since = "1.37.0")]
-    pub fn from_mut(t: &mut T) -> &Cell<T> {
+    #[rustc_const_unstable(feature = "const_cell", issue = "131283")]
+    pub const fn from_mut(t: &mut T) -> &Cell<T> {
         // SAFETY: `&mut` ensures unique access.
         unsafe { &*(t as *mut T as *const Cell<T>) }
     }
@@ -559,8 +664,21 @@ impl<T: Default> Cell<T> {
     }
 }
 
-#[unstable(feature = "coerce_unsized", issue = "27732")]
+#[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<T: CoerceUnsized<U>, U> CoerceUnsized<Cell<U>> for Cell<T> {}
+
+// Allow types that wrap `Cell` to also implement `DispatchFromDyn`
+// and become dyn-compatible method receivers.
+// Note that currently `Cell` itself cannot be a method receiver
+// because it does not implement Deref.
+// In other words:
+// `self: Cell<&Self>` won't work
+// `self: CellWrapper<Self>` becomes possible
+#[unstable(feature = "dispatch_from_dyn", issue = "none")]
+impl<T: DispatchFromDyn<U>, U> DispatchFromDyn<Cell<U>> for Cell<T> {}
+
+#[unstable(feature = "pointer_like_trait", issue = "none")]
+impl<T: PointerLike> PointerLike for Cell<T> {}
 
 impl<T> Cell<[T]> {
     /// Returns a `&[Cell<T>]` from a `&Cell<[T]>`
@@ -577,7 +695,8 @@ impl<T> Cell<[T]> {
     /// assert_eq!(slice_cell.len(), 3);
     /// ```
     #[stable(feature = "as_cell", since = "1.37.0")]
-    pub fn as_slice_of_cells(&self) -> &[Cell<T>] {
+    #[rustc_const_unstable(feature = "const_cell", issue = "131283")]
+    pub const fn as_slice_of_cells(&self) -> &[Cell<T>] {
         // SAFETY: `Cell<T>` has the same memory layout as `T`.
         unsafe { &*(self as *const Cell<[T]> as *const [Cell<T>]) }
     }
@@ -597,7 +716,7 @@ impl<T, const N: usize> Cell<[T; N]> {
     /// let array_cell: &[Cell<i32>; 3] = cell_array.as_array_of_cells();
     /// ```
     #[unstable(feature = "as_array_of_cells", issue = "88248")]
-    pub fn as_array_of_cells(&self) -> &[Cell<T>; N] {
+    pub const fn as_array_of_cells(&self) -> &[Cell<T>; N] {
         // SAFETY: `Cell<T>` has the same memory layout as `T`.
         unsafe { &*(self as *const Cell<[T; N]> as *const [Cell<T>; N]) }
     }
@@ -606,13 +725,14 @@ impl<T, const N: usize> Cell<[T; N]> {
 /// A mutable memory location with dynamically checked borrow rules
 ///
 /// See the [module-level documentation](self) for more.
+#[cfg_attr(not(test), rustc_diagnostic_item = "RefCell")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct RefCell<T: ?Sized> {
     borrow: Cell<BorrowFlag>,
     // Stores the location of the earliest currently active borrow.
     // This gets updated whenever we go from having zero borrows
     // to having a single borrow. When a borrow occurs, this gets included
-    // in the generated `BorrowError/`BorrowMutError`
+    // in the generated `BorrowError`/`BorrowMutError`
     #[cfg(feature = "debug_refcell")]
     borrowed_at: Cell<Option<&'static crate::panic::Location<'static>>>,
     value: UnsafeCell<T>,
@@ -670,6 +790,22 @@ impl Display for BorrowMutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Display::fmt("already borrowed", f)
     }
+}
+
+// This ensures the panicking code is outlined from `borrow_mut` for `RefCell`.
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never))]
+#[track_caller]
+#[cold]
+fn panic_already_borrowed(err: BorrowMutError) -> ! {
+    panic!("already borrowed: {:?}", err)
+}
+
+// This ensures the panicking code is outlined from `borrow` for `RefCell`.
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never))]
+#[track_caller]
+#[cold]
+fn panic_already_mutably_borrowed(err: BorrowError) -> ! {
+    panic!("already mutably borrowed: {:?}", err)
 }
 
 // Positive values represent the number of `Ref` active. Negative values
@@ -732,7 +868,8 @@ impl<T> RefCell<T> {
     /// let five = c.into_inner();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
+    #[rustc_const_stable(feature = "const_cell_into_inner", since = "1.83.0")]
+    #[rustc_allow_const_fn_unstable(const_precise_live_drops)]
     #[inline]
     pub const fn into_inner(self) -> T {
         // Since this function takes `self` (the `RefCell`) by value, the
@@ -761,6 +898,7 @@ impl<T> RefCell<T> {
     #[inline]
     #[stable(feature = "refcell_replace", since = "1.24.0")]
     #[track_caller]
+    #[rustc_confusables("swap")]
     pub fn replace(&self, t: T) -> T {
         mem::replace(&mut *self.borrow_mut(), t)
     }
@@ -797,7 +935,8 @@ impl<T> RefCell<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently borrowed, or
+    /// if `self` and `other` point to the same `RefCell`.
     ///
     /// # Examples
     ///
@@ -852,7 +991,10 @@ impl<T: ?Sized> RefCell<T> {
     #[inline]
     #[track_caller]
     pub fn borrow(&self) -> Ref<'_, T> {
-        self.try_borrow().expect("already mutably borrowed")
+        match self.try_borrow() {
+            Ok(b) => b,
+            Err(err) => panic_already_mutably_borrowed(err),
+        }
     }
 
     /// Immutably borrows the wrapped value, returning an error if the value is currently mutably
@@ -896,7 +1038,8 @@ impl<T: ?Sized> RefCell<T> {
 
                 // SAFETY: `BorrowRef` ensures that there is only immutable access
                 // to the value while borrowed.
-                Ok(Ref { value: unsafe { &*self.value.get() }, borrow: b })
+                let value = unsafe { NonNull::new_unchecked(self.value.get()) };
+                Ok(Ref { value, borrow: b })
             }
             None => Err(BorrowError {
                 // If a borrow occurred, then we must already have an outstanding borrow,
@@ -944,7 +1087,10 @@ impl<T: ?Sized> RefCell<T> {
     #[inline]
     #[track_caller]
     pub fn borrow_mut(&self) -> RefMut<'_, T> {
-        self.try_borrow_mut().expect("already borrowed")
+        match self.try_borrow_mut() {
+            Ok(b) => b,
+            Err(err) => panic_already_borrowed(err),
+        }
     }
 
     /// Mutably borrows the wrapped value, returning an error if the value is currently borrowed.
@@ -980,8 +1126,9 @@ impl<T: ?Sized> RefCell<T> {
                     self.borrowed_at.set(Some(crate::panic::Location::caller()));
                 }
 
-                // SAFETY: `BorrowRef` guarantees unique access.
-                Ok(RefMut { value: unsafe { &mut *self.value.get() }, borrow: b })
+                // SAFETY: `BorrowRefMut` guarantees unique access.
+                let value = unsafe { NonNull::new_unchecked(self.value.get()) };
+                Ok(RefMut { value, borrow: b, marker: PhantomData })
             }
             None => Err(BorrowMutError {
                 // If a borrow occurred, then we must already have an outstanding borrow,
@@ -1005,21 +1152,26 @@ impl<T: ?Sized> RefCell<T> {
     /// ```
     #[inline]
     #[stable(feature = "cell_as_ptr", since = "1.12.0")]
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
 
     /// Returns a mutable reference to the underlying data.
     ///
-    /// This call borrows `RefCell` mutably (at compile-time) so there is no
-    /// need for dynamic checks.
+    /// Since this method borrows `RefCell` mutably, it is statically guaranteed
+    /// that no borrows to the underlying data exist. The dynamic checks inherent
+    /// in [`borrow_mut`] and most other methods of `RefCell` are therefore
+    /// unnecessary.
     ///
-    /// However be cautious: this method expects `self` to be mutable, which is
-    /// generally not the case when using a `RefCell`. Take a look at the
-    /// [`borrow_mut`] method instead if `self` isn't mutable.
+    /// This method can only be called if `RefCell` can be mutably borrowed,
+    /// which in general is only the case directly after the `RefCell` has
+    /// been created. In these situations, skipping the aforementioned dynamic
+    /// borrowing checks may yield better ergonomics and runtime-performance.
     ///
-    /// Also, please be aware that this method is only for special circumstances and is usually
-    /// not what you want. In case of doubt, use [`borrow_mut`] instead.
+    /// In most situations where `RefCell` is used, it can't be borrowed mutably.
+    /// Use [`borrow_mut`] to get mutable access to the underlying data then.
     ///
     /// [`borrow_mut`]: RefCell::borrow_mut()
     ///
@@ -1074,7 +1226,7 @@ impl<T: ?Sized> RefCell<T> {
     /// Unlike `RefCell::borrow`, this method is unsafe because it does not
     /// return a `Ref`, thus leaving the borrow flag untouched. Mutably
     /// borrowing the `RefCell` while the reference returned by this method
-    /// is alive is undefined behaviour.
+    /// is alive is undefined behavior.
     ///
     /// # Examples
     ///
@@ -1157,11 +1309,11 @@ impl<T: Clone> Clone for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if `other` is currently mutably borrowed.
+    /// Panics if `source` is currently mutably borrowed.
     #[inline]
     #[track_caller]
-    fn clone_from(&mut self, other: &Self) {
-        self.get_mut().clone_from(&other.borrow())
+    fn clone_from(&mut self, source: &Self) {
+        self.get_mut().clone_from(&source.borrow())
     }
 }
 
@@ -1178,7 +1330,7 @@ impl<T: Default> Default for RefCell<T> {
 impl<T: ?Sized + PartialEq> PartialEq for RefCell<T> {
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn eq(&self, other: &RefCell<T>) -> bool {
         *self.borrow() == *other.borrow()
@@ -1192,7 +1344,7 @@ impl<T: ?Sized + Eq> Eq for RefCell<T> {}
 impl<T: ?Sized + PartialOrd> PartialOrd for RefCell<T> {
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn partial_cmp(&self, other: &RefCell<T>) -> Option<Ordering> {
         self.borrow().partial_cmp(&*other.borrow())
@@ -1200,7 +1352,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn lt(&self, other: &RefCell<T>) -> bool {
         *self.borrow() < *other.borrow()
@@ -1208,7 +1360,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn le(&self, other: &RefCell<T>) -> bool {
         *self.borrow() <= *other.borrow()
@@ -1216,7 +1368,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn gt(&self, other: &RefCell<T>) -> bool {
         *self.borrow() > *other.borrow()
@@ -1224,7 +1376,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn ge(&self, other: &RefCell<T>) -> bool {
         *self.borrow() >= *other.borrow()
@@ -1235,7 +1387,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for RefCell<T> {
 impl<T: ?Sized + Ord> Ord for RefCell<T> {
     /// # Panics
     ///
-    /// Panics if the value in either `RefCell` is currently borrowed.
+    /// Panics if the value in either `RefCell` is currently mutably borrowed.
     #[inline]
     fn cmp(&self, other: &RefCell<T>) -> Ordering {
         self.borrow().cmp(&*other.borrow())
@@ -1243,15 +1395,14 @@ impl<T: ?Sized + Ord> Ord for RefCell<T> {
 }
 
 #[stable(feature = "cell_from", since = "1.12.0")]
-#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
-impl<T> const From<T> for RefCell<T> {
+impl<T> From<T> for RefCell<T> {
     /// Creates a new `RefCell<T>` containing the given value.
     fn from(t: T) -> RefCell<T> {
         RefCell::new(t)
     }
 }
 
-#[unstable(feature = "coerce_unsized", issue = "27732")]
+#[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<T: CoerceUnsized<U>, U> CoerceUnsized<RefCell<U>> for RefCell<T> {}
 
 struct BorrowRef<'b> {
@@ -1301,7 +1452,7 @@ impl Clone for BorrowRef<'_> {
         debug_assert!(is_reading(borrow));
         // Prevent the borrow counter from overflowing into
         // a writing borrow.
-        assert!(borrow != isize::MAX);
+        assert!(borrow != BorrowFlag::MAX);
         self.borrow.set(borrow + 1);
         BorrowRef { borrow: self.borrow }
     }
@@ -1313,8 +1464,12 @@ impl Clone for BorrowRef<'_> {
 /// See the [module-level documentation](self) for more.
 #[stable(feature = "rust1", since = "1.0.0")]
 #[must_not_suspend = "holding a Ref across suspend points can cause BorrowErrors"]
+#[rustc_diagnostic_item = "RefCellRef"]
 pub struct Ref<'b, T: ?Sized + 'b> {
-    value: &'b T,
+    // NB: we use a pointer instead of `&'b T` to avoid `noalias` violations, because a
+    // `Ref` argument doesn't hold immutability for its whole scope, only until it drops.
+    // `NonNull` is also covariant over `T`, just like we would have with `&T`.
+    value: NonNull<T>,
     borrow: BorrowRef<'b>,
 }
 
@@ -1324,9 +1479,13 @@ impl<T: ?Sized> Deref for Ref<'_, T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        self.value
+        // SAFETY: the value is accessible as long as we hold our borrow.
+        unsafe { self.value.as_ref() }
     }
 }
+
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<T: ?Sized> DerefPure for Ref<'_, T> {}
 
 impl<'b, T: ?Sized> Ref<'b, T> {
     /// Copies a `Ref`.
@@ -1358,8 +1517,8 @@ impl<'b, T: ?Sized> Ref<'b, T> {
     /// use std::cell::{RefCell, Ref};
     ///
     /// let c = RefCell::new((5, 'b'));
-    /// let b1: Ref<(u32, char)> = c.borrow();
-    /// let b2: Ref<u32> = Ref::map(b1, |t| &t.0);
+    /// let b1: Ref<'_, (u32, char)> = c.borrow();
+    /// let b2: Ref<'_, u32> = Ref::map(b1, |t| &t.0);
     /// assert_eq!(*b2, 5)
     /// ```
     #[stable(feature = "cell_map", since = "1.8.0")]
@@ -1368,7 +1527,7 @@ impl<'b, T: ?Sized> Ref<'b, T> {
     where
         F: FnOnce(&T) -> &U,
     {
-        Ref { value: f(orig.value), borrow: orig.borrow }
+        Ref { value: NonNull::from(f(&*orig)), borrow: orig.borrow }
     }
 
     /// Makes a new `Ref` for an optional component of the borrowed data. The
@@ -1384,23 +1543,21 @@ impl<'b, T: ?Sized> Ref<'b, T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(cell_filter_map)]
-    ///
     /// use std::cell::{RefCell, Ref};
     ///
     /// let c = RefCell::new(vec![1, 2, 3]);
-    /// let b1: Ref<Vec<u32>> = c.borrow();
-    /// let b2: Result<Ref<u32>, _> = Ref::filter_map(b1, |v| v.get(1));
+    /// let b1: Ref<'_, Vec<u32>> = c.borrow();
+    /// let b2: Result<Ref<'_, u32>, _> = Ref::filter_map(b1, |v| v.get(1));
     /// assert_eq!(*b2.unwrap(), 2);
     /// ```
-    #[unstable(feature = "cell_filter_map", reason = "recently added", issue = "81061")]
+    #[stable(feature = "cell_filter_map", since = "1.63.0")]
     #[inline]
     pub fn filter_map<U: ?Sized, F>(orig: Ref<'b, T>, f: F) -> Result<Ref<'b, U>, Self>
     where
         F: FnOnce(&T) -> Option<&U>,
     {
-        match f(orig.value) {
-            Some(value) => Ok(Ref { value, borrow: orig.borrow }),
+        match f(&*orig) {
+            Some(value) => Ok(Ref { value: NonNull::from(value), borrow: orig.borrow }),
             None => Err(orig),
         }
     }
@@ -1431,12 +1588,15 @@ impl<'b, T: ?Sized> Ref<'b, T> {
     where
         F: FnOnce(&T) -> (&U, &V),
     {
-        let (a, b) = f(orig.value);
+        let (a, b) = f(&*orig);
         let borrow = orig.borrow.clone();
-        (Ref { value: a, borrow }, Ref { value: b, borrow: orig.borrow })
+        (Ref { value: NonNull::from(a), borrow }, Ref {
+            value: NonNull::from(b),
+            borrow: orig.borrow,
+        })
     }
 
-    /// Convert into a reference to the underlying data.
+    /// Converts into a reference to the underlying data.
     ///
     /// The underlying `RefCell` can never be mutably borrowed from again and will always appear
     /// already immutably borrowed. It is not a good idea to leak more than a constant number of
@@ -1467,17 +1627,18 @@ impl<'b, T: ?Sized> Ref<'b, T> {
         // unique reference to the borrowed RefCell. No further mutable references can be created
         // from the original cell.
         mem::forget(orig.borrow);
-        orig.value
+        // SAFETY: after forgetting, we can form a reference for the rest of lifetime `'b`.
+        unsafe { orig.value.as_ref() }
     }
 }
 
-#[unstable(feature = "coerce_unsized", issue = "27732")]
+#[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<'b, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Ref<'b, U>> for Ref<'b, T> {}
 
 #[stable(feature = "std_guard_impls", since = "1.20.0")]
 impl<T: ?Sized + fmt::Display> fmt::Display for Ref<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.value.fmt(f)
+        (**self).fmt(f)
     }
 }
 
@@ -1498,8 +1659,8 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     ///
     /// let c = RefCell::new((5, 'b'));
     /// {
-    ///     let b1: RefMut<(u32, char)> = c.borrow_mut();
-    ///     let mut b2: RefMut<u32> = RefMut::map(b1, |t| &mut t.0);
+    ///     let b1: RefMut<'_, (u32, char)> = c.borrow_mut();
+    ///     let mut b2: RefMut<'_, u32> = RefMut::map(b1, |t| &mut t.0);
     ///     assert_eq!(*b2, 5);
     ///     *b2 = 42;
     /// }
@@ -1507,13 +1668,12 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     /// ```
     #[stable(feature = "cell_map", since = "1.8.0")]
     #[inline]
-    pub fn map<U: ?Sized, F>(orig: RefMut<'b, T>, f: F) -> RefMut<'b, U>
+    pub fn map<U: ?Sized, F>(mut orig: RefMut<'b, T>, f: F) -> RefMut<'b, U>
     where
         F: FnOnce(&mut T) -> &mut U,
     {
-        // FIXME(nll-rfc#40): fix borrow-check
-        let RefMut { value, borrow } = orig;
-        RefMut { value: f(value), borrow }
+        let value = NonNull::from(f(&mut *orig));
+        RefMut { value, borrow: orig.borrow, marker: PhantomData }
     }
 
     /// Makes a new `RefMut` for an optional component of the borrowed data. The
@@ -1529,15 +1689,13 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(cell_filter_map)]
-    ///
     /// use std::cell::{RefCell, RefMut};
     ///
     /// let c = RefCell::new(vec![1, 2, 3]);
     ///
     /// {
-    ///     let b1: RefMut<Vec<u32>> = c.borrow_mut();
-    ///     let mut b2: Result<RefMut<u32>, _> = RefMut::filter_map(b1, |v| v.get_mut(1));
+    ///     let b1: RefMut<'_, Vec<u32>> = c.borrow_mut();
+    ///     let mut b2: Result<RefMut<'_, u32>, _> = RefMut::filter_map(b1, |v| v.get_mut(1));
     ///
     ///     if let Ok(mut b2) = b2 {
     ///         *b2 += 2;
@@ -1546,25 +1704,21 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     ///
     /// assert_eq!(*c.borrow(), vec![1, 4, 3]);
     /// ```
-    #[unstable(feature = "cell_filter_map", reason = "recently added", issue = "81061")]
+    #[stable(feature = "cell_filter_map", since = "1.63.0")]
     #[inline]
-    pub fn filter_map<U: ?Sized, F>(orig: RefMut<'b, T>, f: F) -> Result<RefMut<'b, U>, Self>
+    pub fn filter_map<U: ?Sized, F>(mut orig: RefMut<'b, T>, f: F) -> Result<RefMut<'b, U>, Self>
     where
         F: FnOnce(&mut T) -> Option<&mut U>,
     {
-        // FIXME(nll-rfc#40): fix borrow-check
-        let RefMut { value, borrow } = orig;
-        let value = value as *mut T;
         // SAFETY: function holds onto an exclusive reference for the duration
         // of its call through `orig`, and the pointer is only de-referenced
         // inside of the function call never allowing the exclusive reference to
         // escape.
-        match f(unsafe { &mut *value }) {
-            Some(value) => Ok(RefMut { value, borrow }),
-            None => {
-                // SAFETY: same as above.
-                Err(RefMut { value: unsafe { &mut *value }, borrow })
+        match f(&mut *orig) {
+            Some(value) => {
+                Ok(RefMut { value: NonNull::from(value), borrow: orig.borrow, marker: PhantomData })
             }
+            None => Err(orig),
         }
     }
 
@@ -1596,18 +1750,22 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     #[stable(feature = "refcell_map_split", since = "1.35.0")]
     #[inline]
     pub fn map_split<U: ?Sized, V: ?Sized, F>(
-        orig: RefMut<'b, T>,
+        mut orig: RefMut<'b, T>,
         f: F,
     ) -> (RefMut<'b, U>, RefMut<'b, V>)
     where
         F: FnOnce(&mut T) -> (&mut U, &mut V),
     {
-        let (a, b) = f(orig.value);
         let borrow = orig.borrow.clone();
-        (RefMut { value: a, borrow }, RefMut { value: b, borrow: orig.borrow })
+        let (a, b) = f(&mut *orig);
+        (RefMut { value: NonNull::from(a), borrow, marker: PhantomData }, RefMut {
+            value: NonNull::from(b),
+            borrow: orig.borrow,
+            marker: PhantomData,
+        })
     }
 
-    /// Convert into a mutable reference to the underlying data.
+    /// Converts into a mutable reference to the underlying data.
     ///
     /// The underlying `RefCell` can not be borrowed from again and will always appear already
     /// mutably borrowed, making the returned reference the only to the interior.
@@ -1630,14 +1788,15 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
     /// assert!(cell.try_borrow_mut().is_err());
     /// ```
     #[unstable(feature = "cell_leak", issue = "69099")]
-    pub fn leak(orig: RefMut<'b, T>) -> &'b mut T {
+    pub fn leak(mut orig: RefMut<'b, T>) -> &'b mut T {
         // By forgetting this BorrowRefMut we ensure that the borrow counter in the RefCell can't
         // go back to UNUSED within the lifetime `'b`. Resetting the reference tracking state would
         // require a unique reference to the borrowed RefCell. No further references can be created
         // from the original cell within that lifetime, making the current borrow the only
         // reference for the remaining lifetime.
         mem::forget(orig.borrow);
-        orig.value
+        // SAFETY: after forgetting, we can form a reference for the rest of lifetime `'b`.
+        unsafe { orig.value.as_mut() }
     }
 }
 
@@ -1680,7 +1839,7 @@ impl<'b> BorrowRefMut<'b> {
         let borrow = self.borrow.get();
         debug_assert!(is_writing(borrow));
         // Prevent the borrow counter from underflowing.
-        assert!(borrow != isize::MIN);
+        assert!(borrow != BorrowFlag::MIN);
         self.borrow.set(borrow - 1);
         BorrowRefMut { borrow: self.borrow }
     }
@@ -1691,9 +1850,14 @@ impl<'b> BorrowRefMut<'b> {
 /// See the [module-level documentation](self) for more.
 #[stable(feature = "rust1", since = "1.0.0")]
 #[must_not_suspend = "holding a RefMut across suspend points can cause BorrowErrors"]
+#[rustc_diagnostic_item = "RefCellRefMut"]
 pub struct RefMut<'b, T: ?Sized + 'b> {
-    value: &'b mut T,
+    // NB: we use a pointer instead of `&'b mut T` to avoid `noalias` violations, because a
+    // `RefMut` argument doesn't hold exclusivity for its whole scope, only until it drops.
+    value: NonNull<T>,
     borrow: BorrowRefMut<'b>,
+    // `NonNull` is covariant over `T`, so we need to reintroduce invariance.
+    marker: PhantomData<&'b mut T>,
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -1702,7 +1866,8 @@ impl<T: ?Sized> Deref for RefMut<'_, T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        self.value
+        // SAFETY: the value is accessible as long as we hold our borrow.
+        unsafe { self.value.as_ref() }
     }
 }
 
@@ -1710,17 +1875,21 @@ impl<T: ?Sized> Deref for RefMut<'_, T> {
 impl<T: ?Sized> DerefMut for RefMut<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
-        self.value
+        // SAFETY: the value is accessible as long as we hold our borrow.
+        unsafe { self.value.as_mut() }
     }
 }
 
-#[unstable(feature = "coerce_unsized", issue = "27732")]
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<T: ?Sized> DerefPure for RefMut<'_, T> {}
+
+#[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<'b, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<RefMut<'b, U>> for RefMut<'b, T> {}
 
 #[stable(feature = "std_guard_impls", since = "1.20.0")]
 impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.value.fmt(f)
+        (**self).fmt(f)
     }
 }
 
@@ -1728,38 +1897,49 @@ impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
 ///
 /// If you have a reference `&T`, then normally in Rust the compiler performs optimizations based on
 /// the knowledge that `&T` points to immutable data. Mutating that data, for example through an
-/// alias or by transmuting an `&T` into an `&mut T`, is considered undefined behavior.
+/// alias or by transmuting a `&T` into a `&mut T`, is considered undefined behavior.
 /// `UnsafeCell<T>` opts-out of the immutability guarantee for `&T`: a shared reference
 /// `&UnsafeCell<T>` may point to data that is being mutated. This is called "interior mutability".
 ///
-/// All other types that allow internal mutability, such as `Cell<T>` and `RefCell<T>`, internally
+/// All other types that allow internal mutability, such as [`Cell<T>`] and [`RefCell<T>`], internally
 /// use `UnsafeCell` to wrap their data.
 ///
 /// Note that only the immutability guarantee for shared references is affected by `UnsafeCell`. The
 /// uniqueness guarantee for mutable references is unaffected. There is *no* legal way to obtain
 /// aliasing `&mut`, not even with `UnsafeCell<T>`.
 ///
+/// `UnsafeCell` does nothing to avoid data races; they are still undefined behavior. If multiple
+/// threads have access to the same `UnsafeCell`, they must follow the usual rules of the
+/// [concurrent memory model]: conflicting non-synchronized accesses must be done via the APIs in
+/// [`core::sync::atomic`].
+///
 /// The `UnsafeCell` API itself is technically very simple: [`.get()`] gives you a raw pointer
 /// `*mut T` to its contents. It is up to _you_ as the abstraction designer to use that raw pointer
 /// correctly.
 ///
 /// [`.get()`]: `UnsafeCell::get`
+/// [concurrent memory model]: ../sync/atomic/index.html#memory-model-for-atomic-accesses
 ///
 /// The precise Rust aliasing rules are somewhat in flux, but the main points are not contentious:
 ///
-/// - If you create a safe reference with lifetime `'a` (either a `&T` or `&mut T`
-/// reference) that is accessible by safe code (for example, because you returned it),
-/// then you must not access the data in any way that contradicts that reference for the
-/// remainder of `'a`. For example, this means that if you take the `*mut T` from an
-/// `UnsafeCell<T>` and cast it to an `&T`, then the data in `T` must remain immutable
-/// (modulo any `UnsafeCell` data found within `T`, of course) until that reference's
-/// lifetime expires. Similarly, if you create a `&mut T` reference that is released to
-/// safe code, then you must not access the data within the `UnsafeCell` until that
-/// reference expires.
+/// - If you create a safe reference with lifetime `'a` (either a `&T` or `&mut T` reference), then
+/// you must not access the data in any way that contradicts that reference for the remainder of
+/// `'a`. For example, this means that if you take the `*mut T` from an `UnsafeCell<T>` and cast it
+/// to an `&T`, then the data in `T` must remain immutable (modulo any `UnsafeCell` data found
+/// within `T`, of course) until that reference's lifetime expires. Similarly, if you create a `&mut
+/// T` reference that is released to safe code, then you must not access the data within the
+/// `UnsafeCell` until that reference expires.
 ///
-/// - At all times, you must avoid data races. If multiple threads have access to
-/// the same `UnsafeCell`, then any writes must have a proper happens-before relation to all other
-/// accesses (or use atomics).
+/// - For both `&T` without `UnsafeCell<_>` and `&mut T`, you must also not deallocate the data
+/// until the reference expires. As a special exception, given an `&T`, any part of it that is
+/// inside an `UnsafeCell<_>` may be deallocated during the lifetime of the reference, after the
+/// last time the reference is used (dereferenced or reborrowed). Since you cannot deallocate a part
+/// of what a reference points to, this means the memory an `&T` points to can be deallocated only if
+/// *every part of it* (including padding) is inside an `UnsafeCell`.
+///
+///     However, whenever a `&UnsafeCell<T>` is constructed or dereferenced, it must still point to
+/// live memory and the compiler is allowed to insert spurious reads if it can prove that this
+/// memory has not yet been deallocated.
 ///
 /// To assist with proper design, the following scenarios are explicitly declared legal
 /// for single-threaded code:
@@ -1776,12 +1956,67 @@ impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
 /// to have multiple `&mut UnsafeCell<T>` aliases. That is, `UnsafeCell` is a wrapper
 /// designed to have a special interaction with _shared_ accesses (_i.e._, through an
 /// `&UnsafeCell<_>` reference); there is no magic whatsoever when dealing with _exclusive_
-/// accesses (_e.g._, through an `&mut UnsafeCell<_>`): neither the cell nor the wrapped value
+/// accesses (_e.g._, through a `&mut UnsafeCell<_>`): neither the cell nor the wrapped value
 /// may be aliased for the duration of that `&mut` borrow.
 /// This is showcased by the [`.get_mut()`] accessor, which is a _safe_ getter that yields
 /// a `&mut T`.
 ///
 /// [`.get_mut()`]: `UnsafeCell::get_mut`
+///
+/// # Memory layout
+///
+/// `UnsafeCell<T>` has the same in-memory representation as its inner type `T`. A consequence
+/// of this guarantee is that it is possible to convert between `T` and `UnsafeCell<T>`.
+/// Special care has to be taken when converting a nested `T` inside of an `Outer<T>` type
+/// to an `Outer<UnsafeCell<T>>` type: this is not sound when the `Outer<T>` type enables [niche]
+/// optimizations. For example, the type `Option<NonNull<u8>>` is typically 8 bytes large on
+/// 64-bit platforms, but the type `Option<UnsafeCell<NonNull<u8>>>` takes up 16 bytes of space.
+/// Therefore this is not a valid conversion, despite `NonNull<u8>` and `UnsafeCell<NonNull<u8>>>`
+/// having the same memory layout. This is because `UnsafeCell` disables niche optimizations in
+/// order to avoid its interior mutability property from spreading from `T` into the `Outer` type,
+/// thus this can cause distortions in the type size in these cases.
+///
+/// Note that the only valid way to obtain a `*mut T` pointer to the contents of a
+/// _shared_ `UnsafeCell<T>` is through [`.get()`]  or [`.raw_get()`]. A `&mut T` reference
+/// can be obtained by either dereferencing this pointer or by calling [`.get_mut()`]
+/// on an _exclusive_ `UnsafeCell<T>`. Even though `T` and `UnsafeCell<T>` have the
+/// same memory layout, the following is not allowed and undefined behavior:
+///
+/// ```rust,compile_fail
+/// # use std::cell::UnsafeCell;
+/// unsafe fn not_allowed<T>(ptr: &UnsafeCell<T>) -> &mut T {
+///   let t = ptr as *const UnsafeCell<T> as *mut T;
+///   // This is undefined behavior, because the `*mut T` pointer
+///   // was not obtained through `.get()` nor `.raw_get()`:
+///   unsafe { &mut *t }
+/// }
+/// ```
+///
+/// Instead, do this:
+///
+/// ```rust
+/// # use std::cell::UnsafeCell;
+/// // Safety: the caller must ensure that there are no references that
+/// // point to the *contents* of the `UnsafeCell`.
+/// unsafe fn get_mut<T>(ptr: &UnsafeCell<T>) -> &mut T {
+///   unsafe { &mut *ptr.get() }
+/// }
+/// ```
+///
+/// Converting in the other direction from a `&mut T`
+/// to an `&UnsafeCell<T>` is allowed:
+///
+/// ```rust
+/// # use std::cell::UnsafeCell;
+/// fn get_shared<T>(ptr: &mut T) -> &UnsafeCell<T> {
+///   let t = ptr as *mut T as *const UnsafeCell<T>;
+///   // SAFETY: `T` and `UnsafeCell<T>` have the same memory layout
+///   unsafe { &*t }
+/// }
+/// ```
+///
+/// [niche]: https://rust-lang.github.io/unsafe-code-guidelines/glossary.html#niche
+/// [`.raw_get()`]: `UnsafeCell::raw_get`
 ///
 /// # Examples
 ///
@@ -1837,7 +2072,7 @@ impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
 #[lang = "unsafe_cell"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[repr(transparent)]
-#[repr(no_niche)] // rust-lang/rust#68303.
+#[rustc_pub_transparent]
 pub struct UnsafeCell<T: ?Sized> {
     value: T,
 }
@@ -1849,7 +2084,7 @@ impl<T> UnsafeCell<T> {
     /// Constructs a new instance of `UnsafeCell` which will wrap the specified
     /// value.
     ///
-    /// All access to the inner value through methods is `unsafe`.
+    /// All access to the inner value through `&UnsafeCell<T>` requires `unsafe` code.
     ///
     /// # Examples
     ///
@@ -1865,7 +2100,7 @@ impl<T> UnsafeCell<T> {
         UnsafeCell { value }
     }
 
-    /// Unwraps the value.
+    /// Unwraps the value, consuming the cell.
     ///
     /// # Examples
     ///
@@ -1878,13 +2113,35 @@ impl<T> UnsafeCell<T> {
     /// ```
     #[inline(always)]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
+    #[rustc_const_stable(feature = "const_cell_into_inner", since = "1.83.0")]
+    #[rustc_allow_const_fn_unstable(const_precise_live_drops)]
     pub const fn into_inner(self) -> T {
         self.value
     }
 }
 
 impl<T: ?Sized> UnsafeCell<T> {
+    /// Converts from `&mut T` to `&mut UnsafeCell<T>`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::cell::UnsafeCell;
+    ///
+    /// let mut val = 42;
+    /// let uc = UnsafeCell::from_mut(&mut val);
+    ///
+    /// *uc.get_mut() -= 1;
+    /// assert_eq!(*uc.get_mut(), 41);
+    /// ```
+    #[inline(always)]
+    #[stable(feature = "unsafe_cell_from_mut", since = "1.84.0")]
+    #[rustc_const_stable(feature = "unsafe_cell_from_mut", since = "1.84.0")]
+    pub const fn from_mut(value: &mut T) -> &mut UnsafeCell<T> {
+        // SAFETY: `UnsafeCell<T>` has the same memory layout as `T` due to #[repr(transparent)].
+        unsafe { &mut *(value as *mut T as *mut UnsafeCell<T>) }
+    }
+
     /// Gets a mutable pointer to the wrapped value.
     ///
     /// This can be cast to a pointer of any kind.
@@ -1904,9 +2161,11 @@ impl<T: ?Sized> UnsafeCell<T> {
     #[inline(always)]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_unsafecell_get", since = "1.32.0")]
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn get(&self) -> *mut T {
         // We can just cast the pointer from `UnsafeCell<T>` to `T` because of
-        // #[repr(transparent)]. This exploits libstd's special status, there is
+        // #[repr(transparent)]. This exploits std's special status, there is
         // no guarantee for user code that this will work in future versions of the compiler!
         self as *const UnsafeCell<T> as *const T as *mut T
     }
@@ -1928,7 +2187,7 @@ impl<T: ?Sized> UnsafeCell<T> {
     /// ```
     #[inline(always)]
     #[stable(feature = "unsafe_cell_get_mut", since = "1.50.0")]
-    #[rustc_const_unstable(feature = "const_unsafecell_get_mut", issue = "88836")]
+    #[rustc_const_stable(feature = "const_unsafecell_get_mut", since = "1.83.0")]
     pub const fn get_mut(&mut self) -> &mut T {
         &mut self.value
     }
@@ -1955,6 +2214,8 @@ impl<T: ?Sized> UnsafeCell<T> {
     ///
     /// let m = MaybeUninit::<UnsafeCell<i32>>::uninit();
     /// unsafe { UnsafeCell::raw_get(m.as_ptr()).write(5); }
+    /// // avoid below which references to uninitialized data
+    /// // unsafe { UnsafeCell::get(&*m.as_ptr()).write(5); }
     /// let uc = unsafe { m.assume_init() };
     ///
     /// assert_eq!(uc.into_inner(), 5);
@@ -1962,9 +2223,10 @@ impl<T: ?Sized> UnsafeCell<T> {
     #[inline(always)]
     #[stable(feature = "unsafe_cell_raw_get", since = "1.56.0")]
     #[rustc_const_stable(feature = "unsafe_cell_raw_get", since = "1.56.0")]
+    #[rustc_diagnostic_item = "unsafe_cell_raw_get"]
     pub const fn raw_get(this: *const Self) -> *mut T {
         // We can just cast the pointer from `UnsafeCell<T>` to `T` because of
-        // #[repr(transparent)]. This exploits libstd's special status, there is
+        // #[repr(transparent)]. This exploits std's special status, there is
         // no guarantee for user code that this will work in future versions of the compiler!
         this as *const T as *mut T
     }
@@ -1979,20 +2241,165 @@ impl<T: Default> Default for UnsafeCell<T> {
 }
 
 #[stable(feature = "cell_from", since = "1.12.0")]
-#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
-impl<T> const From<T> for UnsafeCell<T> {
+impl<T> From<T> for UnsafeCell<T> {
     /// Creates a new `UnsafeCell<T>` containing the given value.
     fn from(t: T) -> UnsafeCell<T> {
         UnsafeCell::new(t)
     }
 }
 
-#[unstable(feature = "coerce_unsized", issue = "27732")]
+#[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<T: CoerceUnsized<U>, U> CoerceUnsized<UnsafeCell<U>> for UnsafeCell<T> {}
 
-#[allow(unused)]
-fn assert_coerce_unsized(a: UnsafeCell<&i32>, b: Cell<&i32>, c: RefCell<&i32>) {
-    let _: UnsafeCell<&dyn Send> = a;
-    let _: Cell<&dyn Send> = b;
-    let _: RefCell<&dyn Send> = c;
+// Allow types that wrap `UnsafeCell` to also implement `DispatchFromDyn`
+// and become dyn-compatible method receivers.
+// Note that currently `UnsafeCell` itself cannot be a method receiver
+// because it does not implement Deref.
+// In other words:
+// `self: UnsafeCell<&Self>` won't work
+// `self: UnsafeCellWrapper<Self>` becomes possible
+#[unstable(feature = "dispatch_from_dyn", issue = "none")]
+impl<T: DispatchFromDyn<U>, U> DispatchFromDyn<UnsafeCell<U>> for UnsafeCell<T> {}
+
+#[unstable(feature = "pointer_like_trait", issue = "none")]
+impl<T: PointerLike> PointerLike for UnsafeCell<T> {}
+
+/// [`UnsafeCell`], but [`Sync`].
+///
+/// This is just an `UnsafeCell`, except it implements `Sync`
+/// if `T` implements `Sync`.
+///
+/// `UnsafeCell` doesn't implement `Sync`, to prevent accidental mis-use.
+/// You can use `SyncUnsafeCell` instead of `UnsafeCell` to allow it to be
+/// shared between threads, if that's intentional.
+/// Providing proper synchronization is still the task of the user,
+/// making this type just as unsafe to use.
+///
+/// See [`UnsafeCell`] for details.
+#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+#[repr(transparent)]
+#[rustc_diagnostic_item = "SyncUnsafeCell"]
+#[rustc_pub_transparent]
+pub struct SyncUnsafeCell<T: ?Sized> {
+    value: UnsafeCell<T>,
 }
+
+#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+unsafe impl<T: ?Sized + Sync> Sync for SyncUnsafeCell<T> {}
+
+#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+impl<T> SyncUnsafeCell<T> {
+    /// Constructs a new instance of `SyncUnsafeCell` which will wrap the specified value.
+    #[inline]
+    pub const fn new(value: T) -> Self {
+        Self { value: UnsafeCell { value } }
+    }
+
+    /// Unwraps the value, consuming the cell.
+    #[inline]
+    #[rustc_const_unstable(feature = "sync_unsafe_cell", issue = "95439")]
+    pub const fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+impl<T: ?Sized> SyncUnsafeCell<T> {
+    /// Gets a mutable pointer to the wrapped value.
+    ///
+    /// This can be cast to a pointer of any kind.
+    /// Ensure that the access is unique (no active references, mutable or not)
+    /// when casting to `&mut T`, and ensure that there are no mutations
+    /// or mutable aliases going on when casting to `&T`
+    #[inline]
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
+    pub const fn get(&self) -> *mut T {
+        self.value.get()
+    }
+
+    /// Returns a mutable reference to the underlying data.
+    ///
+    /// This call borrows the `SyncUnsafeCell` mutably (at compile-time) which
+    /// guarantees that we possess the only reference.
+    #[inline]
+    pub const fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    /// Gets a mutable pointer to the wrapped value.
+    ///
+    /// See [`UnsafeCell::get`] for details.
+    #[inline]
+    pub const fn raw_get(this: *const Self) -> *mut T {
+        // We can just cast the pointer from `SyncUnsafeCell<T>` to `T` because
+        // of #[repr(transparent)] on both SyncUnsafeCell and UnsafeCell.
+        // See UnsafeCell::raw_get.
+        this as *const T as *mut T
+    }
+}
+
+#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+impl<T: Default> Default for SyncUnsafeCell<T> {
+    /// Creates an `SyncUnsafeCell`, with the `Default` value for T.
+    fn default() -> SyncUnsafeCell<T> {
+        SyncUnsafeCell::new(Default::default())
+    }
+}
+
+#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+impl<T> From<T> for SyncUnsafeCell<T> {
+    /// Creates a new `SyncUnsafeCell<T>` containing the given value.
+    fn from(t: T) -> SyncUnsafeCell<T> {
+        SyncUnsafeCell::new(t)
+    }
+}
+
+#[unstable(feature = "coerce_unsized", issue = "18598")]
+//#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+impl<T: CoerceUnsized<U>, U> CoerceUnsized<SyncUnsafeCell<U>> for SyncUnsafeCell<T> {}
+
+// Allow types that wrap `SyncUnsafeCell` to also implement `DispatchFromDyn`
+// and become dyn-compatible method receivers.
+// Note that currently `SyncUnsafeCell` itself cannot be a method receiver
+// because it does not implement Deref.
+// In other words:
+// `self: SyncUnsafeCell<&Self>` won't work
+// `self: SyncUnsafeCellWrapper<Self>` becomes possible
+#[unstable(feature = "dispatch_from_dyn", issue = "none")]
+//#[unstable(feature = "sync_unsafe_cell", issue = "95439")]
+impl<T: DispatchFromDyn<U>, U> DispatchFromDyn<SyncUnsafeCell<U>> for SyncUnsafeCell<T> {}
+
+#[unstable(feature = "pointer_like_trait", issue = "none")]
+impl<T: PointerLike> PointerLike for SyncUnsafeCell<T> {}
+
+#[allow(unused)]
+fn assert_coerce_unsized(
+    a: UnsafeCell<&i32>,
+    b: SyncUnsafeCell<&i32>,
+    c: Cell<&i32>,
+    d: RefCell<&i32>,
+) {
+    let _: UnsafeCell<&dyn Send> = a;
+    let _: SyncUnsafeCell<&dyn Send> = b;
+    let _: Cell<&dyn Send> = c;
+    let _: RefCell<&dyn Send> = d;
+}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<T: ?Sized> PinCoerceUnsized for UnsafeCell<T> {}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<T: ?Sized> PinCoerceUnsized for SyncUnsafeCell<T> {}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<T: ?Sized> PinCoerceUnsized for Cell<T> {}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<T: ?Sized> PinCoerceUnsized for RefCell<T> {}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<'b, T: ?Sized> PinCoerceUnsized for Ref<'b, T> {}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<'b, T: ?Sized> PinCoerceUnsized for RefMut<'b, T> {}

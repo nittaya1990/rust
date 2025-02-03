@@ -1,236 +1,329 @@
-#![cfg_attr(feature = "deny-warnings", deny(warnings))]
+#![feature(rustc_private)]
 // warn on lints, that are included in `rust-lang/rust`s bootstrap
 #![warn(rust_2018_idioms, unused_lifetimes)]
 
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use clippy_dev::{bless, fmt, lint, new_lint, serve, setup, update_lints};
-fn main() {
-    let matches = get_clap_config();
+use clap::{Args, Parser, Subcommand};
+use clippy_dev::{dogfood, fmt, lint, new_lint, release, serve, setup, sync, update_lints, utils};
+use std::convert::Infallible;
 
-    match matches.subcommand() {
-        ("bless", Some(matches)) => {
-            bless::bless(matches.is_present("ignore-timestamp"));
+fn main() {
+    let dev = Dev::parse();
+
+    match dev.command {
+        DevCommand::Bless => {
+            eprintln!("use `cargo bless` to automatically replace `.stderr` and `.fixed` files as tests are being run");
         },
-        ("fmt", Some(matches)) => {
-            fmt::run(matches.is_present("check"), matches.is_present("verbose"));
-        },
-        ("update_lints", Some(matches)) => {
-            if matches.is_present("print-only") {
+        DevCommand::Dogfood {
+            fix,
+            allow_dirty,
+            allow_staged,
+        } => dogfood::dogfood(fix, allow_dirty, allow_staged),
+        DevCommand::Fmt { check, verbose } => fmt::run(check, verbose),
+        DevCommand::UpdateLints { print_only, check } => {
+            if print_only {
                 update_lints::print_lints();
-            } else if matches.is_present("check") {
-                update_lints::run(update_lints::UpdateMode::Check);
+            } else if check {
+                update_lints::update(utils::UpdateMode::Check);
             } else {
-                update_lints::run(update_lints::UpdateMode::Change);
+                update_lints::update(utils::UpdateMode::Change);
             }
         },
-        ("new_lint", Some(matches)) => {
-            match new_lint::create(
-                matches.value_of("pass"),
-                matches.value_of("name"),
-                matches.value_of("category"),
-                matches.is_present("msrv"),
-            ) {
-                Ok(_) => update_lints::run(update_lints::UpdateMode::Change),
-                Err(e) => eprintln!("Unable to create lint: {}", e),
-            }
+        DevCommand::NewLint {
+            pass,
+            name,
+            category,
+            r#type,
+            msrv,
+        } => match new_lint::create(&pass, &name, &category, r#type.as_deref(), msrv) {
+            Ok(()) => update_lints::update(utils::UpdateMode::Change),
+            Err(e) => eprintln!("Unable to create lint: {e}"),
         },
-        ("setup", Some(sub_command)) => match sub_command.subcommand() {
-            ("intellij", Some(matches)) => setup::intellij::setup_rustc_src(
-                matches
-                    .value_of("rustc-repo-path")
-                    .expect("this field is mandatory and therefore always valid"),
-            ),
-            ("git-hook", Some(matches)) => setup::git_hook::install_hook(matches.is_present("force-override")),
-            ("vscode-tasks", Some(matches)) => setup::vscode::install_tasks(matches.is_present("force-override")),
-            _ => {},
+        DevCommand::Setup(SetupCommand { subcommand }) => match subcommand {
+            SetupSubcommand::Intellij { remove, repo_path } => {
+                if remove {
+                    setup::intellij::remove_rustc_src();
+                } else {
+                    setup::intellij::setup_rustc_src(&repo_path);
+                }
+            },
+            SetupSubcommand::GitHook { remove, force_override } => {
+                if remove {
+                    setup::git_hook::remove_hook();
+                } else {
+                    setup::git_hook::install_hook(force_override);
+                }
+            },
+            SetupSubcommand::Toolchain { force, release, name } => setup::toolchain::create(force, release, &name),
+            SetupSubcommand::VscodeTasks { remove, force_override } => {
+                if remove {
+                    setup::vscode::remove_tasks();
+                } else {
+                    setup::vscode::install_tasks(force_override);
+                }
+            },
         },
-        ("remove", Some(sub_command)) => match sub_command.subcommand() {
-            ("git-hook", Some(_)) => setup::git_hook::remove_hook(),
-            ("intellij", Some(_)) => setup::intellij::remove_rustc_src(),
-            ("vscode-tasks", Some(_)) => setup::vscode::remove_tasks(),
-            _ => {},
+        DevCommand::Remove(RemoveCommand { subcommand }) => match subcommand {
+            RemoveSubcommand::Intellij => setup::intellij::remove_rustc_src(),
+            RemoveSubcommand::GitHook => setup::git_hook::remove_hook(),
+            RemoveSubcommand::VscodeTasks => setup::vscode::remove_tasks(),
         },
-        ("serve", Some(matches)) => {
-            let port = matches.value_of("port").unwrap().parse().unwrap();
-            let lint = matches.value_of("lint");
-            serve::run(port, lint);
+        DevCommand::Serve { port, lint } => serve::run(port, lint),
+        DevCommand::Lint { path, args } => lint::run(&path, args.iter()),
+        DevCommand::RenameLint {
+            old_name,
+            new_name,
+            uplift,
+        } => update_lints::rename(&old_name, new_name.as_ref().unwrap_or(&old_name), uplift),
+        DevCommand::Deprecate { name, reason } => update_lints::deprecate(&name, &reason),
+        DevCommand::Sync(SyncCommand { subcommand }) => match subcommand {
+            SyncSubcommand::UpdateNightly => sync::update_nightly(),
         },
-        ("lint", Some(matches)) => {
-            let filename = matches.value_of("filename").unwrap();
-            lint::run(filename);
+        DevCommand::Release(ReleaseCommand { subcommand }) => match subcommand {
+            ReleaseSubcommand::BumpVersion => release::bump_version(),
         },
-        _ => {},
     }
 }
 
-fn get_clap_config<'a>() -> ArgMatches<'a> {
-    App::new("Clippy developer tooling")
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .subcommand(
-            SubCommand::with_name("bless")
-                .about("bless the test output changes")
-                .arg(
-                    Arg::with_name("ignore-timestamp")
-                        .long("ignore-timestamp")
-                        .help("Include files updated before clippy was built"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("fmt")
-                .about("Run rustfmt on all projects and tests")
-                .arg(
-                    Arg::with_name("check")
-                        .long("check")
-                        .help("Use the rustfmt --check option"),
-                )
-                .arg(
-                    Arg::with_name("verbose")
-                        .short("v")
-                        .long("verbose")
-                        .help("Echo commands run"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("update_lints")
-                .about("Updates lint registration and information from the source code")
-                .long_about(
-                    "Makes sure that:\n \
-                 * the lint count in README.md is correct\n \
-                 * the changelog contains markdown link references at the bottom\n \
-                 * all lint groups include the correct lints\n \
-                 * lint modules in `clippy_lints/*` are visible in `src/lifb.rs` via `pub mod`\n \
-                 * all lints are registered in the lint store",
-                )
-                .arg(Arg::with_name("print-only").long("print-only").help(
-                    "Print a table of lints to STDOUT. \
-                 This does not include deprecated and internal lints. \
-                 (Does not modify any files)",
-                ))
-                .arg(
-                    Arg::with_name("check")
-                        .long("check")
-                        .help("Checks that `cargo dev update_lints` has been run. Used on CI."),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("new_lint")
-                .about("Create new lint and run `cargo dev update_lints`")
-                .arg(
-                    Arg::with_name("pass")
-                        .short("p")
-                        .long("pass")
-                        .help("Specify whether the lint runs during the early or late pass")
-                        .takes_value(true)
-                        .possible_values(&["early", "late"])
-                        .required(true),
-                )
-                .arg(
-                    Arg::with_name("name")
-                        .short("n")
-                        .long("name")
-                        .help("Name of the new lint in snake case, ex: fn_too_long")
-                        .takes_value(true)
-                        .required(true),
-                )
-                .arg(
-                    Arg::with_name("category")
-                        .short("c")
-                        .long("category")
-                        .help("What category the lint belongs to")
-                        .default_value("nursery")
-                        .possible_values(&[
-                            "style",
-                            "correctness",
-                            "suspicious",
-                            "complexity",
-                            "perf",
-                            "pedantic",
-                            "restriction",
-                            "cargo",
-                            "nursery",
-                            "internal",
-                            "internal_warn",
-                        ])
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("msrv")
-                        .long("msrv")
-                        .help("Add MSRV config code to the lint"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("setup")
-                .about("Support for setting up your personal development environment")
-                .setting(AppSettings::ArgRequiredElseHelp)
-                .subcommand(
-                    SubCommand::with_name("intellij")
-                        .about("Alter dependencies so Intellij Rust can find rustc internals")
-                        .arg(
-                            Arg::with_name("rustc-repo-path")
-                                .long("repo-path")
-                                .short("r")
-                                .help("The path to a rustc repo that will be used for setting the dependencies")
-                                .takes_value(true)
-                                .value_name("path")
-                                .required(true),
-                        ),
-                )
-                .subcommand(
-                    SubCommand::with_name("git-hook")
-                        .about("Add a pre-commit git hook that formats your code to make it look pretty")
-                        .arg(
-                            Arg::with_name("force-override")
-                                .long("force-override")
-                                .short("f")
-                                .help("Forces the override of an existing git pre-commit hook")
-                                .required(false),
-                        ),
-                )
-                .subcommand(
-                    SubCommand::with_name("vscode-tasks")
-                        .about("Add several tasks to vscode for formatting, validation and testing")
-                        .arg(
-                            Arg::with_name("force-override")
-                                .long("force-override")
-                                .short("f")
-                                .help("Forces the override of existing vscode tasks")
-                                .required(false),
-                        ),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("remove")
-                .about("Support for undoing changes done by the setup command")
-                .setting(AppSettings::ArgRequiredElseHelp)
-                .subcommand(SubCommand::with_name("git-hook").about("Remove any existing pre-commit git hook"))
-                .subcommand(SubCommand::with_name("vscode-tasks").about("Remove any existing vscode tasks"))
-                .subcommand(
-                    SubCommand::with_name("intellij")
-                        .about("Removes rustc source paths added via `cargo dev setup intellij`"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("serve")
-                .about("Launch a local 'ALL the Clippy Lints' website in a browser")
-                .arg(
-                    Arg::with_name("port")
-                        .long("port")
-                        .short("p")
-                        .help("Local port for the http server")
-                        .default_value("8000")
-                        .validator_os(serve::validate_port),
-                )
-                .arg(Arg::with_name("lint").help("Which lint's page to load initially (optional)")),
-        )
-        .subcommand(
-            SubCommand::with_name("lint")
-                .about("Manually run clippy on a file")
-                .arg(
-                    Arg::with_name("filename")
-                        .required(true)
-                        .help("The path to a file to lint"),
-                ),
-        )
-        .get_matches()
+#[derive(Parser)]
+#[command(name = "dev", about)]
+struct Dev {
+    #[command(subcommand)]
+    command: DevCommand,
+}
+
+#[derive(Subcommand)]
+enum DevCommand {
+    /// Bless the test output changes
+    Bless,
+    /// Runs the dogfood test
+    Dogfood {
+        #[arg(long)]
+        /// Apply the suggestions when possible
+        fix: bool,
+        #[arg(long, requires = "fix")]
+        /// Fix code even if the working directory has changes
+        allow_dirty: bool,
+        #[arg(long, requires = "fix")]
+        /// Fix code even if the working directory has staged changes
+        allow_staged: bool,
+    },
+    /// Run rustfmt on all projects and tests
+    Fmt {
+        #[arg(long)]
+        /// Use the rustfmt --check option
+        check: bool,
+        #[arg(short, long)]
+        /// Echo commands run
+        verbose: bool,
+    },
+    #[command(name = "update_lints")]
+    /// Updates lint registration and information from the source code
+    ///
+    /// Makes sure that: {n}
+    /// * the lint count in README.md is correct {n}
+    /// * the changelog contains markdown link references at the bottom {n}
+    /// * all lint groups include the correct lints {n}
+    /// * lint modules in `clippy_lints/*` are visible in `src/lib.rs` via `pub mod` {n}
+    /// * all lints are registered in the lint store
+    UpdateLints {
+        #[arg(long)]
+        /// Print a table of lints to STDOUT
+        ///
+        /// This does not include deprecated and internal lints. (Does not modify any files)
+        print_only: bool,
+        #[arg(long)]
+        /// Checks that `cargo dev update_lints` has been run. Used on CI.
+        check: bool,
+    },
+    #[command(name = "new_lint")]
+    /// Create a new lint and run `cargo dev update_lints`
+    NewLint {
+        #[arg(short, long, value_parser = ["early", "late"], conflicts_with = "type", default_value = "late")]
+        /// Specify whether the lint runs during the early or late pass
+        pass: String,
+        #[arg(
+            short,
+            long,
+            value_parser = |name: &str| Ok::<_, Infallible>(name.replace('-', "_")),
+        )]
+        /// Name of the new lint in snake case, ex: `fn_too_long`
+        name: String,
+        #[arg(
+            short,
+            long,
+            value_parser = [
+                "style",
+                "correctness",
+                "suspicious",
+                "complexity",
+                "perf",
+                "pedantic",
+                "restriction",
+                "cargo",
+                "nursery",
+                "internal",
+            ],
+            default_value = "nursery",
+        )]
+        /// What category the lint belongs to
+        category: String,
+        #[arg(long)]
+        /// What directory the lint belongs in
+        r#type: Option<String>,
+        #[arg(long)]
+        /// Add MSRV config code to the lint
+        msrv: bool,
+    },
+    /// Support for setting up your personal development environment
+    Setup(SetupCommand),
+    /// Support for removing changes done by the setup command
+    Remove(RemoveCommand),
+    /// Launch a local 'ALL the Clippy Lints' website in a browser
+    Serve {
+        #[arg(short, long, default_value = "8000")]
+        /// Local port for the http server
+        port: u16,
+        #[arg(long)]
+        /// Which lint's page to load initially (optional)
+        lint: Option<String>,
+    },
+    #[allow(clippy::doc_markdown)]
+    /// Manually run clippy on a file or package
+    ///
+    /// ## Examples
+    ///
+    /// Lint a single file: {n}
+    ///     cargo dev lint tests/ui/attrs.rs
+    ///
+    /// Lint a package directory: {n}
+    ///     cargo dev lint tests/ui-cargo/wildcard_dependencies/fail {n}
+    ///     cargo dev lint ~/my-project
+    ///
+    /// Run rustfix: {n}
+    ///     cargo dev lint ~/my-project -- --fix
+    ///
+    /// Set lint levels: {n}
+    ///     cargo dev lint file.rs -- -W clippy::pedantic {n}
+    ///     cargo dev lint ~/my-project -- -- -W clippy::pedantic
+    Lint {
+        /// The path to a file or package directory to lint
+        path: String,
+        /// Pass extra arguments to cargo/clippy-driver
+        args: Vec<String>,
+    },
+    #[command(name = "rename_lint")]
+    /// Rename a lint
+    RenameLint {
+        /// The name of the lint to rename
+        old_name: String,
+        #[arg(required_unless_present = "uplift")]
+        /// The new name of the lint
+        new_name: Option<String>,
+        #[arg(long)]
+        /// This lint will be uplifted into rustc
+        uplift: bool,
+    },
+    /// Deprecate the given lint
+    Deprecate {
+        /// The name of the lint to deprecate
+        name: String,
+        #[arg(long, short)]
+        /// The reason for deprecation
+        reason: String,
+    },
+    /// Sync between the rust repo and the Clippy repo
+    Sync(SyncCommand),
+    /// Manage Clippy releases
+    Release(ReleaseCommand),
+}
+
+#[derive(Args)]
+struct SetupCommand {
+    #[command(subcommand)]
+    subcommand: SetupSubcommand,
+}
+
+#[derive(Subcommand)]
+enum SetupSubcommand {
+    /// Alter dependencies so Intellij Rust can find rustc internals
+    Intellij {
+        #[arg(long)]
+        /// Remove the dependencies added with 'cargo dev setup intellij'
+        remove: bool,
+        #[arg(long, short, conflicts_with = "remove")]
+        /// The path to a rustc repo that will be used for setting the dependencies
+        repo_path: String,
+    },
+    /// Add a pre-commit git hook that formats your code to make it look pretty
+    GitHook {
+        #[arg(long)]
+        /// Remove the pre-commit hook added with 'cargo dev setup git-hook'
+        remove: bool,
+        #[arg(long, short)]
+        /// Forces the override of an existing git pre-commit hook
+        force_override: bool,
+    },
+    /// Install a rustup toolchain pointing to the local clippy build
+    Toolchain {
+        #[arg(long, short)]
+        /// Override an existing toolchain
+        force: bool,
+        #[arg(long, short)]
+        /// Point to --release clippy binary
+        release: bool,
+        #[arg(long, default_value = "clippy")]
+        /// Name of the toolchain
+        name: String,
+    },
+    /// Add several tasks to vscode for formatting, validation and testing
+    VscodeTasks {
+        #[arg(long)]
+        /// Remove the tasks added with 'cargo dev setup vscode-tasks'
+        remove: bool,
+        #[arg(long, short)]
+        /// Forces the override of existing vscode tasks
+        force_override: bool,
+    },
+}
+
+#[derive(Args)]
+struct RemoveCommand {
+    #[command(subcommand)]
+    subcommand: RemoveSubcommand,
+}
+
+#[derive(Subcommand)]
+enum RemoveSubcommand {
+    /// Remove the dependencies added with 'cargo dev setup intellij'
+    Intellij,
+    /// Remove the pre-commit git hook
+    GitHook,
+    /// Remove the tasks added with 'cargo dev setup vscode-tasks'
+    VscodeTasks,
+}
+
+#[derive(Args)]
+struct SyncCommand {
+    #[command(subcommand)]
+    subcommand: SyncSubcommand,
+}
+
+#[derive(Subcommand)]
+enum SyncSubcommand {
+    #[command(name = "update_nightly")]
+    /// Update nightly version in rust-toolchain and `clippy_utils`
+    UpdateNightly,
+}
+
+#[derive(Args)]
+struct ReleaseCommand {
+    #[command(subcommand)]
+    subcommand: ReleaseSubcommand,
+}
+
+#[derive(Subcommand)]
+enum ReleaseSubcommand {
+    #[command(name = "bump_version")]
+    /// Bump the version in the Cargo.toml files
+    BumpVersion,
 }

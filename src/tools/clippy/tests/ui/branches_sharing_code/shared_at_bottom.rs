@@ -1,6 +1,11 @@
-#![allow(dead_code, clippy::equatable_if_let)]
 #![deny(clippy::if_same_then_else, clippy::branches_sharing_code)]
-
+#![allow(
+    clippy::equatable_if_let,
+    clippy::uninlined_format_args,
+    clippy::redundant_pattern_matching,
+    dead_code
+)]
+//@no-rustfix
 // This tests the branches_sharing_code lint at the end of blocks
 
 fn simple_examples() {
@@ -28,6 +33,8 @@ fn simple_examples() {
 
         // The rest is self contained and moveable => Only lint the rest
         let result = false;
+        //~^ ERROR: all if blocks contain the same code at the end
+        //~| NOTE: the end suggestion probably needs some adjustments to use the expressio
         println!("Block end!");
         result
     };
@@ -46,6 +53,7 @@ fn simple_examples() {
     } else {
         println!("This is also eq with the else block");
         println!("Same end of block");
+        //~^ ERROR: all if blocks contain the same code at the end
     }
 
     // Use of outer scope value
@@ -63,6 +71,7 @@ fn simple_examples() {
         println!("I'm a local because I use the value `z`: `{}`", z);
 
         println!(
+            //~^ ERROR: all if blocks contain the same code at the end
             "I'm moveable because I know: `outer_scope_value`: '{}'",
             outer_scope_value
         );
@@ -75,6 +84,7 @@ fn simple_examples() {
             println!("Hello World");
         } else {
             println!("Hello World");
+            //~^ ERROR: all if blocks contain the same code at the end
         }
     }
 }
@@ -91,6 +101,7 @@ fn simple_but_suggestion_is_invalid() {
         println!("{}", later_used_value);
     } else {
         let later_used_value = "A string value";
+        //~^ ERROR: all if blocks contain the same code at the end
         println!("{}", later_used_value);
         // I'm expecting a note about this
     }
@@ -104,6 +115,7 @@ fn simple_but_suggestion_is_invalid() {
         println!("Separator print statement");
 
         let simple_examples = "I now identify as a &str :)";
+        //~^ ERROR: all if blocks contain the same code at the end
         println!("This is the new simple_example: {}", simple_examples);
     }
     simple_examples();
@@ -169,6 +181,8 @@ fn added_note_for_expression_use() -> u32 {
     } else {
         let _ = 6;
         x << 2
+        //~^ ERROR: all if blocks contain the same code at the end
+        //~| NOTE: the end suggestion probably needs some adjustments to use the expressio
     };
 
     if x == 9 {
@@ -176,6 +190,8 @@ fn added_note_for_expression_use() -> u32 {
     } else {
         let _ = 17;
         x * 4
+        //~^ ERROR: all if blocks contain the same code at the end
+        //~| NOTE: the end suggestion probably needs some adjustments to use the expressio
     }
 }
 
@@ -188,6 +204,7 @@ fn test_suggestion_with_weird_formatting() {
     // The error message still looks weird tbh but this is the best I can do
     // for weird formatting
     if x == 17 { b = 1; a = 0x99; } else { a = 0x99; }
+    //~^ ERROR: all if blocks contain the same code at the end
 }
 
 fn fp_test() {

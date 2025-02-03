@@ -7,37 +7,39 @@
 //! more 'stuff' here in the future. It does not have a dependency on
 //! LLVM.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(associated_type_bounds)]
-#![feature(bool_to_option)]
-#![feature(exhaustive_patterns)]
-#![feature(let_else)]
-#![feature(min_specialization)]
-#![feature(never_type)]
-#![feature(nll)]
+#![doc(rust_logo)]
+#![feature(assert_matches)]
+#![feature(iter_intersperse)]
+#![feature(let_chains)]
 #![feature(rustc_attrs)]
-#![feature(step_trait)]
+#![feature(rustdoc_internals)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 
-#[macro_use]
-extern crate rustc_macros;
-
-#[macro_use]
-extern crate tracing;
-
-pub mod abi;
 pub mod asm;
+pub mod callconv;
+pub mod json;
 pub mod spec;
+pub mod target_features;
 
 #[cfg(test)]
 mod tests;
 
-/// Requirements for a `StableHashingContext` to be used in this crate.
-/// This is a hack to allow using the `HashStable_Generic` derive macro
-/// instead of implementing everything in `rustc_middle`.
-pub trait HashStableContext {}
+pub mod abi {
+    pub(crate) use Float::*;
+    pub(crate) use Primitive::*;
+    // Explicitly import `Float` to avoid ambiguity with `Primitive::Float`.
+    pub use rustc_abi::{Float, *};
+
+    pub use crate::callconv as call;
+}
+
+pub use rustc_abi::HashStableContext;
 
 /// The name of rustc's own place to organize libraries.
 ///
@@ -48,17 +50,13 @@ const RUST_LIB_DIR: &str = "rustlib";
 ///
 /// For example: `target_sysroot_path("/usr", "x86_64-unknown-linux-gnu")` =>
 /// `"lib*/rustlib/x86_64-unknown-linux-gnu"`.
-pub fn target_rustlib_path(sysroot: &Path, target_triple: &str) -> PathBuf {
-    let libdir = find_libdir(sysroot);
-    PathBuf::from_iter([
-        Path::new(libdir.as_ref()),
-        Path::new(RUST_LIB_DIR),
-        Path::new(target_triple),
-    ])
+pub fn relative_target_rustlib_path(sysroot: &Path, target_triple: &str) -> PathBuf {
+    let libdir = find_relative_libdir(sysroot);
+    Path::new(libdir.as_ref()).join(RUST_LIB_DIR).join(target_triple)
 }
 
 /// The name of the directory rustc expects libraries to be located.
-fn find_libdir(sysroot: &Path) -> std::borrow::Cow<'static, str> {
+fn find_relative_libdir(sysroot: &Path) -> std::borrow::Cow<'static, str> {
     // FIXME: This is a quick hack to make the rustc binary able to locate
     // Rust libraries in Linux environments where libraries might be installed
     // to lib64/lib32. This would be more foolproof by basing the sysroot off

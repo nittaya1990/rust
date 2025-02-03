@@ -1,272 +1,90 @@
-use rustc_errors::Diagnostic;
-use rustc_span::Span;
-use smallvec::smallvec;
-use smallvec::SmallVec;
+use std::collections::{BTreeMap, VecDeque};
 
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::subst::{GenericArg, Subst, SubstsRef};
-use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt, TypeFoldable};
+use rustc_infer::infer::InferCtxt;
+pub use rustc_infer::traits::util::*;
+use rustc_middle::bug;
+use rustc_middle::ty::{
+    self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt,
+};
+use rustc_span::Span;
+use smallvec::{SmallVec, smallvec};
+use tracing::debug;
 
-use super::{Normalized, Obligation, ObligationCause, PredicateObligation, SelectionContext};
-pub use rustc_infer::traits::{self, util::*};
-
-use std::iter;
-
-///////////////////////////////////////////////////////////////////////////
-// `TraitAliasExpander` iterator
-///////////////////////////////////////////////////////////////////////////
-
-/// "Trait alias expansion" is the process of expanding a sequence of trait
-/// references into another sequence by transitively following all trait
-/// aliases. e.g. If you have bounds like `Foo + Send`, a trait alias
-/// `trait Foo = Bar + Sync;`, and another trait alias
-/// `trait Bar = Read + Write`, then the bounds would expand to
-/// `Read + Write + Sync + Send`.
-/// Expansion is done via a DFS (depth-first search), and the `visited` field
-/// is used to avoid cycles.
-pub struct TraitAliasExpander<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    stack: Vec<TraitAliasExpansionInfo<'tcx>>,
-}
-
-/// Stores information about the expansion of a trait via a path of zero or more trait aliases.
-#[derive(Debug, Clone)]
-pub struct TraitAliasExpansionInfo<'tcx> {
-    pub path: SmallVec<[(ty::PolyTraitRef<'tcx>, Span); 4]>,
-}
-
-impl<'tcx> TraitAliasExpansionInfo<'tcx> {
-    fn new(trait_ref: ty::PolyTraitRef<'tcx>, span: Span) -> Self {
-        Self { path: smallvec![(trait_ref, span)] }
-    }
-
-    /// Adds diagnostic labels to `diag` for the expansion path of a trait through all intermediate
-    /// trait aliases.
-    pub fn label_with_exp_info(&self, diag: &mut Diagnostic, top_label: &str, use_desc: &str) {
-        diag.span_label(self.top().1, top_label);
-        if self.path.len() > 1 {
-            for (_, sp) in self.path.iter().rev().skip(1).take(self.path.len() - 2) {
-                diag.span_label(*sp, format!("referenced here ({})", use_desc));
-            }
-        }
-        if self.top().1 != self.bottom().1 {
-            // When the trait object is in a return type these two spans match, we don't want
-            // redundant labels.
-            diag.span_label(
-                self.bottom().1,
-                format!("trait alias used in trait object type ({})", use_desc),
-            );
-        }
-    }
-
-    pub fn trait_ref(&self) -> ty::PolyTraitRef<'tcx> {
-        self.top().0
-    }
-
-    pub fn top(&self) -> &(ty::PolyTraitRef<'tcx>, Span) {
-        self.path.last().unwrap()
-    }
-
-    pub fn bottom(&self) -> &(ty::PolyTraitRef<'tcx>, Span) {
-        self.path.first().unwrap()
-    }
-
-    fn clone_and_push(&self, trait_ref: ty::PolyTraitRef<'tcx>, span: Span) -> Self {
-        let mut path = self.path.clone();
-        path.push((trait_ref, span));
-
-        Self { path }
-    }
-}
-
+/// Return the trait and projection predicates that come from eagerly expanding the
+/// trait aliases in the list of clauses. For each trait predicate, record a stack
+/// of spans that trace from the user-written trait alias bound. For projection predicates,
+/// just record the span of the projection itself.
+///
+/// For trait aliases, we don't deduplicte the predicates, since we currently do not
+/// consider duplicated traits as a single trait for the purposes of our "one trait principal"
+/// restriction; however, for projections we do deduplicate them.
+///
+/// ```rust,ignore (fails)
+/// trait Bar {}
+/// trait Foo = Bar + Bar;
+///
+/// let dyn_incompatible: dyn Foo; // bad, two `Bar` principals.
+/// ```
 pub fn expand_trait_aliases<'tcx>(
     tcx: TyCtxt<'tcx>,
-    trait_refs: impl Iterator<Item = (ty::PolyTraitRef<'tcx>, Span)>,
-) -> TraitAliasExpander<'tcx> {
-    let items: Vec<_> =
-        trait_refs.map(|(trait_ref, span)| TraitAliasExpansionInfo::new(trait_ref, span)).collect();
-    TraitAliasExpander { tcx, stack: items }
-}
+    clauses: impl IntoIterator<Item = (ty::Clause<'tcx>, Span)>,
+) -> (
+    Vec<(ty::PolyTraitPredicate<'tcx>, SmallVec<[Span; 1]>)>,
+    Vec<(ty::PolyProjectionPredicate<'tcx>, Span)>,
+) {
+    let mut trait_preds = vec![];
+    let mut projection_preds = vec![];
+    let mut seen_projection_preds = FxHashSet::default();
 
-impl<'tcx> TraitAliasExpander<'tcx> {
-    /// If `item` is a trait alias and its predicate has not yet been visited, then expands `item`
-    /// to the definition, pushes the resulting expansion onto `self.stack`, and returns `false`.
-    /// Otherwise, immediately returns `true` if `item` is a regular trait, or `false` if it is a
-    /// trait alias.
-    /// The return value indicates whether `item` should be yielded to the user.
-    fn expand(&mut self, item: &TraitAliasExpansionInfo<'tcx>) -> bool {
-        let tcx = self.tcx;
-        let trait_ref = item.trait_ref();
-        let pred = trait_ref.without_const().to_predicate(tcx);
+    let mut queue: VecDeque<_> = clauses.into_iter().map(|(p, s)| (p, smallvec![s])).collect();
 
-        debug!("expand_trait_aliases: trait_ref={:?}", trait_ref);
-
-        // Don't recurse if this bound is not a trait alias.
-        let is_alias = tcx.is_trait_alias(trait_ref.def_id());
-        if !is_alias {
-            return true;
-        }
-
-        // Don't recurse if this trait alias is already on the stack for the DFS search.
-        let anon_pred = anonymize_predicate(tcx, pred);
-        if item.path.iter().rev().skip(1).any(|&(tr, _)| {
-            anonymize_predicate(tcx, tr.without_const().to_predicate(tcx)) == anon_pred
-        }) {
-            return false;
-        }
-
-        // Get components of trait alias.
-        let predicates = tcx.super_predicates_of(trait_ref.def_id());
-
-        let items = predicates.predicates.iter().rev().filter_map(|(pred, span)| {
-            pred.subst_supertrait(tcx, &trait_ref)
-                .to_opt_poly_trait_pred()
-                .map(|trait_ref| item.clone_and_push(trait_ref.map_bound(|t| t.trait_ref), *span))
-        });
-        debug!("expand_trait_aliases: items={:?}", items.clone());
-
-        self.stack.extend(items);
-
-        false
-    }
-}
-
-impl<'tcx> Iterator for TraitAliasExpander<'tcx> {
-    type Item = TraitAliasExpansionInfo<'tcx>;
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.stack.len(), None)
-    }
-
-    fn next(&mut self) -> Option<TraitAliasExpansionInfo<'tcx>> {
-        while let Some(item) = self.stack.pop() {
-            if self.expand(&item) {
-                return Some(item);
+    while let Some((clause, spans)) = queue.pop_front() {
+        match clause.kind().skip_binder() {
+            ty::ClauseKind::Trait(trait_pred) => {
+                if tcx.is_trait_alias(trait_pred.def_id()) {
+                    queue.extend(
+                        tcx.explicit_super_predicates_of(trait_pred.def_id())
+                            .iter_identity_copied()
+                            .map(|(clause, span)| {
+                                let mut spans = spans.clone();
+                                spans.push(span);
+                                (
+                                    clause.instantiate_supertrait(
+                                        tcx,
+                                        clause.kind().rebind(trait_pred.trait_ref),
+                                    ),
+                                    spans,
+                                )
+                            }),
+                    );
+                } else {
+                    trait_preds.push((clause.kind().rebind(trait_pred), spans));
+                }
             }
+            ty::ClauseKind::Projection(projection_pred) => {
+                let projection_pred = clause.kind().rebind(projection_pred);
+                if !seen_projection_preds.insert(tcx.anonymize_bound_vars(projection_pred)) {
+                    continue;
+                }
+                projection_preds.push((projection_pred, *spans.last().unwrap()));
+            }
+            ty::ClauseKind::RegionOutlives(..)
+            | ty::ClauseKind::TypeOutlives(..)
+            | ty::ClauseKind::ConstArgHasType(_, _)
+            | ty::ClauseKind::WellFormed(_)
+            | ty::ClauseKind::ConstEvaluatable(_)
+            | ty::ClauseKind::HostEffect(..) => {}
         }
-        None
     }
-}
 
-///////////////////////////////////////////////////////////////////////////
-// Iterator over def-IDs of supertraits
-///////////////////////////////////////////////////////////////////////////
-
-pub struct SupertraitDefIds<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    stack: Vec<DefId>,
-    visited: FxHashSet<DefId>,
-}
-
-pub fn supertrait_def_ids(tcx: TyCtxt<'_>, trait_def_id: DefId) -> SupertraitDefIds<'_> {
-    SupertraitDefIds {
-        tcx,
-        stack: vec![trait_def_id],
-        visited: Some(trait_def_id).into_iter().collect(),
-    }
-}
-
-impl Iterator for SupertraitDefIds<'_> {
-    type Item = DefId;
-
-    fn next(&mut self) -> Option<DefId> {
-        let def_id = self.stack.pop()?;
-        let predicates = self.tcx.super_predicates_of(def_id);
-        let visited = &mut self.visited;
-        self.stack.extend(
-            predicates
-                .predicates
-                .iter()
-                .filter_map(|(pred, _)| pred.to_opt_poly_trait_pred())
-                .map(|trait_ref| trait_ref.def_id())
-                .filter(|&super_def_id| visited.insert(super_def_id)),
-        );
-        Some(def_id)
-    }
+    (trait_preds, projection_preds)
 }
 
 ///////////////////////////////////////////////////////////////////////////
 // Other
 ///////////////////////////////////////////////////////////////////////////
-
-/// Instantiate all bound parameters of the impl with the given substs,
-/// returning the resulting trait ref and all obligations that arise.
-/// The obligations are closed under normalization.
-pub fn impl_trait_ref_and_oblig<'a, 'tcx>(
-    selcx: &mut SelectionContext<'a, 'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    impl_def_id: DefId,
-    impl_substs: SubstsRef<'tcx>,
-) -> (ty::TraitRef<'tcx>, impl Iterator<Item = PredicateObligation<'tcx>>) {
-    let impl_trait_ref = selcx.tcx().impl_trait_ref(impl_def_id).unwrap();
-    let impl_trait_ref = impl_trait_ref.subst(selcx.tcx(), impl_substs);
-    let Normalized { value: impl_trait_ref, obligations: normalization_obligations1 } =
-        super::normalize(selcx, param_env, ObligationCause::dummy(), impl_trait_ref);
-
-    let predicates = selcx.tcx().predicates_of(impl_def_id);
-    let predicates = predicates.instantiate(selcx.tcx(), impl_substs);
-    let Normalized { value: predicates, obligations: normalization_obligations2 } =
-        super::normalize(selcx, param_env, ObligationCause::dummy(), predicates);
-    let impl_obligations =
-        predicates_for_generics(ObligationCause::dummy(), 0, param_env, predicates);
-
-    let impl_obligations = impl_obligations
-        .chain(normalization_obligations1.into_iter())
-        .chain(normalization_obligations2.into_iter());
-
-    (impl_trait_ref, impl_obligations)
-}
-
-pub fn predicates_for_generics<'tcx>(
-    cause: ObligationCause<'tcx>,
-    recursion_depth: usize,
-    param_env: ty::ParamEnv<'tcx>,
-    generic_bounds: ty::InstantiatedPredicates<'tcx>,
-) -> impl Iterator<Item = PredicateObligation<'tcx>> {
-    debug!("predicates_for_generics(generic_bounds={:?})", generic_bounds);
-
-    iter::zip(generic_bounds.predicates, generic_bounds.spans).map(move |(predicate, span)| {
-        let cause = match *cause.code() {
-            traits::ItemObligation(def_id) if !span.is_dummy() => traits::ObligationCause::new(
-                cause.span,
-                cause.body_id,
-                traits::BindingObligation(def_id, span),
-            ),
-            _ => cause.clone(),
-        };
-        Obligation { cause, recursion_depth, param_env, predicate }
-    })
-}
-
-pub fn predicate_for_trait_ref<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    cause: ObligationCause<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    trait_ref: ty::TraitRef<'tcx>,
-    recursion_depth: usize,
-) -> PredicateObligation<'tcx> {
-    Obligation {
-        cause,
-        param_env,
-        recursion_depth,
-        predicate: ty::Binder::dummy(trait_ref).without_const().to_predicate(tcx),
-    }
-}
-
-pub fn predicate_for_trait_def<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    cause: ObligationCause<'tcx>,
-    trait_def_id: DefId,
-    recursion_depth: usize,
-    self_ty: Ty<'tcx>,
-    params: &[GenericArg<'tcx>],
-) -> PredicateObligation<'tcx> {
-    let trait_ref =
-        ty::TraitRef { def_id: trait_def_id, substs: tcx.mk_substs_trait(self_ty, params) };
-    predicate_for_trait_ref(tcx, cause, param_env, trait_ref, recursion_depth)
-}
 
 /// Casts a trait reference into a reference to one of its super
 /// traits; returns `None` if `target_trait_def_id` is not a
@@ -283,82 +101,406 @@ pub fn upcast_choices<'tcx>(
     supertraits(tcx, source_trait_ref).filter(|r| r.def_id() == target_trait_def_id).collect()
 }
 
-/// Given a trait `trait_ref`, returns the number of vtable entries
-/// that come from `trait_ref`, excluding its supertraits. Used in
-/// computing the vtable base for an upcast trait of a trait object.
-pub fn count_own_vtable_entries<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    trait_ref: ty::PolyTraitRef<'tcx>,
-) -> usize {
-    let existential_trait_ref =
-        trait_ref.map_bound(|trait_ref| ty::ExistentialTraitRef::erase_self_ty(tcx, trait_ref));
-    let existential_trait_ref = tcx.erase_regions(existential_trait_ref);
-    tcx.own_existential_vtable_entries(existential_trait_ref).len()
-}
-
-/// Given an upcast trait object described by `object`, returns the
-/// index of the method `method_def_id` (which should be part of
-/// `object.upcast_trait_ref`) within the vtable for `object`.
-pub fn get_vtable_index_of_object_method<'tcx, N>(
-    tcx: TyCtxt<'tcx>,
-    object: &super::ImplSourceObjectData<'tcx, N>,
-    method_def_id: DefId,
-) -> usize {
-    let existential_trait_ref = object
-        .upcast_trait_ref
-        .map_bound(|trait_ref| ty::ExistentialTraitRef::erase_self_ty(tcx, trait_ref));
-    let existential_trait_ref = tcx.erase_regions(existential_trait_ref);
-    // Count number of methods preceding the one we are selecting and
-    // add them to the total offset.
-    let index = tcx
-        .own_existential_vtable_entries(existential_trait_ref)
-        .iter()
-        .copied()
-        .position(|def_id| def_id == method_def_id)
-        .unwrap_or_else(|| {
-            bug!("get_vtable_index_of_object_method: {:?} was not found", method_def_id);
-        });
-    object.vtable_base + index
-}
-
-pub fn closure_trait_ref_and_return_type<'tcx>(
+pub(crate) fn closure_trait_ref_and_return_type<'tcx>(
     tcx: TyCtxt<'tcx>,
     fn_trait_def_id: DefId,
     self_ty: Ty<'tcx>,
     sig: ty::PolyFnSig<'tcx>,
     tuple_arguments: TupleArgumentsFlag,
 ) -> ty::Binder<'tcx, (ty::TraitRef<'tcx>, Ty<'tcx>)> {
+    assert!(!self_ty.has_escaping_bound_vars());
     let arguments_tuple = match tuple_arguments {
         TupleArgumentsFlag::No => sig.skip_binder().inputs()[0],
-        TupleArgumentsFlag::Yes => tcx.intern_tup(sig.skip_binder().inputs()),
+        TupleArgumentsFlag::Yes => Ty::new_tup(tcx, sig.skip_binder().inputs()),
     };
-    debug_assert!(!self_ty.has_escaping_bound_vars());
-    let trait_ref = ty::TraitRef {
-        def_id: fn_trait_def_id,
-        substs: tcx.mk_substs_trait(self_ty, &[arguments_tuple.into()]),
-    };
+    let trait_ref = ty::TraitRef::new(tcx, fn_trait_def_id, [self_ty, arguments_tuple]);
     sig.map_bound(|sig| (trait_ref, sig.output()))
 }
 
-pub fn generator_trait_ref_and_outputs<'tcx>(
+pub(crate) fn coroutine_trait_ref_and_outputs<'tcx>(
     tcx: TyCtxt<'tcx>,
     fn_trait_def_id: DefId,
     self_ty: Ty<'tcx>,
-    sig: ty::PolyGenSig<'tcx>,
-) -> ty::Binder<'tcx, (ty::TraitRef<'tcx>, Ty<'tcx>, Ty<'tcx>)> {
-    debug_assert!(!self_ty.has_escaping_bound_vars());
-    let trait_ref = ty::TraitRef {
-        def_id: fn_trait_def_id,
-        substs: tcx.mk_substs_trait(self_ty, &[sig.skip_binder().resume_ty.into()]),
-    };
-    sig.map_bound(|sig| (trait_ref, sig.yield_ty, sig.return_ty))
+    sig: ty::GenSig<TyCtxt<'tcx>>,
+) -> (ty::TraitRef<'tcx>, Ty<'tcx>, Ty<'tcx>) {
+    assert!(!self_ty.has_escaping_bound_vars());
+    let trait_ref = ty::TraitRef::new(tcx, fn_trait_def_id, [self_ty, sig.resume_ty]);
+    (trait_ref, sig.yield_ty, sig.return_ty)
+}
+
+pub(crate) fn future_trait_ref_and_outputs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    fn_trait_def_id: DefId,
+    self_ty: Ty<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
+) -> (ty::TraitRef<'tcx>, Ty<'tcx>) {
+    assert!(!self_ty.has_escaping_bound_vars());
+    let trait_ref = ty::TraitRef::new(tcx, fn_trait_def_id, [self_ty]);
+    (trait_ref, sig.return_ty)
+}
+
+pub(crate) fn iterator_trait_ref_and_outputs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    iterator_def_id: DefId,
+    self_ty: Ty<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
+) -> (ty::TraitRef<'tcx>, Ty<'tcx>) {
+    assert!(!self_ty.has_escaping_bound_vars());
+    let trait_ref = ty::TraitRef::new(tcx, iterator_def_id, [self_ty]);
+    (trait_ref, sig.yield_ty)
+}
+
+pub(crate) fn async_iterator_trait_ref_and_outputs<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    async_iterator_def_id: DefId,
+    self_ty: Ty<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
+) -> (ty::TraitRef<'tcx>, Ty<'tcx>) {
+    assert!(!self_ty.has_escaping_bound_vars());
+    let trait_ref = ty::TraitRef::new(tcx, async_iterator_def_id, [self_ty]);
+    (trait_ref, sig.yield_ty)
 }
 
 pub fn impl_item_is_final(tcx: TyCtxt<'_>, assoc_item: &ty::AssocItem) -> bool {
-    assoc_item.defaultness.is_final() && tcx.impl_defaultness(assoc_item.container.id()).is_final()
+    assoc_item.defaultness(tcx).is_final()
+        && tcx.defaultness(assoc_item.container_id(tcx)).is_final()
 }
 
-pub enum TupleArgumentsFlag {
+pub(crate) enum TupleArgumentsFlag {
     Yes,
     No,
+}
+
+/// Executes `f` on `value` after replacing all escaping bound variables with placeholders
+/// and then replaces these placeholders with the original bound variables in the result.
+///
+/// In most places, bound variables should be replaced right when entering a binder, making
+/// this function unnecessary. However, normalization currently does not do that, so we have
+/// to do this lazily.
+///
+/// You should not add any additional uses of this function, at least not without first
+/// discussing it with t-types.
+///
+/// FIXME(@lcnr): We may even consider experimenting with eagerly replacing bound vars during
+/// normalization as well, at which point this function will be unnecessary and can be removed.
+pub fn with_replaced_escaping_bound_vars<
+    'a,
+    'tcx,
+    T: TypeFoldable<TyCtxt<'tcx>>,
+    R: TypeFoldable<TyCtxt<'tcx>>,
+>(
+    infcx: &'a InferCtxt<'tcx>,
+    universe_indices: &'a mut Vec<Option<ty::UniverseIndex>>,
+    value: T,
+    f: impl FnOnce(T) -> R,
+) -> R {
+    if value.has_escaping_bound_vars() {
+        let (value, mapped_regions, mapped_types, mapped_consts) =
+            BoundVarReplacer::replace_bound_vars(infcx, universe_indices, value);
+        let result = f(value);
+        PlaceholderReplacer::replace_placeholders(
+            infcx,
+            mapped_regions,
+            mapped_types,
+            mapped_consts,
+            universe_indices,
+            result,
+        )
+    } else {
+        f(value)
+    }
+}
+
+pub struct BoundVarReplacer<'a, 'tcx> {
+    infcx: &'a InferCtxt<'tcx>,
+    // These three maps track the bound variable that were replaced by placeholders. It might be
+    // nice to remove these since we already have the `kind` in the placeholder; we really just need
+    // the `var` (but we *could* bring that into scope if we were to track them as we pass them).
+    mapped_regions: FxIndexMap<ty::PlaceholderRegion, ty::BoundRegion>,
+    mapped_types: FxIndexMap<ty::PlaceholderType, ty::BoundTy>,
+    mapped_consts: BTreeMap<ty::PlaceholderConst, ty::BoundVar>,
+    // The current depth relative to *this* folding, *not* the entire normalization. In other words,
+    // the depth of binders we've passed here.
+    current_index: ty::DebruijnIndex,
+    // The `UniverseIndex` of the binding levels above us. These are optional, since we are lazy:
+    // we don't actually create a universe until we see a bound var we have to replace.
+    universe_indices: &'a mut Vec<Option<ty::UniverseIndex>>,
+}
+
+impl<'a, 'tcx> BoundVarReplacer<'a, 'tcx> {
+    /// Returns `Some` if we *were* able to replace bound vars. If there are any bound vars that
+    /// use a binding level above `universe_indices.len()`, we fail.
+    pub fn replace_bound_vars<T: TypeFoldable<TyCtxt<'tcx>>>(
+        infcx: &'a InferCtxt<'tcx>,
+        universe_indices: &'a mut Vec<Option<ty::UniverseIndex>>,
+        value: T,
+    ) -> (
+        T,
+        FxIndexMap<ty::PlaceholderRegion, ty::BoundRegion>,
+        FxIndexMap<ty::PlaceholderType, ty::BoundTy>,
+        BTreeMap<ty::PlaceholderConst, ty::BoundVar>,
+    ) {
+        let mapped_regions: FxIndexMap<ty::PlaceholderRegion, ty::BoundRegion> =
+            FxIndexMap::default();
+        let mapped_types: FxIndexMap<ty::PlaceholderType, ty::BoundTy> = FxIndexMap::default();
+        let mapped_consts: BTreeMap<ty::PlaceholderConst, ty::BoundVar> = BTreeMap::new();
+
+        let mut replacer = BoundVarReplacer {
+            infcx,
+            mapped_regions,
+            mapped_types,
+            mapped_consts,
+            current_index: ty::INNERMOST,
+            universe_indices,
+        };
+
+        let value = value.fold_with(&mut replacer);
+
+        (value, replacer.mapped_regions, replacer.mapped_types, replacer.mapped_consts)
+    }
+
+    fn universe_for(&mut self, debruijn: ty::DebruijnIndex) -> ty::UniverseIndex {
+        let infcx = self.infcx;
+        let index =
+            self.universe_indices.len() + self.current_index.as_usize() - debruijn.as_usize() - 1;
+        let universe = self.universe_indices[index].unwrap_or_else(|| {
+            for i in self.universe_indices.iter_mut().take(index + 1) {
+                *i = i.or_else(|| Some(infcx.create_next_universe()))
+            }
+            self.universe_indices[index].unwrap()
+        });
+        universe
+    }
+}
+
+impl<'tcx> TypeFolder<TyCtxt<'tcx>> for BoundVarReplacer<'_, 'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
+        self.infcx.tcx
+    }
+
+    fn fold_binder<T: TypeFoldable<TyCtxt<'tcx>>>(
+        &mut self,
+        t: ty::Binder<'tcx, T>,
+    ) -> ty::Binder<'tcx, T> {
+        self.current_index.shift_in(1);
+        let t = t.super_fold_with(self);
+        self.current_index.shift_out(1);
+        t
+    }
+
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
+        match *r {
+            ty::ReBound(debruijn, _)
+                if debruijn.as_usize()
+                    >= self.current_index.as_usize() + self.universe_indices.len() =>
+            {
+                bug!(
+                    "Bound vars {r:#?} outside of `self.universe_indices`: {:#?}",
+                    self.universe_indices
+                );
+            }
+            ty::ReBound(debruijn, br) if debruijn >= self.current_index => {
+                let universe = self.universe_for(debruijn);
+                let p = ty::PlaceholderRegion { universe, bound: br };
+                self.mapped_regions.insert(p, br);
+                ty::Region::new_placeholder(self.infcx.tcx, p)
+            }
+            _ => r,
+        }
+    }
+
+    fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
+        match *t.kind() {
+            ty::Bound(debruijn, _)
+                if debruijn.as_usize() + 1
+                    > self.current_index.as_usize() + self.universe_indices.len() =>
+            {
+                bug!(
+                    "Bound vars {t:#?} outside of `self.universe_indices`: {:#?}",
+                    self.universe_indices
+                );
+            }
+            ty::Bound(debruijn, bound_ty) if debruijn >= self.current_index => {
+                let universe = self.universe_for(debruijn);
+                let p = ty::PlaceholderType { universe, bound: bound_ty };
+                self.mapped_types.insert(p, bound_ty);
+                Ty::new_placeholder(self.infcx.tcx, p)
+            }
+            _ if t.has_vars_bound_at_or_above(self.current_index) => t.super_fold_with(self),
+            _ => t,
+        }
+    }
+
+    fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
+        match ct.kind() {
+            ty::ConstKind::Bound(debruijn, _)
+                if debruijn.as_usize() + 1
+                    > self.current_index.as_usize() + self.universe_indices.len() =>
+            {
+                bug!(
+                    "Bound vars {ct:#?} outside of `self.universe_indices`: {:#?}",
+                    self.universe_indices
+                );
+            }
+            ty::ConstKind::Bound(debruijn, bound_const) if debruijn >= self.current_index => {
+                let universe = self.universe_for(debruijn);
+                let p = ty::PlaceholderConst { universe, bound: bound_const };
+                self.mapped_consts.insert(p, bound_const);
+                ty::Const::new_placeholder(self.infcx.tcx, p)
+            }
+            _ => ct.super_fold_with(self),
+        }
+    }
+
+    fn fold_predicate(&mut self, p: ty::Predicate<'tcx>) -> ty::Predicate<'tcx> {
+        if p.has_vars_bound_at_or_above(self.current_index) { p.super_fold_with(self) } else { p }
+    }
+}
+
+/// The inverse of [`BoundVarReplacer`]: replaces placeholders with the bound vars from which they came.
+pub struct PlaceholderReplacer<'a, 'tcx> {
+    infcx: &'a InferCtxt<'tcx>,
+    mapped_regions: FxIndexMap<ty::PlaceholderRegion, ty::BoundRegion>,
+    mapped_types: FxIndexMap<ty::PlaceholderType, ty::BoundTy>,
+    mapped_consts: BTreeMap<ty::PlaceholderConst, ty::BoundVar>,
+    universe_indices: &'a [Option<ty::UniverseIndex>],
+    current_index: ty::DebruijnIndex,
+}
+
+impl<'a, 'tcx> PlaceholderReplacer<'a, 'tcx> {
+    pub fn replace_placeholders<T: TypeFoldable<TyCtxt<'tcx>>>(
+        infcx: &'a InferCtxt<'tcx>,
+        mapped_regions: FxIndexMap<ty::PlaceholderRegion, ty::BoundRegion>,
+        mapped_types: FxIndexMap<ty::PlaceholderType, ty::BoundTy>,
+        mapped_consts: BTreeMap<ty::PlaceholderConst, ty::BoundVar>,
+        universe_indices: &'a [Option<ty::UniverseIndex>],
+        value: T,
+    ) -> T {
+        let mut replacer = PlaceholderReplacer {
+            infcx,
+            mapped_regions,
+            mapped_types,
+            mapped_consts,
+            universe_indices,
+            current_index: ty::INNERMOST,
+        };
+        value.fold_with(&mut replacer)
+    }
+}
+
+impl<'tcx> TypeFolder<TyCtxt<'tcx>> for PlaceholderReplacer<'_, 'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
+        self.infcx.tcx
+    }
+
+    fn fold_binder<T: TypeFoldable<TyCtxt<'tcx>>>(
+        &mut self,
+        t: ty::Binder<'tcx, T>,
+    ) -> ty::Binder<'tcx, T> {
+        if !t.has_placeholders() && !t.has_infer() {
+            return t;
+        }
+        self.current_index.shift_in(1);
+        let t = t.super_fold_with(self);
+        self.current_index.shift_out(1);
+        t
+    }
+
+    fn fold_region(&mut self, r0: ty::Region<'tcx>) -> ty::Region<'tcx> {
+        let r1 = match *r0 {
+            ty::ReVar(vid) => self
+                .infcx
+                .inner
+                .borrow_mut()
+                .unwrap_region_constraints()
+                .opportunistic_resolve_var(self.infcx.tcx, vid),
+            _ => r0,
+        };
+
+        let r2 = match *r1 {
+            ty::RePlaceholder(p) => {
+                let replace_var = self.mapped_regions.get(&p);
+                match replace_var {
+                    Some(replace_var) => {
+                        let index = self
+                            .universe_indices
+                            .iter()
+                            .position(|u| matches!(u, Some(pu) if *pu == p.universe))
+                            .unwrap_or_else(|| bug!("Unexpected placeholder universe."));
+                        let db = ty::DebruijnIndex::from_usize(
+                            self.universe_indices.len() - index + self.current_index.as_usize() - 1,
+                        );
+                        ty::Region::new_bound(self.cx(), db, *replace_var)
+                    }
+                    None => r1,
+                }
+            }
+            _ => r1,
+        };
+
+        debug!(?r0, ?r1, ?r2, "fold_region");
+
+        r2
+    }
+
+    fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
+        let ty = self.infcx.shallow_resolve(ty);
+        match *ty.kind() {
+            ty::Placeholder(p) => {
+                let replace_var = self.mapped_types.get(&p);
+                match replace_var {
+                    Some(replace_var) => {
+                        let index = self
+                            .universe_indices
+                            .iter()
+                            .position(|u| matches!(u, Some(pu) if *pu == p.universe))
+                            .unwrap_or_else(|| bug!("Unexpected placeholder universe."));
+                        let db = ty::DebruijnIndex::from_usize(
+                            self.universe_indices.len() - index + self.current_index.as_usize() - 1,
+                        );
+                        Ty::new_bound(self.infcx.tcx, db, *replace_var)
+                    }
+                    None => {
+                        if ty.has_infer() {
+                            ty.super_fold_with(self)
+                        } else {
+                            ty
+                        }
+                    }
+                }
+            }
+
+            _ if ty.has_placeholders() || ty.has_infer() => ty.super_fold_with(self),
+            _ => ty,
+        }
+    }
+
+    fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
+        let ct = self.infcx.shallow_resolve_const(ct);
+        if let ty::ConstKind::Placeholder(p) = ct.kind() {
+            let replace_var = self.mapped_consts.get(&p);
+            match replace_var {
+                Some(replace_var) => {
+                    let index = self
+                        .universe_indices
+                        .iter()
+                        .position(|u| matches!(u, Some(pu) if *pu == p.universe))
+                        .unwrap_or_else(|| bug!("Unexpected placeholder universe."));
+                    let db = ty::DebruijnIndex::from_usize(
+                        self.universe_indices.len() - index + self.current_index.as_usize() - 1,
+                    );
+                    ty::Const::new_bound(self.infcx.tcx, db, *replace_var)
+                }
+                None => {
+                    if ct.has_infer() {
+                        ct.super_fold_with(self)
+                    } else {
+                        ct
+                    }
+                }
+            }
+        } else {
+            ct.super_fold_with(self)
+        }
+    }
 }

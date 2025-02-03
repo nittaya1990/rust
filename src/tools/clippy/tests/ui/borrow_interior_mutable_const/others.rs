@@ -1,16 +1,16 @@
-#![warn(clippy::borrow_interior_mutable_const)]
+#![deny(clippy::borrow_interior_mutable_const)]
 #![allow(clippy::declare_interior_mutable_const, clippy::needless_borrow)]
 #![allow(const_item_mutation)]
 
 use std::borrow::Cow;
 use std::cell::{Cell, UnsafeCell};
 use std::fmt::Display;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ATOMIC: AtomicUsize = AtomicUsize::new(5);
 const CELL: Cell<usize> = Cell::new(6);
-const ATOMIC_TUPLE: ([AtomicUsize; 1], Vec<AtomicUsize>, u8) = ([ATOMIC], Vec::new(), 7);
+const ATOMIC_TUPLE: ([AtomicUsize; 1], Option<Box<AtomicUsize>>, u8) = ([ATOMIC], None, 7);
 const INTEGER: u8 = 8;
 const STRING: String = String::new();
 const STR: &str = "012345";
@@ -42,8 +42,19 @@ impl<T> StaticRef<T> {
 impl<T> std::ops::Deref for StaticRef<T> {
     type Target = T;
 
-    fn deref(&self) -> &'static T {
+    fn deref(&self) -> &T {
         unsafe { &*self.ptr }
+    }
+}
+
+// ICE regression test
+mod issue12979 {
+    use std::cell::UnsafeCell;
+
+    const ATOMIC_TUPLE: (Vec<UnsafeCell<u8>>, ()) = (Vec::new(), ());
+
+    fn main() {
+        let _x = &ATOMIC_TUPLE.0;
     }
 }
 
@@ -51,14 +62,14 @@ impl<T> std::ops::Deref for StaticRef<T> {
 const CELL_REF: StaticRef<(UnsafeCell<u32>,)> = unsafe { StaticRef::new(std::ptr::null()) };
 
 fn main() {
-    ATOMIC.store(1, Ordering::SeqCst); //~ ERROR interior mutability
-    assert_eq!(ATOMIC.load(Ordering::SeqCst), 5); //~ ERROR interior mutability
+    ATOMIC.store(1, Ordering::SeqCst); //~ ERROR: interior mutability
+    assert_eq!(ATOMIC.load(Ordering::SeqCst), 5); //~ ERROR: interior mutability
 
     let _once = ONCE_INIT;
-    let _once_ref = &ONCE_INIT; //~ ERROR interior mutability
-    let _once_ref_2 = &&ONCE_INIT; //~ ERROR interior mutability
-    let _once_ref_4 = &&&&ONCE_INIT; //~ ERROR interior mutability
-    let _once_mut = &mut ONCE_INIT; //~ ERROR interior mutability
+    let _once_ref = &ONCE_INIT; //~ ERROR: interior mutability
+    let _once_ref_2 = &&ONCE_INIT; //~ ERROR: interior mutability
+    let _once_ref_4 = &&&&ONCE_INIT; //~ ERROR: interior mutability
+    let _once_mut = &mut ONCE_INIT; //~ ERROR: interior mutability
     let _atomic_into_inner = ATOMIC.into_inner();
     // these should be all fine.
     let _twice = (ONCE_INIT, ONCE_INIT);
@@ -69,23 +80,22 @@ fn main() {
     let _ref_array_once = &[ONCE_INIT, ONCE_INIT][0];
 
     // referencing projection is still bad.
-    let _ = &ATOMIC_TUPLE; //~ ERROR interior mutability
-    let _ = &ATOMIC_TUPLE.0; //~ ERROR interior mutability
-    let _ = &(&&&&ATOMIC_TUPLE).0; //~ ERROR interior mutability
-    let _ = &ATOMIC_TUPLE.0[0]; //~ ERROR interior mutability
-    let _ = ATOMIC_TUPLE.0[0].load(Ordering::SeqCst); //~ ERROR interior mutability
-    let _ = &*ATOMIC_TUPLE.1;
+    let _ = &ATOMIC_TUPLE; //~ ERROR: interior mutability
+    let _ = &ATOMIC_TUPLE.0; //~ ERROR: interior mutability
+    let _ = &(&&&&ATOMIC_TUPLE).0; //~ ERROR: interior mutability
+    let _ = &ATOMIC_TUPLE.0[0]; //~ ERROR: interior mutability
+    let _ = ATOMIC_TUPLE.0[0].load(Ordering::SeqCst); //~ ERROR: interior mutability
     let _ = &ATOMIC_TUPLE.2;
     let _ = (&&&&ATOMIC_TUPLE).0;
     let _ = (&&&&ATOMIC_TUPLE).2;
     let _ = ATOMIC_TUPLE.0;
-    let _ = ATOMIC_TUPLE.0[0]; //~ ERROR interior mutability
+    let _ = ATOMIC_TUPLE.0[0]; //~ ERROR: interior mutability
     let _ = ATOMIC_TUPLE.1.into_iter();
     let _ = ATOMIC_TUPLE.2;
     let _ = &{ ATOMIC_TUPLE };
 
-    CELL.set(2); //~ ERROR interior mutability
-    assert_eq!(CELL.get(), 6); //~ ERROR interior mutability
+    CELL.set(2); //~ ERROR: interior mutability
+    assert_eq!(CELL.get(), 6); //~ ERROR: interior mutability
 
     assert_eq!(INTEGER, 8);
     assert!(STRING.is_empty());

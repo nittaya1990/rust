@@ -1,18 +1,18 @@
-use crate::constraints::ConstraintSccIndex;
-use crate::RegionInferenceContext;
-use itertools::Itertools;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::graph::vec_graph::VecGraph;
-use rustc_data_structures::graph::WithSuccessors;
-use rustc_middle::ty::RegionVid;
 use std::ops::Range;
-use std::rc::Rc;
 
-crate struct ReverseSccGraph {
+use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::graph;
+use rustc_data_structures::graph::vec_graph::VecGraph;
+use rustc_middle::ty::RegionVid;
+
+use crate::RegionInferenceContext;
+use crate::constraints::ConstraintSccIndex;
+
+pub(crate) struct ReverseSccGraph {
     graph: VecGraph<ConstraintSccIndex>,
     /// For each SCC, the range of `universal_regions` that use that SCC as
     /// their value.
-    scc_regions: FxHashMap<ConstraintSccIndex, Range<usize>>,
+    scc_regions: FxIndexMap<ConstraintSccIndex, Range<usize>>,
     /// All of the universal regions, in grouped so that `scc_regions` can
     /// index into here.
     universal_regions: Vec<RegionVid>,
@@ -24,9 +24,8 @@ impl ReverseSccGraph {
         &'a self,
         scc0: ConstraintSccIndex,
     ) -> impl Iterator<Item = RegionVid> + 'a {
-        let mut duplicates = FxHashSet::default();
-        self.graph
-            .depth_first_search(scc0)
+        let mut duplicates = FxIndexSet::default();
+        graph::depth_first_search(&self.graph, scc0)
             .flat_map(move |scc1| {
                 self.scc_regions
                     .get(&scc1)
@@ -38,31 +37,29 @@ impl ReverseSccGraph {
 }
 
 impl RegionInferenceContext<'_> {
-    /// Compute and return the reverse SCC-based constraint graph (lazily).
-    pub(super) fn reverse_scc_graph(&mut self) -> Rc<ReverseSccGraph> {
-        if let Some(g) = &self.rev_scc_graph {
-            return g.clone();
+    /// Compute the reverse SCC-based constraint graph (lazily).
+    pub(super) fn compute_reverse_scc_graph(&mut self) {
+        if self.rev_scc_graph.is_some() {
+            return;
         }
 
         let graph = self.constraint_sccs.reverse();
         let mut paired_scc_regions = self
-            .universal_regions
             .universal_regions()
+            .universal_regions_iter()
             .map(|region| (self.constraint_sccs.scc(region), region))
-            .collect_vec();
+            .collect::<Vec<_>>();
         paired_scc_regions.sort();
         let universal_regions = paired_scc_regions.iter().map(|&(_, region)| region).collect();
 
-        let mut scc_regions = FxHashMap::default();
+        let mut scc_regions = FxIndexMap::default();
         let mut start = 0;
-        for (scc, group) in &paired_scc_regions.into_iter().group_by(|(scc, _)| *scc) {
-            let group_size = group.count();
-            scc_regions.insert(scc, start..start + group_size);
-            start += group_size;
+        for chunk in paired_scc_regions.chunk_by(|&(scc1, _), &(scc2, _)| scc1 == scc2) {
+            let (scc, _) = chunk[0];
+            scc_regions.insert(scc, start..start + chunk.len());
+            start += chunk.len();
         }
 
-        let rev_graph = Rc::new(ReverseSccGraph { graph, scc_regions, universal_regions });
-        self.rev_scc_graph = Some(rev_graph.clone());
-        rev_graph
+        self.rev_scc_graph = Some(ReverseSccGraph { graph, scc_regions, universal_regions });
     }
 }

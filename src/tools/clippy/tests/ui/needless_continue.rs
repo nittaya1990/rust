@@ -1,4 +1,5 @@
 #![warn(clippy::needless_continue)]
+#![allow(clippy::uninlined_format_args)]
 
 macro_rules! zero {
     ($x:expr) => {
@@ -27,6 +28,7 @@ fn main() {
             let i = 0;
             println!("bar {} ", i);
         } else {
+            //~^ ERROR: this `else` block is redundant
             continue;
         }
 
@@ -42,6 +44,7 @@ fn main() {
         }
 
         if (zero!(i % 2) || nonzero!(i % 5)) && i % 3 != 0 {
+            //~^ ERROR: there is no need for an explicit `else` block for this `if` expression
             continue;
         } else {
             println!("Blabber");
@@ -54,21 +57,24 @@ fn main() {
 
 fn simple_loop() {
     loop {
-        continue; // should lint here
+        continue;
+        //~^ ERROR: this `continue` expression is redundant
     }
 }
 
 fn simple_loop2() {
     loop {
         println!("bleh");
-        continue; // should lint here
+        continue;
+        //~^ ERROR: this `continue` expression is redundant
     }
 }
 
 #[rustfmt::skip]
 fn simple_loop3() {
     loop {
-        continue // should lint here
+        continue
+        //~^ ERROR: this `continue` expression is redundant
     }
 }
 
@@ -76,7 +82,16 @@ fn simple_loop3() {
 fn simple_loop4() {
     loop {
         println!("bleh");
-        continue // should lint here
+        continue
+        //~^ ERROR: this `continue` expression is redundant
+    }
+}
+
+fn simple_loop5() {
+    loop {
+        println!("bleh");
+        { continue }
+        //~^ ERROR: this `continue` expression is redundant
     }
 }
 
@@ -127,18 +142,94 @@ mod issue_2329 {
                 if condition() {
                     println!("bar-3");
                 } else {
-                    continue 'inner; // should lint here
+                    //~^ ERROR: this `else` block is redundant
+                    continue 'inner;
                 }
                 println!("bar-4");
 
                 update_condition();
                 if condition() {
-                    continue; // should lint here
+                    //~^ ERROR: there is no need for an explicit `else` block for this `if` ex
+                    continue;
                 } else {
                     println!("bar-5");
                 }
                 println!("bar-6");
             }
         }
+    }
+}
+
+fn issue_13641() {
+    'a: while std::hint::black_box(true) {
+        #[allow(clippy::never_loop)]
+        loop {
+            continue 'a;
+        }
+    }
+
+    #[allow(clippy::never_loop)]
+    while std::hint::black_box(true) {
+        'b: loop {
+            continue 'b;
+            //~^ ERROR: this `continue` expression is redundant
+        }
+    }
+}
+
+mod issue_4077 {
+    fn main() {
+        'outer: loop {
+            'inner: loop {
+                do_something();
+                if some_expr() {
+                    println!("bar-7");
+                    continue 'outer;
+                } else if !some_expr() {
+                    println!("bar-8");
+                    continue 'inner;
+                } else {
+                    println!("bar-9");
+                    continue 'inner;
+                }
+            }
+        }
+
+        for _ in 0..10 {
+            match "foo".parse::<i32>() {
+                Ok(_) => do_something(),
+                Err(_) => {
+                    println!("bar-10");
+                    continue;
+                },
+            }
+        }
+
+        loop {
+            if true {
+            } else {
+                // redundant `else`
+                continue; // redundant `continue`
+            }
+        }
+
+        loop {
+            if some_expr() {
+                continue;
+            } else {
+                do_something();
+            }
+        }
+    }
+
+    // The contents of these functions are irrelevant, the purpose of this file is
+    // shown in main.
+
+    fn do_something() {
+        std::process::exit(0);
+    }
+
+    fn some_expr() -> bool {
+        true
     }
 }

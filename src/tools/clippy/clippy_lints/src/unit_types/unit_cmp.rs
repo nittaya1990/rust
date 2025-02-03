@@ -14,7 +14,9 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>) {
                 "assert_ne" | "debug_assert_ne" => "fail",
                 _ => return,
             };
-            let Some ((left, _, _)) = find_assert_eq_args(cx, expr, macro_call.expn) else { return };
+            let Some((left, _, _)) = find_assert_eq_args(cx, expr, macro_call.expn) else {
+                return;
+            };
             if !cx.typeck_results().expr_ty(left).is_unit() {
                 return;
             }
@@ -22,7 +24,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>) {
                 cx,
                 UNIT_CMP,
                 macro_call.span,
-                &format!("`{}` of unit values detected. This will always {}", macro_name, result),
+                format!("`{macro_name}` of unit values detected. This will always {result}"),
             );
         }
         return;
@@ -39,10 +41,9 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>) {
                 cx,
                 UNIT_CMP,
                 expr.span,
-                &format!(
-                    "{}-comparison of unit values detected. This will always be {}",
-                    op.as_str(),
-                    result
+                format!(
+                    "{}-comparison of unit values detected. This will always be {result}",
+                    op.as_str()
                 ),
             );
         }

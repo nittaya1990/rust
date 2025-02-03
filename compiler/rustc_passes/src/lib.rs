@@ -4,33 +4,29 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![allow(rustc::potential_query_instability)]
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(crate_visibility_modifier)]
-#![feature(iter_intersperse)]
-#![feature(let_else)]
+#![doc(rust_logo)]
 #![feature(let_chains)]
 #![feature(map_try_insert)]
-#![feature(min_specialization)]
-#![feature(nll)]
+#![feature(rustdoc_internals)]
 #![feature(try_blocks)]
-#![recursion_limit = "256"]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate rustc_middle;
-#[macro_use]
-extern crate tracing;
+use rustc_middle::query::Providers;
 
-use rustc_middle::ty::query::Providers;
-
+pub mod abi_test;
 mod check_attr;
-mod check_const;
 pub mod dead;
+mod debugger_visualizer;
 mod diagnostic_items;
 pub mod entry;
+mod errors;
+#[cfg(debug_assertions)]
 pub mod hir_id_validator;
-pub mod hir_stats;
-mod intrinsicck;
+pub mod input_stats;
 mod lang_items;
 pub mod layout_test;
 mod lib_features;
@@ -38,15 +34,16 @@ mod liveness;
 pub mod loops;
 mod naked_functions;
 mod reachable;
-mod region;
 pub mod stability;
 mod upvars;
 mod weak_lang_items;
 
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
+
 pub fn provide(providers: &mut Providers) {
     check_attr::provide(providers);
-    check_const::provide(providers);
     dead::provide(providers);
+    debugger_visualizer::provide(providers);
     diagnostic_items::provide(providers);
     entry::provide(providers);
     lang_items::provide(providers);
@@ -54,9 +51,7 @@ pub fn provide(providers: &mut Providers) {
     loops::provide(providers);
     naked_functions::provide(providers);
     liveness::provide(providers);
-    intrinsicck::provide(providers);
     reachable::provide(providers);
-    region::provide(providers);
     stability::provide(providers);
     upvars::provide(providers);
 }

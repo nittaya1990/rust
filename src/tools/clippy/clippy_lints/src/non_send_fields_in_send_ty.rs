@@ -1,14 +1,14 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_lint_allowed;
 use clippy_utils::source::snippet;
 use clippy_utils::ty::{implements_trait, is_copy};
-use clippy_utils::{is_lint_allowed, match_def_path, paths};
 use rustc_ast::ImplPolarity;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{FieldDef, Item, ItemKind, Node};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::lint::in_external_macro;
-use rustc_middle::ty::{self, subst::GenericArgKind, Ty};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_middle::ty::{self, GenericArgKind, Ty};
+use rustc_session::impl_lint_pass;
 use rustc_span::sym;
 
 declare_clippy_lint! {
@@ -54,15 +54,14 @@ declare_clippy_lint! {
     "there is a field that is not safe to be sent to another thread in a `Send` struct"
 }
 
-#[derive(Copy, Clone)]
 pub struct NonSendFieldInSendTy {
     enable_raw_pointer_heuristic: bool,
 }
 
 impl NonSendFieldInSendTy {
-    pub fn new(enable_raw_pointer_heuristic: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            enable_raw_pointer_heuristic,
+            enable_raw_pointer_heuristic: conf.enable_raw_pointer_heuristic_for_send,
         }
     }
 }
@@ -81,73 +80,73 @@ impl<'tcx> LateLintPass<'tcx> for NonSendFieldInSendTy {
         // We start from `Send` impl instead of `check_field_def()` because
         // single `AdtDef` may have multiple `Send` impls due to generic
         // parameters, and the lint is much easier to implement in this way.
-        if_chain! {
-            if !in_external_macro(cx.tcx.sess, item.span);
-            if let Some(send_trait) = cx.tcx.get_diagnostic_item(sym::Send);
-            if let ItemKind::Impl(hir_impl) = &item.kind;
-            if let Some(trait_ref) = &hir_impl.of_trait;
-            if let Some(trait_id) = trait_ref.trait_def_id();
-            if send_trait == trait_id;
-            if hir_impl.polarity == ImplPolarity::Positive;
-            if let Some(ty_trait_ref) = cx.tcx.impl_trait_ref(item.def_id);
-            if let self_ty = ty_trait_ref.self_ty();
-            if let ty::Adt(adt_def, impl_trait_substs) = self_ty.kind();
-            then {
-                let mut non_send_fields = Vec::new();
+        if !item.span.in_external_macro(cx.tcx.sess.source_map())
+            && let Some(send_trait) = cx.tcx.get_diagnostic_item(sym::Send)
+            && let ItemKind::Impl(hir_impl) = &item.kind
+            && let Some(trait_ref) = &hir_impl.of_trait
+            && let Some(trait_id) = trait_ref.trait_def_id()
+            && send_trait == trait_id
+            && hir_impl.polarity == ImplPolarity::Positive
+            && let Some(ty_trait_ref) = cx.tcx.impl_trait_ref(item.owner_id)
+            && let self_ty = ty_trait_ref.instantiate_identity().self_ty()
+            && let ty::Adt(adt_def, impl_trait_args) = self_ty.kind()
+        {
+            let mut non_send_fields = Vec::new();
 
-                let hir_map = cx.tcx.hir();
-                for variant in adt_def.variants() {
-                    for field in &variant.fields {
-                        if_chain! {
-                            if let Some(field_hir_id) = field
-                                .did
-                                .as_local()
-                                .map(|local_def_id| hir_map.local_def_id_to_hir_id(local_def_id));
-                            if !is_lint_allowed(cx, NON_SEND_FIELDS_IN_SEND_TY, field_hir_id);
-                            if let field_ty = field.ty(cx.tcx, impl_trait_substs);
-                            if !ty_allowed_in_send(cx, field_ty, send_trait);
-                            if let Node::Field(field_def) = hir_map.get(field_hir_id);
-                            then {
-                                non_send_fields.push(NonSendField {
-                                    def: field_def,
-                                    ty: field_ty,
-                                    generic_params: collect_generic_params(field_ty),
-                                })
-                            }
-                        }
+            for variant in adt_def.variants() {
+                for field in &variant.fields {
+                    if let Some(field_hir_id) = field
+                        .did
+                        .as_local()
+                        .map(|local_def_id| cx.tcx.local_def_id_to_hir_id(local_def_id))
+                        && !is_lint_allowed(cx, NON_SEND_FIELDS_IN_SEND_TY, field_hir_id)
+                        && let field_ty = field.ty(cx.tcx, impl_trait_args)
+                        && !ty_allowed_in_send(cx, field_ty, send_trait)
+                        && let Node::Field(field_def) = cx.tcx.hir_node(field_hir_id)
+                    {
+                        non_send_fields.push(NonSendField {
+                            def: field_def,
+                            ty: field_ty,
+                            generic_params: collect_generic_params(field_ty),
+                        });
                     }
                 }
+            }
 
-                if !non_send_fields.is_empty() {
-                    span_lint_and_then(
-                        cx,
-                        NON_SEND_FIELDS_IN_SEND_TY,
-                        item.span,
-                        &format!(
-                            "some fields in `{}` are not safe to be sent to another thread",
-                            snippet(cx, hir_impl.self_ty.span, "Unknown")
-                        ),
-                        |diag| {
-                            for field in non_send_fields {
-                                diag.span_note(
-                                    field.def.span,
-                                    &format!("it is not safe to send field `{}` to another thread", field.def.ident.name),
-                                );
+            if !non_send_fields.is_empty() {
+                span_lint_and_then(
+                    cx,
+                    NON_SEND_FIELDS_IN_SEND_TY,
+                    item.span,
+                    format!(
+                        "some fields in `{}` are not safe to be sent to another thread",
+                        snippet(cx, hir_impl.self_ty.span, "Unknown")
+                    ),
+                    |diag| {
+                        for field in non_send_fields {
+                            diag.span_note(
+                                field.def.span,
+                                format!(
+                                    "it is not safe to send field `{}` to another thread",
+                                    field.def.ident.name
+                                ),
+                            );
 
-                                match field.generic_params.len() {
-                                    0 => diag.help("use a thread-safe type that implements `Send`"),
-                                    1 if is_ty_param(field.ty) => diag.help(&format!("add `{}: Send` bound in `Send` impl", field.ty)),
-                                    _ => diag.help(&format!(
-                                        "add bounds on type parameter{} `{}` that satisfy `{}: Send`",
-                                        if field.generic_params.len() > 1 { "s" } else { "" },
-                                        field.generic_params_string(),
-                                        snippet(cx, field.def.ty.span, "Unknown"),
-                                    )),
-                                };
-                            }
-                        },
-                    );
-                }
+                            match field.generic_params.len() {
+                                0 => diag.help("use a thread-safe type that implements `Send`"),
+                                1 if is_ty_param(field.ty) => {
+                                    diag.help(format!("add `{}: Send` bound in `Send` impl", field.ty))
+                                },
+                                _ => diag.help(format!(
+                                    "add bounds on type parameter{} `{}` that satisfy `{}: Send`",
+                                    if field.generic_params.len() > 1 { "s" } else { "" },
+                                    field.generic_params_string(),
+                                    snippet(cx, field.def.ty.span, "Unknown"),
+                                )),
+                            };
+                        }
+                    },
+                );
             }
         }
     }
@@ -159,7 +158,7 @@ struct NonSendField<'tcx> {
     generic_params: Vec<Ty<'tcx>>,
 }
 
-impl<'tcx> NonSendField<'tcx> {
+impl NonSendField<'_> {
     fn generic_params_string(&self) -> String {
         self.generic_params
             .iter()
@@ -206,10 +205,10 @@ fn ty_allowed_with_raw_pointer_heuristic<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'t
             .iter()
             .all(|ty| ty_allowed_with_raw_pointer_heuristic(cx, ty, send_trait)),
         ty::Array(ty, _) | ty::Slice(ty) => ty_allowed_with_raw_pointer_heuristic(cx, *ty, send_trait),
-        ty::Adt(_, substs) => {
+        ty::Adt(_, args) => {
             if contains_pointer_like(cx, ty) {
                 // descends only if ADT contains any raw pointers
-                substs.iter().all(|generic_arg| match generic_arg.unpack() {
+                args.iter().all(|generic_arg| match generic_arg.unpack() {
                     GenericArgKind::Type(ty) => ty_allowed_with_raw_pointer_heuristic(cx, ty, send_trait),
                     // Lifetimes and const generics are not solid part of ADT and ignored
                     GenericArgKind::Lifetime(_) | GenericArgKind::Const(_) => true,
@@ -219,21 +218,21 @@ fn ty_allowed_with_raw_pointer_heuristic<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'t
             }
         },
         // Raw pointers are `!Send` but allowed by the heuristic
-        ty::RawPtr(_) => true,
+        ty::RawPtr(_, _) => true,
         _ => false,
     }
 }
 
-/// Checks if the type contains any pointer-like types in substs (including nested ones)
+/// Checks if the type contains any pointer-like types in args (including nested ones)
 fn contains_pointer_like<'tcx>(cx: &LateContext<'tcx>, target_ty: Ty<'tcx>) -> bool {
     for ty_node in target_ty.walk() {
         if let GenericArgKind::Type(inner_ty) = ty_node.unpack() {
             match inner_ty.kind() {
-                ty::RawPtr(_) => {
+                ty::RawPtr(_, _) => {
                     return true;
                 },
                 ty::Adt(adt_def, _) => {
-                    if match_def_path(cx, adt_def.did(), &paths::PTR_NON_NULL) {
+                    if cx.tcx.is_diagnostic_item(sym::NonNull, adt_def.did()) {
                         return true;
                     }
                 },

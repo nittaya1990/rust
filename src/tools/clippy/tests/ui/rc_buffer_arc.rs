@@ -1,4 +1,5 @@
 #![warn(clippy::rc_buffer)]
+#![allow(dead_code, unused_imports)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;

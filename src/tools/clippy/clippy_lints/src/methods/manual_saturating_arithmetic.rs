@@ -1,7 +1,6 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::{match_def_path, path_def_id};
-use if_chain::if_chain;
 use rustc_ast::ast;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
@@ -21,21 +20,15 @@ pub fn check(
         return;
     }
 
-    let mm = if let Some(mm) = is_min_or_max(cx, unwrap_arg) {
-        mm
-    } else {
+    let Some(mm) = is_min_or_max(cx, unwrap_arg) else {
         return;
     };
 
     if ty.is_signed() {
-        use self::{
-            MinMax::{Max, Min},
-            Sign::{Neg, Pos},
-        };
+        use self::MinMax::{Max, Min};
+        use self::Sign::{Neg, Pos};
 
-        let sign = if let Some(sign) = lit_sign(arith_rhs) {
-            sign
-        } else {
+        let Some(sign) = lit_sign(arith_rhs) else {
             return;
         };
 
@@ -57,11 +50,10 @@ pub fn check(
         super::MANUAL_SATURATING_ARITHMETIC,
         expr.span,
         "manual saturating arithmetic",
-        &format!("try using `saturating_{}`", arith),
+        format!("consider using `saturating_{arith}`"),
         format!(
-            "{}.saturating_{}({})",
+            "{}.saturating_{arith}({})",
             snippet_with_applicability(cx, arith_lhs.span, "..", &mut applicability),
-            arith,
             snippet_with_applicability(cx, arith_rhs.span, "..", &mut applicability),
         ),
         applicability,
@@ -74,18 +66,15 @@ enum MinMax {
     Max,
 }
 
-fn is_min_or_max<'tcx>(cx: &LateContext<'tcx>, expr: &hir::Expr<'_>) -> Option<MinMax> {
+fn is_min_or_max(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> Option<MinMax> {
     // `T::max_value()` `T::min_value()` inherent methods
-    if_chain! {
-        if let hir::ExprKind::Call(func, args) = &expr.kind;
-        if args.is_empty();
-        if let hir::ExprKind::Path(hir::QPath::TypeRelative(_, segment)) = &func.kind;
-        then {
-            match segment.ident.as_str() {
-                "max_value" => return Some(MinMax::Max),
-                "min_value" => return Some(MinMax::Min),
-                _ => {}
-            }
+    if let hir::ExprKind::Call(func, []) = &expr.kind
+        && let hir::ExprKind::Path(hir::QPath::TypeRelative(_, segment)) = &func.kind
+    {
+        match segment.ident.as_str() {
+            "max_value" => return Some(MinMax::Max),
+            "min_value" => return Some(MinMax::Min),
+            _ => {},
         }
     }
 

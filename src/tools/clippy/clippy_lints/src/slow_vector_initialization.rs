@@ -1,14 +1,15 @@
-use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::macros::matching_root_macro_call;
 use clippy_utils::sugg::Sugg;
-use clippy_utils::ty::is_type_diagnostic_item;
-use clippy_utils::{get_enclosing_block, is_expr_path_def_path, path_to_local, path_to_local_id, paths, SpanlessEq};
-use if_chain::if_chain;
-use rustc_ast::ast::LitKind;
+use clippy_utils::{
+    SpanlessEq, get_enclosing_block, is_integer_literal, is_path_diagnostic_item, path_to_local, path_to_local_id,
+    span_contains_comment,
+};
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::{walk_block, walk_expr, walk_stmt, Visitor};
-use rustc_hir::{BindingAnnotation, Block, Expr, ExprKind, HirId, PatKind, QPath, Stmt, StmtKind};
+use rustc_hir::intravisit::{Visitor, walk_block, walk_expr, walk_stmt};
+use rustc_hir::{BindingMode, Block, Expr, ExprKind, HirId, PatKind, Stmt, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::sym;
 
 declare_clippy_lint! {
@@ -19,21 +20,35 @@ declare_clippy_lint! {
     /// These structures are non-idiomatic and less efficient than simply using
     /// `vec![0; len]`.
     ///
+    /// Specifically, for `vec![0; len]`, the compiler can use a specialized type of allocation
+    /// that also zero-initializes the allocated memory in the same call
+    /// (see: [alloc_zeroed](https://doc.rust-lang.org/stable/std/alloc/trait.GlobalAlloc.html#method.alloc_zeroed)).
+    ///
+    /// Writing `Vec::new()` followed by `vec.resize(len, 0)` is suboptimal because,
+    /// while it does do the same number of allocations,
+    /// it involves two operations for allocating and initializing.
+    /// The `resize` call first allocates memory (since `Vec::new()` did not), and only *then* zero-initializes it.
+    ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use core::iter::repeat;
     /// # let len = 4;
-    ///
-    /// // Bad
-    /// let mut vec1 = Vec::with_capacity(len);
+    /// let mut vec1 = Vec::new();
     /// vec1.resize(len, 0);
     ///
     /// let mut vec2 = Vec::with_capacity(len);
-    /// vec2.extend(repeat(0).take(len));
+    /// vec2.resize(len, 0);
     ///
-    /// // Good
+    /// let mut vec3 = Vec::with_capacity(len);
+    /// vec3.extend(repeat(0).take(len));
+    /// ```
+    ///
+    /// Use instead:
+    /// ```no_run
+    /// # let len = 4;
     /// let mut vec1 = vec![0; len];
     /// let mut vec2 = vec![0; len];
+    /// let mut vec3 = vec![0; len];
     /// ```
     #[clippy::version = "1.32.0"]
     pub SLOW_VECTOR_INITIALIZATION,
@@ -47,7 +62,7 @@ declare_lint_pass!(SlowVectorInit => [SLOW_VECTOR_INITIALIZATION]);
 /// assigned to a variable. For example, `let mut vec = Vec::with_capacity(0)` or
 /// `vec = Vec::with_capacity(0)`
 struct VecAllocation<'tcx> {
-    /// HirId of the variable
+    /// `HirId` of the variable
     local_id: HirId,
 
     /// Reference to the expression which allocates the vector
@@ -55,7 +70,24 @@ struct VecAllocation<'tcx> {
 
     /// Reference to the expression used as argument on `with_capacity` call. This is used
     /// to only match slow zero-filling idioms of the same length than vector initialization.
-    len_expr: &'tcx Expr<'tcx>,
+    size_expr: InitializedSize<'tcx>,
+}
+
+/// Initializer for the creation of the vector.
+///
+/// When `Vec::with_capacity(size)` is found, the `size` expression will be in
+/// `InitializedSize::Initialized`.
+///
+/// Otherwise, for `Vec::new()` calls, there is no allocation initializer yet, so
+/// `InitializedSize::Uninitialized` is used.
+/// Later, when a call to `.resize(size, 0)` or similar is found, it's set
+/// to `InitializedSize::Initialized(size)`.
+///
+/// Since it will be set to `InitializedSize::Initialized(size)` when a slow initialization is
+/// found, it is always safe to "unwrap" it at lint time.
+enum InitializedSize<'tcx> {
+    Initialized(&'tcx Expr<'tcx>),
+    Uninitialized,
 }
 
 /// Type of slow initialization
@@ -69,63 +101,62 @@ enum InitializationType<'tcx> {
 
 impl<'tcx> LateLintPass<'tcx> for SlowVectorInit {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        // Matches initialization on reassignements. For example: `vec = Vec::with_capacity(100)`
-        if_chain! {
-            if let ExprKind::Assign(left, right, _) = expr.kind;
+        // Matches initialization on reassignments. For example: `vec = Vec::with_capacity(100)`
+        if let ExprKind::Assign(left, right, _) = expr.kind
+            && let Some(local_id) = path_to_local(left)
+            && let Some(size_expr) = Self::as_vec_initializer(cx, right)
+        {
+            let vi = VecAllocation {
+                local_id,
+                allocation_expr: right,
+                size_expr,
+            };
 
-            // Extract variable
-            if let Some(local_id) = path_to_local(left);
-
-            // Extract len argument
-            if let Some(len_arg) = Self::is_vec_with_capacity(cx, right);
-
-            then {
-                let vi = VecAllocation {
-                    local_id,
-                    allocation_expr: right,
-                    len_expr: len_arg,
-                };
-
-                Self::search_initialization(cx, vi, expr.hir_id);
-            }
+            Self::search_initialization(cx, vi, expr.hir_id);
         }
     }
 
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
         // Matches statements which initializes vectors. For example: `let mut vec = Vec::with_capacity(10)`
-        if_chain! {
-            if let StmtKind::Local(local) = stmt.kind;
-            if let PatKind::Binding(BindingAnnotation::Mutable, local_id, _, None) = local.pat.kind;
-            if let Some(init) = local.init;
-            if let Some(len_arg) = Self::is_vec_with_capacity(cx, init);
+        // or `Vec::new()`
+        if let StmtKind::Let(local) = stmt.kind
+            && let PatKind::Binding(BindingMode::MUT, local_id, _, None) = local.pat.kind
+            && let Some(init) = local.init
+            && let Some(size_expr) = Self::as_vec_initializer(cx, init)
+        {
+            let vi = VecAllocation {
+                local_id,
+                allocation_expr: init,
+                size_expr,
+            };
 
-            then {
-                let vi = VecAllocation {
-                    local_id,
-                    allocation_expr: init,
-                    len_expr: len_arg,
-                };
-
-                Self::search_initialization(cx, vi, stmt.hir_id);
-            }
+            Self::search_initialization(cx, vi, stmt.hir_id);
         }
     }
 }
 
 impl SlowVectorInit {
-    /// Checks if the given expression is `Vec::with_capacity(..)`. It will return the expression
-    /// of the first argument of `with_capacity` call if it matches or `None` if it does not.
-    fn is_vec_with_capacity<'tcx>(cx: &LateContext<'_>, expr: &Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
-        if_chain! {
-            if let ExprKind::Call(func, [arg]) = expr.kind;
-            if let ExprKind::Path(QPath::TypeRelative(ty, name)) = func.kind;
-            if name.ident.as_str() == "with_capacity";
-            if is_type_diagnostic_item(cx, cx.typeck_results().node_type(ty.hir_id), sym::Vec);
-            then {
-                Some(arg)
-            } else {
-                None
-            }
+    /// Looks for `Vec::with_capacity(size)` or `Vec::new()` calls and returns the initialized size,
+    /// if any. More specifically, it returns:
+    /// - `Some(InitializedSize::Initialized(size))` for `Vec::with_capacity(size)`
+    /// - `Some(InitializedSize::Uninitialized)` for `Vec::new()`
+    /// - `None` for other, unrelated kinds of expressions
+    fn as_vec_initializer<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'tcx>) -> Option<InitializedSize<'tcx>> {
+        // Generally don't warn if the vec initializer comes from an expansion, except for the vec! macro.
+        // This lets us still warn on `vec![]`, while ignoring other kinds of macros that may output an
+        // empty vec
+        if expr.span.from_expansion() && matching_root_macro_call(cx, expr.span, sym::vec_macro).is_none() {
+            return None;
+        }
+
+        if let ExprKind::Call(func, [len_expr]) = expr.kind
+            && is_path_diagnostic_item(cx, func, sym::vec_with_capacity)
+        {
+            Some(InitializedSize::Initialized(len_expr))
+        } else if matches!(expr.kind, ExprKind::Call(func, []) if is_path_diagnostic_item(cx, func, sym::vec_new)) {
+            Some(InitializedSize::Uninitialized)
+        } else {
+            None
         }
     }
 
@@ -160,20 +191,39 @@ impl SlowVectorInit {
             InitializationType::Extend(e) | InitializationType::Resize(e) => {
                 Self::emit_lint(cx, e, vec_alloc, "slow zero-filling initialization");
             },
-        };
+        }
     }
 
-    fn emit_lint<'tcx>(cx: &LateContext<'tcx>, slow_fill: &Expr<'_>, vec_alloc: &VecAllocation<'_>, msg: &str) {
-        let len_expr = Sugg::hir(cx, vec_alloc.len_expr, "len");
+    fn emit_lint(cx: &LateContext<'_>, slow_fill: &Expr<'_>, vec_alloc: &VecAllocation<'_>, msg: &'static str) {
+        let len_expr = Sugg::hir(
+            cx,
+            match vec_alloc.size_expr {
+                InitializedSize::Initialized(expr) => expr,
+                InitializedSize::Uninitialized => unreachable!("size expression must be set by this point"),
+            },
+            "len",
+        );
 
-        span_lint_and_then(cx, SLOW_VECTOR_INITIALIZATION, slow_fill.span, msg, |diag| {
-            diag.span_suggestion(
-                vec_alloc.allocation_expr.span,
-                "consider replace allocation with",
-                format!("vec![0; {}]", len_expr),
-                Applicability::Unspecified,
-            );
-        });
+        let span_to_replace = slow_fill
+            .span
+            .with_lo(vec_alloc.allocation_expr.span.source_callsite().lo());
+
+        // If there is no comment in `span_to_replace`, Clippy can automatically fix the code.
+        let app = if span_contains_comment(cx.tcx.sess.source_map(), span_to_replace) {
+            Applicability::Unspecified
+        } else {
+            Applicability::MachineApplicable
+        };
+
+        span_lint_and_sugg(
+            cx,
+            SLOW_VECTOR_INITIALIZATION,
+            span_to_replace,
+            msg,
+            "consider replacing this with",
+            format!("vec![0; {len_expr}]"),
+            app,
+        );
     }
 }
 
@@ -192,60 +242,58 @@ struct VectorInitializationVisitor<'a, 'tcx> {
     initialization_found: bool,
 }
 
-impl<'a, 'tcx> VectorInitializationVisitor<'a, 'tcx> {
+impl<'tcx> VectorInitializationVisitor<'_, 'tcx> {
     /// Checks if the given expression is extending a vector with `repeat(0).take(..)`
     fn search_slow_extend_filling(&mut self, expr: &'tcx Expr<'_>) {
-        if_chain! {
-            if self.initialization_found;
-            if let ExprKind::MethodCall(path, [self_arg, extend_arg], _) = expr.kind;
-            if path_to_local_id(self_arg, self.vec_alloc.local_id);
-            if path.ident.name == sym!(extend);
-            if self.is_repeat_take(extend_arg);
-
-            then {
-                self.slow_expression = Some(InitializationType::Extend(expr));
-            }
+        if self.initialization_found
+            && let ExprKind::MethodCall(path, self_arg, [extend_arg], _) = expr.kind
+            && path_to_local_id(self_arg, self.vec_alloc.local_id)
+            && path.ident.name.as_str() == "extend"
+            && self.is_repeat_take(extend_arg)
+        {
+            self.slow_expression = Some(InitializationType::Extend(expr));
         }
     }
 
     /// Checks if the given expression is resizing a vector with 0
-    fn search_slow_resize_filling(&mut self, expr: &'tcx Expr<'_>) {
-        if_chain! {
-            if self.initialization_found;
-            if let ExprKind::MethodCall(path, [self_arg, len_arg, fill_arg], _) = expr.kind;
-            if path_to_local_id(self_arg, self.vec_alloc.local_id);
-            if path.ident.name == sym!(resize);
-
+    fn search_slow_resize_filling(&mut self, expr: &'tcx Expr<'tcx>) {
+        if self.initialization_found
+            && let ExprKind::MethodCall(path, self_arg, [len_arg, fill_arg], _) = expr.kind
+            && path_to_local_id(self_arg, self.vec_alloc.local_id)
+            && path.ident.name.as_str() == "resize"
             // Check that is filled with 0
-            if let ExprKind::Lit(ref lit) = fill_arg.kind;
-            if let LitKind::Int(0, _) = lit.node;
+            && is_integer_literal(fill_arg, 0)
+        {
+            let is_matching_resize = if let InitializedSize::Initialized(size_expr) = self.vec_alloc.size_expr {
+                // If we have a size expression, check that it is equal to what's passed to `resize`
+                SpanlessEq::new(self.cx).eq_expr(len_arg, size_expr)
+                    || matches!(len_arg.kind, ExprKind::MethodCall(path, ..) if path.ident.as_str() == "capacity")
+            } else {
+                self.vec_alloc.size_expr = InitializedSize::Initialized(len_arg);
+                true
+            };
 
-            // Check that len expression is equals to `with_capacity` expression
-            if SpanlessEq::new(self.cx).eq_expr(len_arg, self.vec_alloc.len_expr);
-
-            then {
+            if is_matching_resize {
                 self.slow_expression = Some(InitializationType::Resize(expr));
             }
         }
     }
 
     /// Returns `true` if give expression is `repeat(0).take(...)`
-    fn is_repeat_take(&self, expr: &Expr<'_>) -> bool {
-        if_chain! {
-            if let ExprKind::MethodCall(take_path, take_args, _) = expr.kind;
-            if take_path.ident.name == sym!(take);
-
+    fn is_repeat_take(&mut self, expr: &'tcx Expr<'tcx>) -> bool {
+        if let ExprKind::MethodCall(take_path, recv, [len_arg], _) = expr.kind
+            && take_path.ident.name.as_str() == "take"
             // Check that take is applied to `repeat(0)`
-            if let Some(repeat_expr) = take_args.get(0);
-            if self.is_repeat_zero(repeat_expr);
-
-            // Check that len expression is equals to `with_capacity` expression
-            if let Some(len_arg) = take_args.get(1);
-            if SpanlessEq::new(self.cx).eq_expr(len_arg, self.vec_alloc.len_expr);
-
-            then {
-                return true;
+            && self.is_repeat_zero(recv)
+        {
+            if let InitializedSize::Initialized(size_expr) = self.vec_alloc.size_expr {
+                // Check that len expression is equals to `with_capacity` expression
+                return SpanlessEq::new(self.cx).eq_expr(len_arg, size_expr)
+                    || matches!(len_arg.kind, ExprKind::MethodCall(path, ..) if path.ident.as_str() == "capacity");
             }
+
+            self.vec_alloc.size_expr = InitializedSize::Initialized(len_arg);
+            return true;
         }
 
         false
@@ -253,22 +301,18 @@ impl<'a, 'tcx> VectorInitializationVisitor<'a, 'tcx> {
 
     /// Returns `true` if given expression is `repeat(0)`
     fn is_repeat_zero(&self, expr: &Expr<'_>) -> bool {
-        if_chain! {
-            if let ExprKind::Call(fn_expr, [repeat_arg]) = expr.kind;
-            if is_expr_path_def_path(self.cx, fn_expr, &paths::ITER_REPEAT);
-            if let ExprKind::Lit(ref lit) = repeat_arg.kind;
-            if let LitKind::Int(0, _) = lit.node;
-
-            then {
-                true
-            } else {
-                false
-            }
+        if let ExprKind::Call(fn_expr, [repeat_arg]) = expr.kind
+            && is_path_diagnostic_item(self.cx, fn_expr, sym::iter_repeat)
+            && is_integer_literal(repeat_arg, 0)
+        {
+            true
+        } else {
+            false
         }
     }
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for VectorInitializationVisitor<'a, 'tcx> {
+impl<'tcx> Visitor<'tcx> for VectorInitializationVisitor<'_, 'tcx> {
     fn visit_stmt(&mut self, stmt: &'tcx Stmt<'_>) {
         if self.initialization_found {
             match stmt.kind {
@@ -287,7 +331,7 @@ impl<'a, 'tcx> Visitor<'tcx> for VectorInitializationVisitor<'a, 'tcx> {
 
     fn visit_block(&mut self, block: &'tcx Block<'_>) {
         if self.initialization_found {
-            if let Some(s) = block.stmts.get(0) {
+            if let Some(s) = block.stmts.first() {
                 self.visit_stmt(s);
             }
 

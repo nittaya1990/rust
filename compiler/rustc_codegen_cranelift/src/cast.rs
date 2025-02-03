@@ -64,17 +64,12 @@ pub(crate) fn clif_int_or_float_cast(
                 },
             );
 
-            let from_rust_ty = if from_signed { fx.tcx.types.i128 } else { fx.tcx.types.u128 };
-
-            let to_rust_ty = match to_ty {
-                types::F32 => fx.tcx.types.f32,
-                types::F64 => fx.tcx.types.f64,
-                _ => unreachable!(),
-            };
-
-            return fx
-                .easy_call(&name, &[CValue::by_val(from, fx.layout_of(from_rust_ty))], to_rust_ty)
-                .load_scalar(fx);
+            return fx.lib_call(
+                &name,
+                vec![AbiParam::new(types::I128)],
+                vec![AbiParam::new(to_ty)],
+                &[from],
+            )[0];
         }
 
         // int-like -> float
@@ -84,7 +79,7 @@ pub(crate) fn clif_int_or_float_cast(
             fx.bcx.ins().fcvt_from_uint(to_ty, from)
         }
     } else if from_ty.is_float() && to_ty.is_int() {
-        if to_ty == types::I128 {
+        let val = if to_ty == types::I128 {
             // _____sssf___
             // __fix   sfti: f32 -> i128
             // __fix   dfti: f64 -> i128
@@ -101,21 +96,10 @@ pub(crate) fn clif_int_or_float_cast(
                 },
             );
 
-            let from_rust_ty = match from_ty {
-                types::F32 => fx.tcx.types.f32,
-                types::F64 => fx.tcx.types.f64,
-                _ => unreachable!(),
-            };
-
-            let to_rust_ty = if to_signed { fx.tcx.types.i128 } else { fx.tcx.types.u128 };
-
-            return fx
-                .easy_call(&name, &[CValue::by_val(from, fx.layout_of(from_rust_ty))], to_rust_ty)
-                .load_scalar(fx);
-        }
-
-        // float -> int-like
-        if to_ty == types::I8 || to_ty == types::I16 {
+            fx.lib_call(&name, vec![AbiParam::new(from_ty)], vec![AbiParam::new(types::I128)], &[
+                from,
+            ])[0]
+        } else if to_ty == types::I8 || to_ty == types::I16 {
             // FIXME implement fcvt_to_*int_sat.i8/i16
             let val = if to_signed {
                 fx.bcx.ins().fcvt_to_sint_sat(types::I32, from)
@@ -125,8 +109,8 @@ pub(crate) fn clif_int_or_float_cast(
             let (min, max) = match (to_ty, to_signed) {
                 (types::I8, false) => (0, i64::from(u8::MAX)),
                 (types::I16, false) => (0, i64::from(u16::MAX)),
-                (types::I8, true) => (i64::from(i8::MIN), i64::from(i8::MAX)),
-                (types::I16, true) => (i64::from(i16::MIN), i64::from(i16::MAX)),
+                (types::I8, true) => (i64::from(i8::MIN as u32), i64::from(i8::MAX as u32)),
+                (types::I16, true) => (i64::from(i16::MIN as u32), i64::from(i16::MAX as u32)),
                 _ => unreachable!(),
             };
             let min_val = fx.bcx.ins().iconst(types::I32, min);
@@ -146,7 +130,15 @@ pub(crate) fn clif_int_or_float_cast(
             fx.bcx.ins().fcvt_to_sint_sat(to_ty, from)
         } else {
             fx.bcx.ins().fcvt_to_uint_sat(to_ty, from)
+        };
+
+        if let Some(false) = fx.tcx.sess.opts.unstable_opts.saturating_float_casts {
+            return val;
         }
+
+        let is_not_nan = fx.bcx.ins().fcmp(FloatCC::Equal, from, from);
+        let zero = type_zero_value(&mut fx.bcx, to_ty);
+        fx.bcx.ins().select(is_not_nan, val, zero)
     } else if from_ty.is_float() && to_ty.is_float() {
         // float -> float
         match (from_ty, to_ty) {

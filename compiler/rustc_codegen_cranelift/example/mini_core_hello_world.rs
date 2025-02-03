@@ -1,20 +1,25 @@
-#![feature(no_core, lang_items, never_type, linkage, extern_types, thread_local, box_syntax)]
+#![feature(
+    no_core,
+    lang_items,
+    never_type,
+    linkage,
+    extern_types,
+    naked_functions,
+    thread_local,
+    repr_simd
+)]
 #![no_core]
-#![allow(dead_code, non_camel_case_types)]
+#![allow(dead_code, non_camel_case_types, internal_features)]
 
 extern crate mini_core;
 
-use mini_core::*;
 use mini_core::libc::*;
-
-unsafe extern "C" fn my_puts(s: *const i8) {
-    puts(s);
-}
+use mini_core::*;
 
 macro_rules! assert {
     ($e:expr) => {
         if !$e {
-            panic(stringify!(! $e));
+            panic(stringify!(!$e));
         }
     };
 }
@@ -24,7 +29,7 @@ macro_rules! assert_eq {
         if $l != $r {
             panic(stringify!($l != $r));
         }
-    }
+    };
 }
 
 #[lang = "termination"]
@@ -57,6 +62,11 @@ impl SomeTrait for &'static str {
 struct NoisyDrop {
     text: &'static str,
     inner: NoisyDropInner,
+}
+
+struct NoisyDropUnsized {
+    inner: NoisyDropInner,
+    text: str,
 }
 
 struct NoisyDropInner;
@@ -92,25 +102,26 @@ fn start<T: Termination + 'static>(
     main: fn() -> T,
     argc: isize,
     argv: *const *const u8,
+    _sigpipe: u8,
 ) -> isize {
     if argc == 3 {
-        unsafe { puts(*argv as *const i8); }
-        unsafe { puts(*((argv as usize + intrinsics::size_of::<*const u8>()) as *const *const i8)); }
-        unsafe { puts(*((argv as usize + 2 * intrinsics::size_of::<*const u8>()) as *const *const i8)); }
+        unsafe {
+            puts(*argv as *const i8);
+        }
+        unsafe {
+            puts(*((argv as usize + intrinsics::size_of::<*const u8>()) as *const *const i8));
+        }
+        unsafe {
+            puts(*((argv as usize + 2 * intrinsics::size_of::<*const u8>()) as *const *const i8));
+        }
     }
 
     main().report() as isize
 }
 
 static mut NUM: u8 = 6 * 7;
-static NUM_REF: &'static u8 = unsafe { &NUM };
 
-struct Unique<T: ?Sized> {
-    pointer: *const T,
-    _marker: PhantomData<T>,
-}
-
-impl<T: ?Sized, U: ?Sized> CoerceUnsized<Unique<U>> for Unique<T> where T: Unsize<U> {}
+static NUM_REF: &'static u8 = unsafe { &*&raw const NUM };
 
 unsafe fn zeroed<T>() -> T {
     let mut uninit = MaybeUninit { uninit: () };
@@ -129,22 +140,48 @@ fn call_return_u128_pair() {
     return_u128_pair();
 }
 
+#[repr(C)]
+pub struct bool_11 {
+    field0: bool,
+    field1: bool,
+    field2: bool,
+    field3: bool,
+    field4: bool,
+    field5: bool,
+    field6: bool,
+    field7: bool,
+    field8: bool,
+    field9: bool,
+    field10: bool,
+}
+
+extern "C" fn bool_struct_in_11(_arg0: bool_11) {}
+
 #[allow(unreachable_code)] // FIXME false positive
 fn main() {
-    take_unique(Unique {
-        pointer: 0 as *const (),
-        _marker: PhantomData,
-    });
+    take_unique(Unique { pointer: unsafe { NonNull(1 as *mut ()) }, _marker: PhantomData });
     take_f32(0.1);
 
     call_return_u128_pair();
+
+    bool_struct_in_11(bool_11 {
+        field0: true,
+        field1: true,
+        field2: true,
+        field3: true,
+        field4: true,
+        field5: true,
+        field6: true,
+        field7: true,
+        field8: true,
+        field9: true,
+        field10: true,
+    });
 
     let slice = &[0, 1] as &[i32];
     let slice_ptr = slice as *const [i32] as *const i32;
 
     assert_eq!(slice_ptr as usize % 4, 0);
-
-    //return;
 
     unsafe {
         printf("Hello %s\n\0" as *const str as *const i8, "printf\0" as *const str as *const i8);
@@ -153,7 +190,7 @@ fn main() {
         let ptr: *const i8 = hello as *const [u8] as *const i8;
         puts(ptr);
 
-        let world: Box<&str> = box "World!\0";
+        let world: Box<&str> = Box::new("World!\0");
         puts(*world as *const str as *const i8);
         world as Box<dyn SomeTrait>;
 
@@ -177,15 +214,17 @@ fn main() {
         assert_eq!(intrinsics::size_of_val(&0u32) as u8, 4);
 
         assert_eq!(intrinsics::min_align_of::<u16>() as u8, 2);
-        assert_eq!(intrinsics::min_align_of_val(&a) as u8, intrinsics::min_align_of::<&str>() as u8);
+        assert_eq!(
+            intrinsics::min_align_of_val(&a) as u8,
+            intrinsics::min_align_of::<&str>() as u8
+        );
 
         assert!(!intrinsics::needs_drop::<u8>());
+        assert!(!intrinsics::needs_drop::<[u8]>());
         assert!(intrinsics::needs_drop::<NoisyDrop>());
+        assert!(intrinsics::needs_drop::<NoisyDropUnsized>());
 
-        Unique {
-            pointer: 0 as *const &str,
-            _marker: PhantomData,
-        } as Unique<dyn SomeTrait>;
+        Unique { pointer: NonNull(1 as *mut &str), _marker: PhantomData } as Unique<dyn SomeTrait>;
 
         struct MyDst<T: ?Sized>(T);
 
@@ -211,19 +250,17 @@ fn main() {
         }
     }
 
-    let _ = box NoisyDrop {
-        text: "Boxed outer got dropped!\0",
-        inner: NoisyDropInner,
-    } as Box<dyn SomeTrait>;
+    let _ = Box::new(NoisyDrop { text: "Boxed outer got dropped!\0", inner: NoisyDropInner })
+        as Box<dyn SomeTrait>;
 
     const FUNC_REF: Option<fn()> = Some(main);
     match FUNC_REF {
-        Some(_) => {},
+        Some(_) => {}
         None => assert!(false),
     }
 
     match Ordering::Less {
-        Ordering::Less => {},
+        Ordering::Less => {}
         _ => assert!(false),
     }
 
@@ -239,19 +276,21 @@ fn main() {
 
     #[cfg(not(any(jit, windows)))]
     {
-        extern {
+        extern "C" {
             #[linkage = "extern_weak"]
             static ABC: *const u8;
         }
 
         {
-            extern {
+            extern "C" {
                 #[linkage = "extern_weak"]
                 static ABC: *const u8;
             }
         }
 
-        unsafe { assert_eq!(ABC as usize, 0); }
+        unsafe {
+            assert_eq!(ABC as usize, 0);
+        }
     }
 
     &mut (|| Some(0 as *const ())) as &mut dyn FnMut() -> Option<*const ()>;
@@ -290,21 +329,39 @@ fn main() {
 
     from_decimal_string();
 
-    #[cfg(not(any(jit, windows)))]
+    #[cfg(all(not(jit), not(all(windows, target_env = "gnu"))))]
     test_tls();
 
-    #[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
+    #[cfg(all(not(jit), target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
     unsafe {
         global_asm_test();
+        naked_test();
     }
 
     // Both statics have a reference that points to the same anonymous allocation.
     static REF1: &u8 = &42;
     static REF2: &u8 = REF1;
     assert_eq!(*REF1, *REF2);
+
+    #[repr(simd)]
+    struct V([f64; 2]);
+
+    let f = V([0.0, 1.0]);
+    let _a = f.0[0];
+
+    stack_val_align();
 }
 
-#[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
+#[inline(never)]
+fn stack_val_align() {
+    #[repr(align(8192))]
+    struct Foo(u8);
+
+    let a = Foo(0);
+    assert_eq!(&a as *const Foo as usize % 8192, 0);
+}
+
+#[cfg(all(not(jit), target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 extern "C" {
     fn global_asm_test();
 }
@@ -317,6 +374,24 @@ global_asm! {
     // comment that would normally be removed by LLVM
     ret
     "
+}
+
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "macos"))]
+global_asm! {
+    "
+    .global _global_asm_test
+    _global_asm_test:
+    // comment that would normally be removed by LLVM
+    ret
+    "
+}
+
+#[cfg(all(not(jit), target_arch = "x86_64"))]
+#[naked]
+extern "C" fn naked_test() {
+    unsafe {
+        naked_asm!("ret");
+    }
 }
 
 #[repr(C)]
@@ -336,6 +411,7 @@ struct pthread_attr_t {
 }
 
 #[link(name = "pthread")]
+#[cfg(unix)]
 extern "C" {
     fn pthread_attr_init(attr: *mut pthread_attr_t) -> c_int;
 
@@ -343,13 +419,84 @@ extern "C" {
         native: *mut pthread_t,
         attr: *const pthread_attr_t,
         f: extern "C" fn(_: *mut c_void) -> *mut c_void,
-        value: *mut c_void
+        value: *mut c_void,
     ) -> c_int;
 
-    fn pthread_join(
-        native: pthread_t,
-        value: *mut *mut c_void
-    ) -> c_int;
+    fn pthread_join(native: pthread_t, value: *mut *mut c_void) -> c_int;
+}
+
+type DWORD = u32;
+type LPDWORD = *mut u32;
+
+type LPVOID = *mut c_void;
+type HANDLE = *mut c_void;
+
+#[link(name = "msvcrt")]
+#[cfg(windows)]
+extern "C" {
+    fn WaitForSingleObject(hHandle: LPVOID, dwMilliseconds: DWORD) -> DWORD;
+
+    fn CreateThread(
+        lpThreadAttributes: LPVOID, // Technically LPSECURITY_ATTRIBUTES, but we don't use it anyway
+        dwStackSize: usize,
+        lpStartAddress: extern "C" fn(_: *mut c_void) -> *mut c_void,
+        lpParameter: LPVOID,
+        dwCreationFlags: DWORD,
+        lpThreadId: LPDWORD,
+    ) -> HANDLE;
+}
+
+struct Thread {
+    #[cfg(windows)]
+    handle: HANDLE,
+    #[cfg(unix)]
+    handle: pthread_t,
+}
+
+impl Thread {
+    unsafe fn create(f: extern "C" fn(_: *mut c_void) -> *mut c_void) -> Self {
+        #[cfg(unix)]
+        {
+            let mut attr: pthread_attr_t = zeroed();
+            let mut thread: pthread_t = 0;
+
+            if pthread_attr_init(&mut attr) != 0 {
+                assert!(false);
+            }
+
+            if pthread_create(&mut thread, &attr, f, 0 as *mut c_void) != 0 {
+                assert!(false);
+            }
+
+            Thread { handle: thread }
+        }
+
+        #[cfg(windows)]
+        {
+            let handle = CreateThread(0 as *mut c_void, 0, f, 0 as *mut c_void, 0, 0 as *mut u32);
+
+            if (handle as u64) == 0 {
+                assert!(false);
+            }
+
+            Thread { handle }
+        }
+    }
+
+    unsafe fn join(self) {
+        #[cfg(unix)]
+        {
+            let mut res = 0 as *mut c_void;
+            pthread_join(self.handle, &mut res);
+        }
+
+        #[cfg(windows)]
+        {
+            // The INFINITE macro is used to signal operations that do not timeout.
+            let infinite = 0xffffffff;
+            assert!(WaitForSingleObject(self.handle, infinite) == 0);
+        }
+    }
 }
 
 #[thread_local]
@@ -358,28 +505,19 @@ static mut TLS: u8 = 42;
 
 #[cfg(not(jit))]
 extern "C" fn mutate_tls(_: *mut c_void) -> *mut c_void {
-    unsafe { TLS = 0; }
+    unsafe {
+        TLS = 0;
+    }
     0 as *mut c_void
 }
 
 #[cfg(not(jit))]
 fn test_tls() {
     unsafe {
-        let mut attr: pthread_attr_t = zeroed();
-        let mut thread: pthread_t = 0;
-
         assert_eq!(TLS, 42);
 
-        if pthread_attr_init(&mut attr) != 0 {
-            assert!(false);
-        }
-
-        if pthread_create(&mut thread, &attr, mutate_tls, 0 as *mut c_void) != 0 {
-            assert!(false);
-        }
-
-        let mut res = 0 as *mut c_void;
-        pthread_join(thread, &mut res);
+        let thread = Thread::create(mutate_tls);
+        thread.join();
 
         // TLS of main thread must not have been changed by the other thread.
         assert_eq!(TLS, 42);
@@ -405,6 +543,7 @@ pub enum E1 {
 // Computing the discriminant used to be done using the niche type (here `u8`,
 // from the `bool` field of `V1`), overflowing for variants with large enough
 // indices (`V3` and `V4`), causing them to be interpreted as other variants.
+#[rustfmt::skip]
 pub enum E2<X> {
     V1 { f: bool },
 
@@ -445,7 +584,8 @@ pub enum E2<X> {
     V4,
 }
 
-fn check_niche_behavior () {
+#[allow(unreachable_patterns)]
+fn check_niche_behavior() {
     if let E1::V2 { .. } = (E1::V1 { f: true }) {
         intrinsics::abort();
     }

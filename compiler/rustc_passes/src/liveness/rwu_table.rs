@@ -1,5 +1,6 @@
-use crate::liveness::{LiveNode, Variable};
 use std::iter;
+
+use crate::liveness::{LiveNode, Variable};
 
 #[derive(Clone, Copy)]
 pub(super) struct RWU {
@@ -9,7 +10,7 @@ pub(super) struct RWU {
 }
 
 /// Conceptually, this is like a `Vec<Vec<RWU>>`. But the number of
-/// RWU`s can get very large, so it uses a more compact representation.
+/// RWU's can get very large, so it uses a more compact representation.
 pub(super) struct RWUTable {
     /// Total number of live nodes.
     live_nodes: usize,

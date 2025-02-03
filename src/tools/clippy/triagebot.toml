@@ -1,12 +1,38 @@
 [relabel]
 allow-unauthenticated = [
     "A-*", "C-*", "E-*", "I-*", "L-*", "P-*", "S-*", "T-*",
-    "good-first-issue"
+    "good-first-issue", "beta-nominated"
 ]
-
-[assign]
 
 # Allows shortcuts like `@rustbot ready`
 #
-# See https://github.com/rust-lang/triagebot/wiki/Shortcuts
+# See https://forge.rust-lang.org/triagebot/shortcuts.html
 [shortcut]
+
+# Have rustbot inform users about the *No Merge Policy*
+[no-merges]
+exclude_titles = ["Rustup"] # exclude syncs from rust-lang/rust
+labels = ["has-merge-commits", "S-waiting-on-author"]
+
+[autolabel."S-waiting-on-review"]
+new_pr = true
+
+[assign]
+contributing_url = "https://github.com/rust-lang/rust-clippy/blob/master/CONTRIBUTING.md"
+users_on_vacation = [
+    "matthiaskrgr",
+]
+
+[assign.owners]
+"/.github" = ["@flip1995"]
+"/book" = ["@flip1995"]
+"*" = [
+    "@Manishearth",
+    "@llogiq",
+    "@Alexendoo",
+    "@dswij",
+    "@Jarcho",
+    "@blyxyas",
+    "@y21",
+    "@Centri3",
+]

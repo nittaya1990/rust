@@ -1,49 +1,39 @@
-use crate::borrow_set::{BorrowData, BorrowSet, TwoPhaseActivation};
-use crate::places_conflict;
-use crate::AccessDepth;
-use crate::BorrowIndex;
-use crate::Upvar;
+use std::ops::ControlFlow;
+
+use rustc_abi::FieldIdx;
 use rustc_data_structures::graph::dominators::Dominators;
-use rustc_middle::mir::BorrowKind;
-use rustc_middle::mir::{BasicBlock, Body, Field, Location, Place, PlaceRef, ProjectionElem};
+use rustc_middle::mir::{BasicBlock, Body, Location, Place, PlaceRef, ProjectionElem};
 use rustc_middle::ty::TyCtxt;
+use tracing::debug;
 
-/// Returns `true` if the borrow represented by `kind` is
-/// allowed to be split into separate Reservation and
-/// Activation phases.
-pub(super) fn allow_two_phase_borrow(kind: BorrowKind) -> bool {
-    kind.allows_two_phase_borrow()
-}
-
-/// Control for the path borrow checking code
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(super) enum Control {
-    Continue,
-    Break,
-}
+use crate::borrow_set::{BorrowData, BorrowSet, TwoPhaseActivation};
+use crate::{AccessDepth, BorrowIndex, places_conflict};
 
 /// Encapsulates the idea of iterating over every borrow that involves a particular path
 pub(super) fn each_borrow_involving_path<'tcx, F, I, S>(
     s: &mut S,
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
-    _location: Location,
     access_place: (AccessDepth, Place<'tcx>),
     borrow_set: &BorrowSet<'tcx>,
-    candidates: I,
+    is_candidate: I,
     mut op: F,
 ) where
-    F: FnMut(&mut S, BorrowIndex, &BorrowData<'tcx>) -> Control,
-    I: Iterator<Item = BorrowIndex>,
+    F: FnMut(&mut S, BorrowIndex, &BorrowData<'tcx>) -> ControlFlow<()>,
+    I: Fn(BorrowIndex) -> bool,
 {
     let (access, place) = access_place;
 
-    // FIXME: analogous code in check_loans first maps `place` to
-    // its base_path.
+    // The number of candidates can be large, but borrows for different locals cannot conflict with
+    // each other, so we restrict the working set a priori.
+    let Some(borrows_for_place_base) = borrow_set.local_map.get(&place.local) else { return };
 
     // check for loan restricting path P being used. Accounts for
     // borrows of P, P.a.b, etc.
-    for i in candidates {
+    for &i in borrows_for_place_base {
+        if !is_candidate(i) {
+            continue;
+        }
         let borrowed = &borrow_set[i];
 
         if places_conflict::borrow_conflicts_with_place(
@@ -60,7 +50,7 @@ pub(super) fn each_borrow_involving_path<'tcx, F, I, S>(
                 i, borrowed, place, access
             );
             let ctrl = op(s, i, borrowed);
-            if ctrl == Control::Break {
+            if matches!(ctrl, ControlFlow::Break(_)) {
                 return;
             }
         }
@@ -130,7 +120,7 @@ pub(super) fn is_active<'tcx>(
 }
 
 /// Determines if a given borrow is borrowing local data
-/// This is called for all Yield expressions on movable generators
+/// This is called for all Yield expressions on movable coroutines
 pub(super) fn borrow_of_local_data(place: Place<'_>) -> bool {
     // Reborrow of already borrowed data is ignored
     // Any errors will be caught on the initial borrow
@@ -143,10 +133,10 @@ pub(super) fn borrow_of_local_data(place: Place<'_>) -> bool {
 /// of a closure type.
 pub(crate) fn is_upvar_field_projection<'tcx>(
     tcx: TyCtxt<'tcx>,
-    upvars: &[Upvar<'tcx>],
+    upvars: &[&rustc_middle::ty::CapturedPlace<'tcx>],
     place_ref: PlaceRef<'tcx>,
     body: &Body<'tcx>,
-) -> Option<Field> {
+) -> Option<FieldIdx> {
     let mut place_ref = place_ref;
     let mut by_ref = false;
 
@@ -158,8 +148,8 @@ pub(crate) fn is_upvar_field_projection<'tcx>(
     match place_ref.last_projection() {
         Some((place_base, ProjectionElem::Field(field, _ty))) => {
             let base_ty = place_base.ty(body, tcx).ty;
-            if (base_ty.is_closure() || base_ty.is_generator())
-                && (!by_ref || upvars[field.index()].by_ref)
+            if (base_ty.is_closure() || base_ty.is_coroutine() || base_ty.is_coroutine_closure())
+                && (!by_ref || upvars[field.index()].is_by_ref())
             {
                 Some(field)
             } else {

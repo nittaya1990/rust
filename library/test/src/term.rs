@@ -12,7 +12,8 @@
 
 #![deny(missing_docs)]
 
-use std::io::{self, prelude::*};
+use std::io::prelude::*;
+use std::io::{self};
 
 pub(crate) use terminfo::TerminfoTerminal;
 #[cfg(windows)]
@@ -39,7 +40,7 @@ pub(crate) fn stdout() -> Option<Box<StdoutTerminal>> {
 pub(crate) fn stdout() -> Option<Box<StdoutTerminal>> {
     TerminfoTerminal::new(io::stdout())
         .map(|t| Box::new(t) as Box<StdoutTerminal>)
-        .or_else(|| WinConsole::new(io::stdout()).ok().map(|t| Box::new(t) as Box<StdoutTerminal>))
+        .or_else(|| Some(Box::new(WinConsole::new(io::stdout())) as Box<StdoutTerminal>))
 }
 
 /// Terminal color definitions
@@ -61,7 +62,7 @@ pub(crate) mod color {
 
 /// A terminal with similar capabilities to an ANSI Terminal
 /// (foreground/background colors etc).
-pub trait Terminal: Write {
+pub(crate) trait Terminal: Write {
     /// Sets the foreground color to the given color.
     ///
     /// If the color is a bright color, but the terminal only supports 8 colors,

@@ -1,6 +1,37 @@
 use crate::f64::consts;
-use crate::num::FpCategory as Fp;
-use crate::num::*;
+use crate::num::{FpCategory as Fp, *};
+
+/// Smallest number
+const TINY_BITS: u64 = 0x1;
+
+/// Next smallest number
+const TINY_UP_BITS: u64 = 0x2;
+
+/// Exponent = 0b11...10, Sifnificand 0b1111..10. Min val > 0
+const MAX_DOWN_BITS: u64 = 0x7fef_ffff_ffff_fffe;
+
+/// Zeroed exponent, full significant
+const LARGEST_SUBNORMAL_BITS: u64 = 0x000f_ffff_ffff_ffff;
+
+/// Exponent = 0b1, zeroed significand
+const SMALLEST_NORMAL_BITS: u64 = 0x0010_0000_0000_0000;
+
+/// First pattern over the mantissa
+const NAN_MASK1: u64 = 0x000a_aaaa_aaaa_aaaa;
+
+/// Second pattern over the mantissa
+const NAN_MASK2: u64 = 0x0005_5555_5555_5555;
+
+#[allow(unused_macros)]
+macro_rules! assert_f64_biteq {
+    ($left : expr, $right : expr) => {
+        let l: &f64 = &$left;
+        let r: &f64 = &$right;
+        let lb = l.to_bits();
+        let rb = r.to_bits();
+        assert_eq!(lb, rb, "float {l} ({lb:#018x}) is not bitequal to {r} ({rb:#018x})");
+    };
+}
 
 #[test]
 fn test_num_f64() {
@@ -81,7 +112,6 @@ fn test_neg_zero() {
     assert_eq!(Fp::Zero, neg_zero.classify());
 }
 
-#[cfg_attr(all(target_arch = "wasm32", target_os = "emscripten"), ignore)] // issue 42630
 #[test]
 fn test_one() {
     let one: f64 = 1.0f64;
@@ -134,7 +164,6 @@ fn test_is_finite() {
     assert!((-109.2f64).is_finite());
 }
 
-#[cfg_attr(all(target_arch = "wasm32", target_os = "emscripten"), ignore)] // issue 42630
 #[test]
 fn test_is_normal() {
     let nan: f64 = f64::NAN;
@@ -152,7 +181,6 @@ fn test_is_normal() {
     assert!(!1e-308f64.is_normal());
 }
 
-#[cfg_attr(all(target_arch = "wasm32", target_os = "emscripten"), ignore)] // issue 42630
 #[test]
 fn test_classify() {
     let nan: f64 = f64::NAN;
@@ -199,6 +227,7 @@ fn test_ceil() {
 
 #[test]
 fn test_round() {
+    assert_approx_eq!(2.5f64.round(), 3.0f64);
     assert_approx_eq!(1.0f64.round(), 1.0f64);
     assert_approx_eq!(1.3f64.round(), 1.0f64);
     assert_approx_eq!(1.5f64.round(), 2.0f64);
@@ -209,6 +238,21 @@ fn test_round() {
     assert_approx_eq!((-1.3f64).round(), -1.0f64);
     assert_approx_eq!((-1.5f64).round(), -2.0f64);
     assert_approx_eq!((-1.7f64).round(), -2.0f64);
+}
+
+#[test]
+fn test_round_ties_even() {
+    assert_approx_eq!(2.5f64.round_ties_even(), 2.0f64);
+    assert_approx_eq!(1.0f64.round_ties_even(), 1.0f64);
+    assert_approx_eq!(1.3f64.round_ties_even(), 1.0f64);
+    assert_approx_eq!(1.5f64.round_ties_even(), 2.0f64);
+    assert_approx_eq!(1.7f64.round_ties_even(), 2.0f64);
+    assert_approx_eq!(0.0f64.round_ties_even(), 0.0f64);
+    assert_approx_eq!((-0.0f64).round_ties_even(), -0.0f64);
+    assert_approx_eq!((-1.0f64).round_ties_even(), -1.0f64);
+    assert_approx_eq!((-1.3f64).round_ties_even(), -1.0f64);
+    assert_approx_eq!((-1.5f64).round_ties_even(), -2.0f64);
+    assert_approx_eq!((-1.7f64).round_ties_even(), -2.0f64);
 }
 
 #[test]
@@ -287,6 +331,65 @@ fn test_is_sign_negative() {
     assert!((1f64 / f64::NEG_INFINITY).is_sign_negative());
     assert!(!f64::NAN.is_sign_negative());
     assert!((-f64::NAN).is_sign_negative());
+}
+
+#[test]
+fn test_next_up() {
+    let tiny = f64::from_bits(TINY_BITS);
+    let tiny_up = f64::from_bits(TINY_UP_BITS);
+    let max_down = f64::from_bits(MAX_DOWN_BITS);
+    let largest_subnormal = f64::from_bits(LARGEST_SUBNORMAL_BITS);
+    let smallest_normal = f64::from_bits(SMALLEST_NORMAL_BITS);
+    assert_f64_biteq!(f64::NEG_INFINITY.next_up(), f64::MIN);
+    assert_f64_biteq!(f64::MIN.next_up(), -max_down);
+    assert_f64_biteq!((-1.0 - f64::EPSILON).next_up(), -1.0);
+    assert_f64_biteq!((-smallest_normal).next_up(), -largest_subnormal);
+    assert_f64_biteq!((-tiny_up).next_up(), -tiny);
+    assert_f64_biteq!((-tiny).next_up(), -0.0f64);
+    assert_f64_biteq!((-0.0f64).next_up(), tiny);
+    assert_f64_biteq!(0.0f64.next_up(), tiny);
+    assert_f64_biteq!(tiny.next_up(), tiny_up);
+    assert_f64_biteq!(largest_subnormal.next_up(), smallest_normal);
+    assert_f64_biteq!(1.0f64.next_up(), 1.0 + f64::EPSILON);
+    assert_f64_biteq!(f64::MAX.next_up(), f64::INFINITY);
+    assert_f64_biteq!(f64::INFINITY.next_up(), f64::INFINITY);
+
+    let nan0 = f64::NAN;
+    let nan1 = f64::from_bits(f64::NAN.to_bits() ^ NAN_MASK1);
+    let nan2 = f64::from_bits(f64::NAN.to_bits() ^ NAN_MASK2);
+    assert_f64_biteq!(nan0.next_up(), nan0);
+    assert_f64_biteq!(nan1.next_up(), nan1);
+    assert_f64_biteq!(nan2.next_up(), nan2);
+}
+
+#[test]
+fn test_next_down() {
+    let tiny = f64::from_bits(TINY_BITS);
+    let tiny_up = f64::from_bits(TINY_UP_BITS);
+    let max_down = f64::from_bits(MAX_DOWN_BITS);
+    let largest_subnormal = f64::from_bits(LARGEST_SUBNORMAL_BITS);
+    let smallest_normal = f64::from_bits(SMALLEST_NORMAL_BITS);
+    assert_f64_biteq!(f64::NEG_INFINITY.next_down(), f64::NEG_INFINITY);
+    assert_f64_biteq!(f64::MIN.next_down(), f64::NEG_INFINITY);
+    assert_f64_biteq!((-max_down).next_down(), f64::MIN);
+    assert_f64_biteq!((-1.0f64).next_down(), -1.0 - f64::EPSILON);
+    assert_f64_biteq!((-largest_subnormal).next_down(), -smallest_normal);
+    assert_f64_biteq!((-tiny).next_down(), -tiny_up);
+    assert_f64_biteq!((-0.0f64).next_down(), -tiny);
+    assert_f64_biteq!((0.0f64).next_down(), -tiny);
+    assert_f64_biteq!(tiny.next_down(), 0.0f64);
+    assert_f64_biteq!(tiny_up.next_down(), tiny);
+    assert_f64_biteq!(smallest_normal.next_down(), largest_subnormal);
+    assert_f64_biteq!((1.0 + f64::EPSILON).next_down(), 1.0f64);
+    assert_f64_biteq!(f64::MAX.next_down(), max_down);
+    assert_f64_biteq!(f64::INFINITY.next_down(), f64::MAX);
+
+    let nan0 = f64::NAN;
+    let nan1 = f64::from_bits(f64::NAN.to_bits() ^ NAN_MASK1);
+    let nan2 = f64::from_bits(f64::NAN.to_bits() ^ NAN_MASK2);
+    assert_f64_biteq!(nan0.next_down(), nan0);
+    assert_f64_biteq!(nan1.next_down(), nan1);
+    assert_f64_biteq!(nan2.next_down(), nan2);
 }
 
 #[test]
@@ -499,6 +602,11 @@ fn test_asinh() {
     assert_approx_eq!((-2.0f64).asinh(), -1.443635475178810342493276740273105f64);
     // regression test for the catastrophic cancellation fixed in 72486
     assert_approx_eq!((-67452098.07139316f64).asinh(), -18.72007542627454439398548429400083);
+
+    // test for low accuracy from issue 104548
+    assert_approx_eq!(60.0f64, 60.0f64.sinh().asinh());
+    // mul needed for approximate comparison to be meaningful
+    assert_approx_eq!(1.0f64, 1e-15f64.sinh().asinh() * 1e15f64);
 }
 
 #[test]
@@ -514,6 +622,9 @@ fn test_acosh() {
     assert!(nan.acosh().is_nan());
     assert_approx_eq!(2.0f64.acosh(), 1.31695789692481670862504634730796844f64);
     assert_approx_eq!(3.0f64.acosh(), 1.76274717403908605046521864995958461f64);
+
+    // test for low accuracy from issue 104548
+    assert_approx_eq!(60.0f64, 60.0f64.cosh().acosh());
 }
 
 #[test]
@@ -533,6 +644,38 @@ fn test_atanh() {
     assert!(nan.atanh().is_nan());
     assert_approx_eq!(0.5f64.atanh(), 0.54930614433405484569762261846126285f64);
     assert_approx_eq!((-0.5f64).atanh(), -0.54930614433405484569762261846126285f64);
+}
+
+#[test]
+fn test_gamma() {
+    // precision can differ between platforms
+    assert_approx_eq!(1.0f64.gamma(), 1.0f64);
+    assert_approx_eq!(2.0f64.gamma(), 1.0f64);
+    assert_approx_eq!(3.0f64.gamma(), 2.0f64);
+    assert_approx_eq!(4.0f64.gamma(), 6.0f64);
+    assert_approx_eq!(5.0f64.gamma(), 24.0f64);
+    assert_approx_eq!(0.5f64.gamma(), consts::PI.sqrt());
+    assert_approx_eq!((-0.5f64).gamma(), -2.0 * consts::PI.sqrt());
+    assert_eq!(0.0f64.gamma(), f64::INFINITY);
+    assert_eq!((-0.0f64).gamma(), f64::NEG_INFINITY);
+    assert!((-1.0f64).gamma().is_nan());
+    assert!((-2.0f64).gamma().is_nan());
+    assert!(f64::NAN.gamma().is_nan());
+    assert!(f64::NEG_INFINITY.gamma().is_nan());
+    assert_eq!(f64::INFINITY.gamma(), f64::INFINITY);
+    assert_eq!(171.71f64.gamma(), f64::INFINITY);
+}
+
+#[test]
+fn test_ln_gamma() {
+    assert_approx_eq!(1.0f64.ln_gamma().0, 0.0f64);
+    assert_eq!(1.0f64.ln_gamma().1, 1);
+    assert_approx_eq!(2.0f64.ln_gamma().0, 0.0f64);
+    assert_eq!(2.0f64.ln_gamma().1, 1);
+    assert_approx_eq!(3.0f64.ln_gamma().0, 2.0f64.ln());
+    assert_eq!(3.0f64.ln_gamma().1, 1);
+    assert_approx_eq!((-0.5f64).ln_gamma().0, (2.0 * consts::PI.sqrt()).ln());
+    assert_eq!((-0.5f64).ln_gamma().1, -1);
 }
 
 #[test]
@@ -583,9 +726,8 @@ fn test_float_bits_conv() {
     assert_approx_eq!(f64::from_bits(0xc02c800000000000), -14.25);
 
     // Check that NaNs roundtrip their bits regardless of signaling-ness
-    // 0xA is 0b1010; 0x5 is 0b0101 -- so these two together clobbers all the mantissa bits
-    let masked_nan1 = f64::NAN.to_bits() ^ 0x000A_AAAA_AAAA_AAAA;
-    let masked_nan2 = f64::NAN.to_bits() ^ 0x0005_5555_5555_5555;
+    let masked_nan1 = f64::NAN.to_bits() ^ NAN_MASK1;
+    let masked_nan2 = f64::NAN.to_bits() ^ NAN_MASK2;
     assert!(f64::from_bits(masked_nan1).is_nan());
     assert!(f64::from_bits(masked_nan2).is_nan());
 

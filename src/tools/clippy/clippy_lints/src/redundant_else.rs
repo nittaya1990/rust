@@ -1,9 +1,8 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use rustc_ast::ast::{Block, Expr, ExprKind, Stmt, StmtKind};
-use rustc_ast::visit::{walk_expr, Visitor};
+use rustc_ast::visit::{Visitor, walk_expr};
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -16,7 +15,7 @@ declare_clippy_lint! {
     /// Some may prefer to keep the `else` block for clarity.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn my_func(count: u32) {
     ///     if count == 0 {
     ///         print!("Nothing to do");
@@ -27,7 +26,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn my_func(count: u32) {
     ///     if count == 0 {
     ///         print!("Nothing to do");
@@ -46,7 +45,7 @@ declare_lint_pass!(RedundantElse => [REDUNDANT_ELSE]);
 
 impl EarlyLintPass for RedundantElse {
     fn check_stmt(&mut self, cx: &EarlyContext<'_>, stmt: &Stmt) {
-        if in_external_macro(cx.sess(), stmt.span) {
+        if stmt.span.in_external_macro(cx.sess().source_map()) {
             return;
         }
         // Only look at expressions that are a whole statement
@@ -69,7 +68,6 @@ impl EarlyLintPass for RedundantElse {
                 ExprKind::If(_, next_then, Some(next_els)) => {
                     then = next_then;
                     els = next_els;
-                    continue;
                 },
                 // else if without else
                 ExprKind::If(..) => return,
@@ -105,11 +103,13 @@ impl<'ast> Visitor<'ast> for BreakVisitor {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         self.is_break = match expr.kind {
             ExprKind::Break(..) | ExprKind::Continue(..) | ExprKind::Ret(..) => true,
-            ExprKind::Match(_, ref arms) => arms.iter().all(|arm| self.check_expr(&arm.body)),
+            ExprKind::Match(_, ref arms, _) => arms.iter().all(|arm|
+                arm.body.is_none() || arm.body.as_deref().is_some_and(|body| self.check_expr(body))
+            ),
             ExprKind::If(_, ref then, Some(ref els)) => self.check_block(then) && self.check_expr(els),
             ExprKind::If(_, _, None)
             // ignore loops for simplicity
-            | ExprKind::While(..) | ExprKind::ForLoop(..) | ExprKind::Loop(..) => false,
+            | ExprKind::While(..) | ExprKind::ForLoop { .. } | ExprKind::Loop(..) => false,
             _ => {
                 walk_expr(self, expr);
                 return;

@@ -1,9 +1,9 @@
+use std::sync::LazyLock as Lazy;
+
 use rustc_data_structures::fx::FxHashMap;
 use rustc_lint::LintStore;
-use rustc_lint_defs::{declare_tool_lint, Lint, LintId};
-use rustc_session::{lint, Session};
-
-use std::lazy::SyncLazy as Lazy;
+use rustc_lint_defs::{Lint, LintId, declare_tool_lint};
+use rustc_session::{Session, lint};
 
 /// This function is used to setup the lint initialization. By default, in rustdoc, everything
 /// is "allowed". Depending if we run in test mode or not, we want some of them to be at their
@@ -31,9 +31,9 @@ where
     allowed_lints.extend(lint_opts.iter().map(|(lint, _)| lint).cloned());
 
     let lints = || {
-        lint::builtin::HardwiredLints::get_lints()
+        lint::builtin::HardwiredLints::lint_vec()
             .into_iter()
-            .chain(rustc_lint::SoftLints::get_lints().into_iter())
+            .chain(rustc_lint::SoftLints::lint_vec())
     };
 
     let lint_opts = lints()
@@ -46,7 +46,7 @@ where
                 filter_call(lint)
             }
         })
-        .chain(lint_opts.into_iter())
+        .chain(lint_opts)
         .collect::<Vec<_>>();
 
     let lint_caps = lints()
@@ -64,9 +64,13 @@ where
 }
 
 macro_rules! declare_rustdoc_lint {
-    ($(#[$attr:meta])* $name: ident, $level: ident, $descr: literal $(,)?) => {
+    (
+        $(#[$attr:meta])* $name: ident, $level: ident, $descr: literal $(,)?
+        $(@feature_gate = $gate:ident;)?
+    ) => {
         declare_tool_lint! {
             $(#[$attr])* pub rustdoc::$name, $level, $descr
+            $(, @feature_gate = $gate;)?
         }
     }
 }
@@ -123,7 +127,8 @@ declare_rustdoc_lint! {
     /// [rustdoc book]: ../../../rustdoc/lints.html#missing_doc_code_examples
     MISSING_DOC_CODE_EXAMPLES,
     Allow,
-    "detects publicly-exported items without code samples in their documentation"
+    "detects publicly-exported items without code samples in their documentation",
+    @feature_gate = rustdoc_missing_doc_code_examples;
 }
 
 declare_rustdoc_lint! {
@@ -143,7 +148,7 @@ declare_rustdoc_lint! {
     ///
     /// [rustdoc book]: ../../../rustdoc/lints.html#invalid_html_tags
     INVALID_HTML_TAGS,
-    Allow,
+    Warn,
     "detects invalid HTML tags in doc comments"
 }
 
@@ -169,7 +174,37 @@ declare_rustdoc_lint! {
    "codeblock could not be parsed as valid Rust or is empty"
 }
 
-crate static RUSTDOC_LINTS: Lazy<Vec<&'static Lint>> = Lazy::new(|| {
+declare_rustdoc_lint! {
+   /// The `unescaped_backticks` lint detects unescaped backticks (\`), which usually
+   /// mean broken inline code. This is a `rustdoc` only lint, see the documentation
+   /// in the [rustdoc book].
+   ///
+   /// [rustdoc book]: ../../../rustdoc/lints.html#unescaped_backticks
+   UNESCAPED_BACKTICKS,
+   Allow,
+   "detects unescaped backticks in doc comments"
+}
+
+declare_rustdoc_lint! {
+    /// This lint is **warn-by-default**. It detects explicit links that are the same
+    /// as computed automatic links. This usually means the explicit links are removable.
+    /// This is a `rustdoc` only lint, see the documentation in the [rustdoc book].
+    ///
+    /// [rustdoc book]: ../../../rustdoc/lints.html#redundant_explicit_links
+    REDUNDANT_EXPLICIT_LINKS,
+    Warn,
+    "detects redundant explicit links in doc comments"
+}
+
+declare_rustdoc_lint! {
+    /// This compatibility lint checks for Markdown syntax that works in the old engine but not
+    /// the new one.
+    UNPORTABLE_MARKDOWN,
+    Warn,
+    "detects markdown that is interpreted differently in different parser"
+}
+
+pub(crate) static RUSTDOC_LINTS: Lazy<Vec<&'static Lint>> = Lazy::new(|| {
     vec![
         BROKEN_INTRA_DOC_LINKS,
         PRIVATE_INTRA_DOC_LINKS,
@@ -180,16 +215,23 @@ crate static RUSTDOC_LINTS: Lazy<Vec<&'static Lint>> = Lazy::new(|| {
         INVALID_HTML_TAGS,
         BARE_URLS,
         MISSING_CRATE_LEVEL_DOCS,
+        UNESCAPED_BACKTICKS,
+        REDUNDANT_EXPLICIT_LINKS,
+        UNPORTABLE_MARKDOWN,
     ]
 });
 
-crate fn register_lints(_sess: &Session, lint_store: &mut LintStore) {
-    lint_store.register_lints(&**RUSTDOC_LINTS);
+pub(crate) fn register_lints(_sess: &Session, lint_store: &mut LintStore) {
+    lint_store.register_lints(&RUSTDOC_LINTS);
     lint_store.register_group(
         true,
         "rustdoc::all",
         Some("rustdoc"),
-        RUSTDOC_LINTS.iter().map(|&lint| LintId::of(lint)).collect(),
+        RUSTDOC_LINTS
+            .iter()
+            .filter(|lint| lint.feature_gate.is_none()) // only include stable lints
+            .map(|&lint| LintId::of(lint))
+            .collect(),
     );
     for lint in &*RUSTDOC_LINTS {
         let name = lint.name_lower();

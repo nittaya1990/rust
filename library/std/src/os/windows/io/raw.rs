@@ -2,16 +2,12 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use crate::fs;
-use crate::io;
-use crate::net;
 #[cfg(doc)]
 use crate::os::windows::io::{AsHandle, AsSocket};
 use crate::os::windows::io::{OwnedHandle, OwnedSocket};
 use crate::os::windows::raw;
-use crate::sys;
-use crate::sys::c;
 use crate::sys_common::{self, AsInner, FromInner, IntoInner};
+use crate::{fs, io, net, ptr, sys};
 
 /// Raw HANDLEs.
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -31,13 +27,20 @@ pub trait AsRawHandle {
     /// raw handle to the caller, and the handle is only guaranteed
     /// to be valid while the original object has not yet been destroyed.
     ///
+    /// This function may return null, such as when called on [`Stdin`],
+    /// [`Stdout`], or [`Stderr`] when the console is detached.
+    ///
     /// However, borrowing is not strictly required. See [`AsHandle::as_handle`]
     /// for an API which strictly borrows a handle.
+    ///
+    /// [`Stdin`]: io::Stdin
+    /// [`Stdout`]: io::Stdout
+    /// [`Stderr`]: io::Stderr
     #[stable(feature = "rust1", since = "1.0.0")]
     fn as_raw_handle(&self) -> RawHandle;
 }
 
-/// Construct I/O objects from raw handles.
+/// Constructs I/O objects from raw handles.
 #[stable(feature = "from_raw_os", since = "1.1.0")]
 pub trait FromRawHandle {
     /// Constructs a new I/O object from the specified raw handle.
@@ -55,7 +58,7 @@ pub trait FromRawHandle {
     /// # Safety
     ///
     /// The `handle` passed in must:
-    ///   - be a valid an open handle,
+    ///   - be an [owned handle][io-safety]; in particular, it must be open.
     ///   - be a handle for a resource that may be freed via [`CloseHandle`]
     ///     (as opposed to `RegCloseKey` or other close functions).
     ///
@@ -64,6 +67,7 @@ pub trait FromRawHandle {
     ///
     /// [`CloseHandle`]: https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
     /// [here]: https://devblogs.microsoft.com/oldnewthing/20040302-00/?p=40443
+    /// [io-safety]: io#io-safety
     #[stable(feature = "from_raw_os", since = "1.1.0")]
     unsafe fn from_raw_handle(handle: RawHandle) -> Self;
 }
@@ -81,6 +85,7 @@ pub trait IntoRawHandle {
     /// However, transferring ownership is not strictly required. Use a
     /// `Into<OwnedHandle>::into` implementation for an API which strictly
     /// transfers ownership.
+    #[must_use = "losing the raw handle may leak resources"]
     #[stable(feature = "into_raw_os", since = "1.4.0")]
     fn into_raw_handle(self) -> RawHandle;
 }
@@ -96,53 +101,67 @@ impl AsRawHandle for fs::File {
 #[stable(feature = "asraw_stdio", since = "1.21.0")]
 impl AsRawHandle for io::Stdin {
     fn as_raw_handle(&self) -> RawHandle {
-        unsafe { c::GetStdHandle(c::STD_INPUT_HANDLE) as RawHandle }
+        stdio_handle(unsafe { sys::c::GetStdHandle(sys::c::STD_INPUT_HANDLE) as RawHandle })
     }
 }
 
 #[stable(feature = "asraw_stdio", since = "1.21.0")]
 impl AsRawHandle for io::Stdout {
     fn as_raw_handle(&self) -> RawHandle {
-        unsafe { c::GetStdHandle(c::STD_OUTPUT_HANDLE) as RawHandle }
+        stdio_handle(unsafe { sys::c::GetStdHandle(sys::c::STD_OUTPUT_HANDLE) as RawHandle })
     }
 }
 
 #[stable(feature = "asraw_stdio", since = "1.21.0")]
 impl AsRawHandle for io::Stderr {
     fn as_raw_handle(&self) -> RawHandle {
-        unsafe { c::GetStdHandle(c::STD_ERROR_HANDLE) as RawHandle }
+        stdio_handle(unsafe { sys::c::GetStdHandle(sys::c::STD_ERROR_HANDLE) as RawHandle })
     }
 }
 
 #[stable(feature = "asraw_stdio_locks", since = "1.35.0")]
 impl<'a> AsRawHandle for io::StdinLock<'a> {
     fn as_raw_handle(&self) -> RawHandle {
-        unsafe { c::GetStdHandle(c::STD_INPUT_HANDLE) as RawHandle }
+        stdio_handle(unsafe { sys::c::GetStdHandle(sys::c::STD_INPUT_HANDLE) as RawHandle })
     }
 }
 
 #[stable(feature = "asraw_stdio_locks", since = "1.35.0")]
 impl<'a> AsRawHandle for io::StdoutLock<'a> {
     fn as_raw_handle(&self) -> RawHandle {
-        unsafe { c::GetStdHandle(c::STD_OUTPUT_HANDLE) as RawHandle }
+        stdio_handle(unsafe { sys::c::GetStdHandle(sys::c::STD_OUTPUT_HANDLE) as RawHandle })
     }
 }
 
 #[stable(feature = "asraw_stdio_locks", since = "1.35.0")]
 impl<'a> AsRawHandle for io::StderrLock<'a> {
     fn as_raw_handle(&self) -> RawHandle {
-        unsafe { c::GetStdHandle(c::STD_ERROR_HANDLE) as RawHandle }
+        stdio_handle(unsafe { sys::c::GetStdHandle(sys::c::STD_ERROR_HANDLE) as RawHandle })
     }
+}
+
+// Translate a handle returned from `GetStdHandle` into a handle to return to
+// the user.
+fn stdio_handle(raw: RawHandle) -> RawHandle {
+    // `GetStdHandle` isn't expected to actually fail, so when it returns
+    // `INVALID_HANDLE_VALUE`, it means we were launched from a parent which
+    // didn't provide us with stdio handles, such as a parent with a detached
+    // console. In that case, return null to the user, which is consistent
+    // with what they'd get in the parent, and which avoids the problem that
+    // `INVALID_HANDLE_VALUE` aliases the current process handle.
+    if raw == sys::c::INVALID_HANDLE_VALUE { ptr::null_mut() } else { raw }
 }
 
 #[stable(feature = "from_raw_os", since = "1.1.0")]
 impl FromRawHandle for fs::File {
     #[inline]
     unsafe fn from_raw_handle(handle: RawHandle) -> fs::File {
-        let handle = handle as c::HANDLE;
-        fs::File::from_inner(sys::fs::File::from_inner(FromInner::from_inner(
-            OwnedHandle::from_raw_handle(handle),
-        )))
+        unsafe {
+            let handle = handle as sys::c::HANDLE;
+            fs::File::from_inner(sys::fs::File::from_inner(FromInner::from_inner(
+                OwnedHandle::from_raw_handle(handle),
+            )))
+        }
     }
 }
 
@@ -188,10 +207,11 @@ pub trait FromRawSocket {
     /// # Safety
     ///
     /// The `socket` passed in must:
-    ///   - be a valid an open socket,
+    ///   - be an [owned socket][io-safety]; in particular, it must be open.
     ///   - be a socket that may be freed via [`closesocket`].
     ///
     /// [`closesocket`]: https://docs.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-closesocket
+    /// [io-safety]: io#io-safety
     #[stable(feature = "from_raw_os", since = "1.1.0")]
     unsafe fn from_raw_socket(sock: RawSocket) -> Self;
 }
@@ -209,6 +229,7 @@ pub trait IntoRawSocket {
     /// However, transferring ownership is not strictly required. Use a
     /// `Into<OwnedSocket>::into` implementation for an API which strictly
     /// transfers ownership.
+    #[must_use = "losing the raw socket may leak resources"]
     #[stable(feature = "into_raw_os", since = "1.4.0")]
     fn into_raw_socket(self) -> RawSocket;
 }
@@ -239,24 +260,30 @@ impl AsRawSocket for net::UdpSocket {
 impl FromRawSocket for net::TcpStream {
     #[inline]
     unsafe fn from_raw_socket(sock: RawSocket) -> net::TcpStream {
-        let sock = sys::net::Socket::from_inner(OwnedSocket::from_raw_socket(sock));
-        net::TcpStream::from_inner(sys_common::net::TcpStream::from_inner(sock))
+        unsafe {
+            let sock = sys::net::Socket::from_inner(OwnedSocket::from_raw_socket(sock));
+            net::TcpStream::from_inner(sys_common::net::TcpStream::from_inner(sock))
+        }
     }
 }
 #[stable(feature = "from_raw_os", since = "1.1.0")]
 impl FromRawSocket for net::TcpListener {
     #[inline]
     unsafe fn from_raw_socket(sock: RawSocket) -> net::TcpListener {
-        let sock = sys::net::Socket::from_inner(OwnedSocket::from_raw_socket(sock));
-        net::TcpListener::from_inner(sys_common::net::TcpListener::from_inner(sock))
+        unsafe {
+            let sock = sys::net::Socket::from_inner(OwnedSocket::from_raw_socket(sock));
+            net::TcpListener::from_inner(sys_common::net::TcpListener::from_inner(sock))
+        }
     }
 }
 #[stable(feature = "from_raw_os", since = "1.1.0")]
 impl FromRawSocket for net::UdpSocket {
     #[inline]
     unsafe fn from_raw_socket(sock: RawSocket) -> net::UdpSocket {
-        let sock = sys::net::Socket::from_inner(OwnedSocket::from_raw_socket(sock));
-        net::UdpSocket::from_inner(sys_common::net::UdpSocket::from_inner(sock))
+        unsafe {
+            let sock = sys::net::Socket::from_inner(OwnedSocket::from_raw_socket(sock));
+            net::UdpSocket::from_inner(sys_common::net::UdpSocket::from_inner(sock))
+        }
     }
 }
 

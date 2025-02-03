@@ -1,29 +1,28 @@
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_hir as hir;
-use rustc_hir::itemlikevisit::ItemLikeVisitor;
+use rustc_hir::def::DefKind;
+use rustc_hir::def_id::DefId;
+use rustc_middle::query::LocalCrate;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::cstore::ForeignModule;
 
-crate fn collect(tcx: TyCtxt<'_>) -> Vec<ForeignModule> {
-    let mut collector = Collector { modules: Vec::new() };
-    tcx.hir().visit_all_item_likes(&mut collector);
-    collector.modules
-}
+pub(crate) fn collect(tcx: TyCtxt<'_>, LocalCrate: LocalCrate) -> FxIndexMap<DefId, ForeignModule> {
+    let mut modules = FxIndexMap::default();
 
-struct Collector {
-    modules: Vec<ForeignModule>,
-}
+    // We need to collect all the `ForeignMod`, even if they are empty.
+    for id in tcx.hir().items() {
+        if !matches!(tcx.def_kind(id.owner_id), DefKind::ForeignMod) {
+            continue;
+        }
 
-impl<'tcx> ItemLikeVisitor<'tcx> for Collector {
-    fn visit_item(&mut self, it: &'tcx hir::Item<'tcx>) {
-        let hir::ItemKind::ForeignMod { items, .. } = it.kind else {
-            return;
-        };
+        let def_id = id.owner_id.to_def_id();
+        let item = tcx.hir().item(id);
 
-        let foreign_items = items.iter().map(|it| it.id.def_id.to_def_id()).collect();
-        self.modules.push(ForeignModule { foreign_items, def_id: it.def_id.to_def_id() });
+        if let hir::ItemKind::ForeignMod { abi, items } = item.kind {
+            let foreign_items = items.iter().map(|it| it.id.owner_id.to_def_id()).collect();
+            modules.insert(def_id, ForeignModule { def_id, abi, foreign_items });
+        }
     }
 
-    fn visit_trait_item(&mut self, _it: &'tcx hir::TraitItem<'tcx>) {}
-    fn visit_impl_item(&mut self, _it: &'tcx hir::ImplItem<'tcx>) {}
-    fn visit_foreign_item(&mut self, _it: &'tcx hir::ForeignItem<'tcx>) {}
+    modules
 }

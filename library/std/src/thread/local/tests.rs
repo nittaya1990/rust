@@ -1,15 +1,34 @@
 use crate::cell::{Cell, UnsafeCell};
 use crate::sync::atomic::{AtomicU8, Ordering};
-use crate::sync::mpsc::{channel, Sender};
-use crate::thread::{self, LocalKey};
+use crate::sync::{Arc, Condvar, Mutex};
+use crate::thread::{self, Builder, LocalKey};
 use crate::thread_local;
 
-struct Foo(Sender<()>);
+#[derive(Clone, Default)]
+struct Signal(Arc<(Mutex<bool>, Condvar)>);
 
-impl Drop for Foo {
+impl Signal {
+    fn notify(&self) {
+        let (set, cvar) = &*self.0;
+        *set.lock().unwrap() = true;
+        cvar.notify_one();
+    }
+
+    fn wait(&self) {
+        let (set, cvar) = &*self.0;
+        let mut set = set.lock().unwrap();
+        while !*set {
+            set = cvar.wait(set).unwrap();
+        }
+    }
+}
+
+struct NotifyOnDrop(Signal);
+
+impl Drop for NotifyOnDrop {
     fn drop(&mut self) {
-        let Foo(ref s) = *self;
-        s.send(()).unwrap();
+        let NotifyOnDrop(ref f) = *self;
+        f.notify();
     }
 }
 
@@ -63,26 +82,30 @@ fn states() {
 
 #[test]
 fn smoke_dtor() {
-    thread_local!(static FOO: UnsafeCell<Option<Foo>> = UnsafeCell::new(None));
+    thread_local!(static FOO: UnsafeCell<Option<NotifyOnDrop>> = UnsafeCell::new(None));
     run(&FOO);
-    thread_local!(static FOO2: UnsafeCell<Option<Foo>> = const { UnsafeCell::new(None) });
+    thread_local!(static FOO2: UnsafeCell<Option<NotifyOnDrop>> = const { UnsafeCell::new(None) });
     run(&FOO2);
 
-    fn run(key: &'static LocalKey<UnsafeCell<Option<Foo>>>) {
-        let (tx, rx) = channel();
+    fn run(key: &'static LocalKey<UnsafeCell<Option<NotifyOnDrop>>>) {
+        let signal = Signal::default();
+        let signal2 = signal.clone();
         let t = thread::spawn(move || unsafe {
-            let mut tx = Some(tx);
+            let mut signal = Some(signal2);
             key.with(|f| {
-                *f.get() = Some(Foo(tx.take().unwrap()));
+                *f.get() = Some(NotifyOnDrop(signal.take().unwrap()));
             });
         });
-        rx.recv().unwrap();
+        signal.wait();
         t.join().unwrap();
     }
 }
 
 #[test]
 fn circular() {
+    // FIXME(static_mut_refs): Do not allow `static_mut_refs` lint
+    #![allow(static_mut_refs)]
+
     struct S1(&'static LocalKey<UnsafeCell<Option<S1>>>, &'static LocalKey<UnsafeCell<Option<S2>>>);
     struct S2(&'static LocalKey<UnsafeCell<Option<S1>>>, &'static LocalKey<UnsafeCell<Option<S2>>>);
     thread_local!(static K1: UnsafeCell<Option<S1>> = UnsafeCell::new(None));
@@ -165,48 +188,50 @@ fn self_referential() {
 // requires the destructor to be run to pass the test).
 #[test]
 fn dtors_in_dtors_in_dtors() {
-    struct S1(Sender<()>);
+    struct S1(Signal);
     thread_local!(static K1: UnsafeCell<Option<S1>> = UnsafeCell::new(None));
-    thread_local!(static K2: UnsafeCell<Option<Foo>> = UnsafeCell::new(None));
+    thread_local!(static K2: UnsafeCell<Option<NotifyOnDrop>> = UnsafeCell::new(None));
 
     impl Drop for S1 {
         fn drop(&mut self) {
-            let S1(ref tx) = *self;
+            let S1(ref signal) = *self;
             unsafe {
-                let _ = K2.try_with(|s| *s.get() = Some(Foo(tx.clone())));
+                let _ = K2.try_with(|s| *s.get() = Some(NotifyOnDrop(signal.clone())));
             }
         }
     }
 
-    let (tx, rx) = channel();
+    let signal = Signal::default();
+    let signal2 = signal.clone();
     let _t = thread::spawn(move || unsafe {
-        let mut tx = Some(tx);
-        K1.with(|s| *s.get() = Some(S1(tx.take().unwrap())));
+        let mut signal = Some(signal2);
+        K1.with(|s| *s.get() = Some(S1(signal.take().unwrap())));
     });
-    rx.recv().unwrap();
+    signal.wait();
 }
 
 #[test]
 fn dtors_in_dtors_in_dtors_const_init() {
-    struct S1(Sender<()>);
+    struct S1(Signal);
     thread_local!(static K1: UnsafeCell<Option<S1>> = const { UnsafeCell::new(None) });
-    thread_local!(static K2: UnsafeCell<Option<Foo>> = const { UnsafeCell::new(None) });
+    thread_local!(static K2: UnsafeCell<Option<NotifyOnDrop>> = const { UnsafeCell::new(None) });
 
     impl Drop for S1 {
         fn drop(&mut self) {
-            let S1(ref tx) = *self;
+            let S1(ref signal) = *self;
             unsafe {
-                let _ = K2.try_with(|s| *s.get() = Some(Foo(tx.clone())));
+                let _ = K2.try_with(|s| *s.get() = Some(NotifyOnDrop(signal.clone())));
             }
         }
     }
 
-    let (tx, rx) = channel();
+    let signal = Signal::default();
+    let signal2 = signal.clone();
     let _t = thread::spawn(move || unsafe {
-        let mut tx = Some(tx);
-        K1.with(|s| *s.get() = Some(S1(tx.take().unwrap())));
+        let mut signal = Some(signal2);
+        K1.with(|s| *s.get() = Some(S1(signal.take().unwrap())));
     });
-    rx.recv().unwrap();
+    signal.wait();
 }
 
 // This test tests that TLS destructors have run before the thread joins. The
@@ -233,6 +258,9 @@ fn join_orders_after_tls_destructors() {
     // observe the channel in the `THREAD1_WAITING` state. If this does occur,
     // we switch to the “poison” state `THREAD2_JOINED` and panic all around.
     // (This is equivalent to “sending” from an alternate producer thread.)
+    //
+    // Relaxed memory ordering is fine because and spawn()/join() already provide all the
+    // synchronization we need here.
     const FRESH: u8 = 0;
     const THREAD2_LAUNCHED: u8 = 1;
     const THREAD1_WAITING: u8 = 2;
@@ -241,7 +269,7 @@ fn join_orders_after_tls_destructors() {
     static SYNC_STATE: AtomicU8 = AtomicU8::new(FRESH);
 
     for _ in 0..10 {
-        SYNC_STATE.store(FRESH, Ordering::SeqCst);
+        SYNC_STATE.store(FRESH, Ordering::Relaxed);
 
         let jh = thread::Builder::new()
             .name("thread1".into())
@@ -250,7 +278,7 @@ fn join_orders_after_tls_destructors() {
 
                 impl Drop for TlDrop {
                     fn drop(&mut self) {
-                        let mut sync_state = SYNC_STATE.swap(THREAD1_WAITING, Ordering::SeqCst);
+                        let mut sync_state = SYNC_STATE.swap(THREAD1_WAITING, Ordering::Relaxed);
                         loop {
                             match sync_state {
                                 THREAD2_LAUNCHED | THREAD1_WAITING => thread::yield_now(),
@@ -260,7 +288,7 @@ fn join_orders_after_tls_destructors() {
                                 ),
                                 v => unreachable!("sync state: {}", v),
                             }
-                            sync_state = SYNC_STATE.load(Ordering::SeqCst);
+                            sync_state = SYNC_STATE.load(Ordering::Relaxed);
                         }
                     }
                 }
@@ -272,7 +300,7 @@ fn join_orders_after_tls_destructors() {
                 TL_DROP.with(|_| {});
 
                 loop {
-                    match SYNC_STATE.load(Ordering::SeqCst) {
+                    match SYNC_STATE.load(Ordering::Relaxed) {
                         FRESH => thread::yield_now(),
                         THREAD2_LAUNCHED => break,
                         v => unreachable!("sync state: {}", v),
@@ -284,9 +312,9 @@ fn join_orders_after_tls_destructors() {
         let jh2 = thread::Builder::new()
             .name("thread2".into())
             .spawn(move || {
-                assert_eq!(SYNC_STATE.swap(THREAD2_LAUNCHED, Ordering::SeqCst), FRESH);
+                assert_eq!(SYNC_STATE.swap(THREAD2_LAUNCHED, Ordering::Relaxed), FRESH);
                 jh.join().unwrap();
-                match SYNC_STATE.swap(THREAD2_JOINED, Ordering::SeqCst) {
+                match SYNC_STATE.swap(THREAD2_JOINED, Ordering::Relaxed) {
                     MAIN_THREAD_RENDEZVOUS => return,
                     THREAD2_LAUNCHED | THREAD1_WAITING => {
                         panic!("Thread 2 running after thread 1 join before main thread rendezvous")
@@ -300,8 +328,8 @@ fn join_orders_after_tls_destructors() {
             match SYNC_STATE.compare_exchange(
                 THREAD1_WAITING,
                 MAIN_THREAD_RENDEZVOUS,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(FRESH) => thread::yield_now(),
@@ -314,4 +342,35 @@ fn join_orders_after_tls_destructors() {
         }
         jh2.join().unwrap();
     }
+}
+
+// Test that thread::current is still available in TLS destructors.
+#[test]
+fn thread_current_in_dtor() {
+    // Go through one round of TLS destruction first.
+    struct Defer;
+    impl Drop for Defer {
+        fn drop(&mut self) {
+            RETRIEVE.with(|_| {});
+        }
+    }
+
+    struct RetrieveName;
+    impl Drop for RetrieveName {
+        fn drop(&mut self) {
+            *NAME.lock().unwrap() = Some(thread::current().name().unwrap().to_owned());
+        }
+    }
+
+    static NAME: Mutex<Option<String>> = Mutex::new(None);
+
+    thread_local! {
+        static DEFER: Defer = const { Defer };
+        static RETRIEVE: RetrieveName = const { RetrieveName };
+    }
+
+    Builder::new().name("test".to_owned()).spawn(|| DEFER.with(|_| {})).unwrap().join().unwrap();
+    let name = NAME.lock().unwrap();
+    let name = name.as_ref().unwrap();
+    assert_eq!(name, "test");
 }

@@ -5,20 +5,19 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use rustc_ast::ast;
-use rustc_ast::AstLike;
 use rustc_span::Span;
+use tracing::debug;
 
 use self::newline_style::apply_newline_style;
 use crate::comment::{CharClasses, FullCodeCharKind};
 use crate::config::{Config, FileName, Verbosity};
 use crate::formatting::generated::is_generated_file;
-use crate::issues::BadIssueSeeker;
 use crate::modules::Module;
 use crate::parse::parser::{DirectoryOwnership, Parser, ParserError};
 use crate::parse::session::ParseSess;
 use crate::utils::{contains_skip, count_newlines};
 use crate::visitor::FmtVisitor;
-use crate::{modules, source_file, ErrorKind, FormatReport, Input, Session};
+use crate::{ErrorKind, FormatReport, Input, Session, modules, source_file};
 
 mod generated;
 mod newline_style;
@@ -40,12 +39,10 @@ impl<'b, T: Write + 'b> Session<'b, T> {
         rustc_span::create_session_if_not_set_then(self.config.edition().into(), |_| {
             if self.config.disable_all_formatting() {
                 // When the input is from stdin, echo back the input.
-                if let Input::Text(ref buf) = input {
-                    if let Err(e) = io::stdout().write_all(buf.as_bytes()) {
-                        return Err(From::from(e));
-                    }
-                }
-                return Ok(FormatReport::new());
+                return match input {
+                    Input::Text(ref buf) => echo_back_stdin(buf),
+                    _ => Ok(FormatReport::new()),
+                };
             }
 
             let config = &self.config.clone();
@@ -83,15 +80,22 @@ fn should_skip_module<T: FormatHandler>(
     // FIXME(calebcartwright) - we need to determine how we'll handle the
     // `format_generated_files` option with stdin based input.
     if !input_is_stdin && !config.format_generated_files() {
-        let source_file = context.parse_session.span_to_file_contents(module.span);
+        let source_file = context.psess.span_to_file_contents(module.span);
         let src = source_file.src.as_ref().expect("SourceFile without src");
 
-        if is_generated_file(src) {
+        if is_generated_file(src, config) {
             return true;
         }
     }
 
     false
+}
+
+fn echo_back_stdin(input: &str) -> Result<FormatReport, ErrorKind> {
+    if let Err(e) = io::stdout().write_all(input.as_bytes()) {
+        return Err(From::from(e));
+    }
+    Ok(FormatReport::new())
 }
 
 // Format an entire crate (or subset of the module tree).
@@ -106,15 +110,16 @@ fn format_project<T: FormatHandler>(
     let main_file = input.file_name();
     let input_is_stdin = main_file == FileName::Stdin;
 
-    let parse_session = ParseSess::new(config)?;
-    if config.skip_children() && parse_session.ignore_file(&main_file) {
+    let psess = ParseSess::new(config)?;
+    if config.skip_children() && psess.ignore_file(&main_file) {
         return Ok(FormatReport::new());
     }
 
     // Parse the crate.
     let mut report = FormatReport::new();
     let directory_ownership = input.to_directory_ownership();
-    let krate = match Parser::parse_crate(input, &parse_session) {
+
+    let krate = match Parser::parse_crate(input, &psess) {
         Ok(krate) => krate,
         // Surface parse error via Session (errors are merged there from report)
         Err(e) => {
@@ -127,25 +132,29 @@ fn format_project<T: FormatHandler>(
         }
     };
 
-    let mut context = FormatContext::new(&krate, report, parse_session, config, handler);
+    let mut context = FormatContext::new(&krate, report, psess, config, handler);
     let files = modules::ModResolver::new(
-        &context.parse_session,
+        &context.psess,
         directory_ownership.unwrap_or(DirectoryOwnership::UnownedViaBlock),
         !input_is_stdin && !config.skip_children(),
     )
     .visit_crate(&krate)?
     .into_iter()
     .filter(|(path, module)| {
-        !should_skip_module(config, &context, input_is_stdin, &main_file, path, module)
+        input_is_stdin
+            || !should_skip_module(config, &context, input_is_stdin, &main_file, path, module)
     })
     .collect::<Vec<_>>();
 
     timer = timer.done_parsing();
 
     // Suppress error output if we have to do any further parsing.
-    context.parse_session.set_silent_emitter();
+    context.psess.set_silent_emitter();
 
     for (path, module) in files {
+        if input_is_stdin && contains_skip(module.attrs()) {
+            return echo_back_stdin(context.psess.snippet_provider(module.span).entire_snippet());
+        }
         should_emit_verbose(input_is_stdin, config, || println!("Formatting {}", path));
         context.format_file(path, &module, is_macro_def)?;
     }
@@ -163,18 +172,33 @@ fn format_project<T: FormatHandler>(
 }
 
 // Used for formatting files.
-#[derive(new)]
 struct FormatContext<'a, T: FormatHandler> {
     krate: &'a ast::Crate,
     report: FormatReport,
-    parse_session: ParseSess,
+    psess: ParseSess,
     config: &'a Config,
     handler: &'a mut T,
 }
 
 impl<'a, T: FormatHandler + 'a> FormatContext<'a, T> {
+    fn new(
+        krate: &'a ast::Crate,
+        report: FormatReport,
+        psess: ParseSess,
+        config: &'a Config,
+        handler: &'a mut T,
+    ) -> Self {
+        FormatContext {
+            krate,
+            report,
+            psess,
+            config,
+            handler,
+        }
+    }
+
     fn ignore_file(&self, path: &FileName) -> bool {
-        self.parse_session.ignore_file(path)
+        self.psess.ignore_file(path)
     }
 
     // Formats a single file/module.
@@ -184,9 +208,9 @@ impl<'a, T: FormatHandler + 'a> FormatContext<'a, T> {
         module: &Module<'_>,
         is_macro_def: bool,
     ) -> Result<(), ErrorKind> {
-        let snippet_provider = self.parse_session.snippet_provider(module.span);
-        let mut visitor = FmtVisitor::from_parse_sess(
-            &self.parse_session,
+        let snippet_provider = self.psess.snippet_provider(module.span);
+        let mut visitor = FmtVisitor::from_psess(
+            &self.psess,
             self.config,
             &snippet_provider,
             self.report.clone(),
@@ -229,7 +253,7 @@ impl<'a, T: FormatHandler + 'a> FormatContext<'a, T> {
             .add_non_formatted_ranges(visitor.skipped_range.borrow().clone());
 
         self.handler.handle_formatted_file(
-            &self.parse_session,
+            &self.psess,
             path,
             visitor.buffer.to_owned(),
             &mut self.report,
@@ -241,7 +265,7 @@ impl<'a, T: FormatHandler + 'a> FormatContext<'a, T> {
 trait FormatHandler {
     fn handle_formatted_file(
         &mut self,
-        parse_session: &ParseSess,
+        psess: &ParseSess,
         path: FileName,
         result: String,
         report: &mut FormatReport,
@@ -252,14 +276,14 @@ impl<'b, T: Write + 'b> FormatHandler for Session<'b, T> {
     // Called for each formatted file.
     fn handle_formatted_file(
         &mut self,
-        parse_session: &ParseSess,
+        psess: &ParseSess,
         path: FileName,
         result: String,
         report: &mut FormatReport,
     ) -> Result<(), ErrorKind> {
         if let Some(ref mut out) = self.out {
             match source_file::write_file(
-                Some(parse_session),
+                Some(psess),
                 &path,
                 &result,
                 out,
@@ -269,7 +293,7 @@ impl<'b, T: Write + 'b> FormatHandler for Session<'b, T> {
                 Ok(ref result) if result.has_diff => report.add_diff(),
                 Err(e) => {
                     // Create a new error with path_str to help users see which files failed
-                    let err_msg = format!("{}: {}", path, e);
+                    let err_msg = format!("{path}: {e}");
                     return Err(io::Error::new(e.kind(), err_msg).into());
                 }
                 _ => {}
@@ -290,17 +314,13 @@ pub(crate) struct FormattingError {
 }
 
 impl FormattingError {
-    pub(crate) fn from_span(
-        span: Span,
-        parse_sess: &ParseSess,
-        kind: ErrorKind,
-    ) -> FormattingError {
+    pub(crate) fn from_span(span: Span, psess: &ParseSess, kind: ErrorKind) -> FormattingError {
         FormattingError {
-            line: parse_sess.line_of_byte_pos(span.lo()),
+            line: psess.line_of_byte_pos(span.lo()),
             is_comment: kind.is_comment(),
             kind,
             is_string: false,
-            line_buffer: parse_sess.span_to_first_line_string(span),
+            line_buffer: psess.span_to_first_line_string(span),
         }
     }
 
@@ -330,10 +350,8 @@ impl FormattingError {
             ErrorKind::LineOverflow(found, max) => (max, found - max),
             ErrorKind::TrailingWhitespace
             | ErrorKind::DeprecatedAttr
-            | ErrorKind::BadIssue(_)
             | ErrorKind::BadAttr
-            | ErrorKind::LostComment
-            | ErrorKind::LicenseCheck => {
+            | ErrorKind::LostComment => {
                 let trailing_ws_start = self
                     .line_buffer
                     .rfind(|c: char| !c.is_whitespace())
@@ -365,7 +383,7 @@ pub(crate) struct ReportedErrors {
     // Code contains macro call that was unable to format.
     pub(crate) has_macro_format_failure: bool,
 
-    // Failed a check, such as the license check or other opt-in checking.
+    // Failed an opt-in checking.
     pub(crate) has_check_errors: bool,
 
     /// Formatted code differs from existing code (--check only).
@@ -461,7 +479,6 @@ fn format_lines(
     report: &FormatReport,
 ) {
     let mut formatter = FormatLines::new(name, skipped_range, config);
-    formatter.check_license(text);
     formatter.iterate(text);
 
     if formatter.newline_count > 1 {
@@ -481,11 +498,9 @@ struct FormatLines<'a> {
     cur_line: usize,
     newline_count: usize,
     errors: Vec<FormattingError>,
-    issue_seeker: BadIssueSeeker,
     line_buffer: String,
     current_line_contains_string_literal: bool,
     format_line: bool,
-    allow_issue_seek: bool,
     config: &'a Config,
 }
 
@@ -495,7 +510,6 @@ impl<'a> FormatLines<'a> {
         skipped_range: &'a [(usize, usize)],
         config: &'a Config,
     ) -> FormatLines<'a> {
-        let issue_seeker = BadIssueSeeker::new(config.report_todo(), config.report_fixme());
         FormatLines {
             name,
             skipped_range,
@@ -504,26 +518,10 @@ impl<'a> FormatLines<'a> {
             cur_line: 1,
             newline_count: 0,
             errors: vec![],
-            allow_issue_seek: !issue_seeker.is_disabled(),
-            issue_seeker,
             line_buffer: String::with_capacity(config.max_width() * 2),
             current_line_contains_string_literal: false,
             format_line: config.file_lines().contains_line(name, 1),
             config,
-        }
-    }
-
-    fn check_license(&mut self, text: &mut String) {
-        if let Some(ref license_template) = self.config.license_template {
-            if !license_template.is_match(text) {
-                self.errors.push(FormattingError {
-                    line: self.cur_line,
-                    kind: ErrorKind::LicenseCheck,
-                    is_comment: false,
-                    is_string: false,
-                    line_buffer: String::new(),
-                });
-            }
         }
     }
 
@@ -532,13 +530,6 @@ impl<'a> FormatLines<'a> {
         for (kind, c) in CharClasses::new(text.chars()) {
             if c == '\r' {
                 continue;
-            }
-
-            if self.allow_issue_seek && self.format_line {
-                // Add warnings for bad todos/ fixmes
-                if let Some(issue) = self.issue_seeker.inspect(c) {
-                    self.push_err(ErrorKind::BadIssue(issue), false, false);
-                }
             }
 
             if c == '\n' {

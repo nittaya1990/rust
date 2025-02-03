@@ -1,56 +1,65 @@
-/*!
-
-Rust MIR: a lowered representation of Rust.
-
-*/
-
+// tidy-alphabetical-start
+#![allow(internal_features)]
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![doc(rust_logo)]
 #![feature(assert_matches)]
-#![feature(bool_to_option)]
 #![feature(box_patterns)]
-#![feature(control_flow_enum)]
-#![feature(crate_visibility_modifier)]
 #![feature(decl_macro)]
-#![feature(exact_size_is_empty)]
-#![feature(let_else)]
-#![feature(map_try_insert)]
-#![feature(min_specialization)]
-#![feature(slice_ptr_get)]
-#![feature(option_get_or_insert_default)]
+#![feature(if_let_guard)]
+#![feature(let_chains)]
 #![feature(never_type)]
+#![feature(rustdoc_internals)]
+#![feature(slice_ptr_get)]
+#![feature(strict_overflow_ops)]
 #![feature(trait_alias)]
-#![feature(trusted_len)]
-#![feature(trusted_step)]
 #![feature(try_blocks)]
-#![recursion_limit = "256"]
-#![allow(rustc::potential_query_instability)]
+#![feature(unqualified_local_imports)]
+#![feature(yeet_expr)]
+#![warn(unqualified_local_imports)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
-
+pub mod check_consts;
 pub mod const_eval;
+mod errors;
 pub mod interpret;
-pub mod transform;
 pub mod util;
 
-use rustc_middle::ty::query::Providers;
+use std::sync::atomic::AtomicBool;
+
+use rustc_middle::ty;
+use rustc_middle::util::Providers;
+
+pub use self::errors::ReportErrorExt;
+
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 pub fn provide(providers: &mut Providers) {
     const_eval::provide(providers);
+    providers.tag_for_variant = const_eval::tag_for_variant_provider;
     providers.eval_to_const_value_raw = const_eval::eval_to_const_value_raw_provider;
     providers.eval_to_allocation_raw = const_eval::eval_to_allocation_raw_provider;
-    providers.const_caller_location = const_eval::const_caller_location;
-    providers.try_destructure_const = |tcx, param_env_and_value| {
-        let (param_env, value) = param_env_and_value.into_parts();
-        const_eval::try_destructure_const(tcx, param_env, value).ok()
+    providers.eval_static_initializer = const_eval::eval_static_initializer_provider;
+    providers.hooks.const_caller_location = util::caller_location::const_caller_location_provider;
+    providers.eval_to_valtree = |tcx, ty::PseudoCanonicalInput { typing_env, value }| {
+        const_eval::eval_to_valtree(tcx, typing_env, value)
     };
-    providers.const_to_valtree = |tcx, param_env_and_value| {
-        let (param_env, raw) = param_env_and_value.into_parts();
-        const_eval::const_to_valtree(tcx, param_env, raw)
+    providers.hooks.try_destructure_mir_constant_for_user_output =
+        const_eval::try_destructure_mir_constant_for_user_output;
+    providers.valtree_to_const_val = |tcx, cv| {
+        const_eval::valtree_to_const_value(
+            tcx,
+            ty::TypingEnv::fully_monomorphized(),
+            cv.ty,
+            cv.valtree,
+        )
     };
-    providers.deref_const = |tcx, param_env_and_value| {
-        let (param_env, value) = param_env_and_value.into_parts();
-        const_eval::deref_const(tcx, param_env, value)
+    providers.check_validity_requirement = |tcx, (init_kind, param_env_and_ty)| {
+        util::check_validity_requirement(tcx, init_kind, param_env_and_ty)
     };
 }
+
+/// `rustc_driver::main` installs a handler that will set this to `true` if
+/// the compiler has been sent a request to shut down, such as by a Ctrl-C.
+/// This static lives here because it is only read by the interpreter.
+pub static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);

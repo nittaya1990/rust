@@ -1,11 +1,12 @@
 use super::super::navigate;
 use super::*;
+use crate::alloc::Global;
 use crate::fmt::Debug;
 use crate::string::String;
 
 impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> {
     // Asserts that the back pointer in each reachable node points to its parent.
-    pub fn assert_back_pointers(self) {
+    pub(crate) fn assert_back_pointers(self) {
         if let ForceResult::Internal(node) = self.force() {
             for idx in 0..=node.len() {
                 let edge = unsafe { Handle::new_edge(node, idx) };
@@ -19,7 +20,7 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> 
     // Renders a multi-line display of the keys in order and in tree hierarchy,
     // picturing the tree growing sideways from its root on the left to its
     // leaves on the right.
-    pub fn dump_keys(self) -> String
+    pub(crate) fn dump_keys(self) -> String
     where
         K: Debug,
     {
@@ -31,11 +32,7 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> 
                 result += &format!("\n{}{:?}", indent, leaf.keys());
             }
             navigate::Position::Internal(_) => {}
-            navigate::Position::InternalKV(kv) => {
-                let depth = self.height() - kv.into_node().height();
-                let indent = "  ".repeat(depth);
-                result += &format!("\n{}{:?}", indent, kv.into_kv().0);
-            }
+            navigate::Position::InternalKV => {}
         });
         result
     }
@@ -67,10 +64,10 @@ fn test_splitpoint() {
 
 #[test]
 fn test_partial_eq() {
-    let mut root1 = NodeRef::new_leaf();
+    let mut root1 = NodeRef::new_leaf(Global);
     root1.borrow_mut().push(1, ());
-    let mut root1 = NodeRef::new_internal(root1.forget_type()).forget_type();
-    let root2 = Root::new();
+    let mut root1 = NodeRef::new_internal(root1.forget_type(), Global).forget_type();
+    let root2 = Root::new(Global);
     root1.reborrow().assert_back_pointers();
     root2.reborrow().assert_back_pointers();
 
@@ -86,13 +83,14 @@ fn test_partial_eq() {
     assert!(top_edge_1 == top_edge_1);
     assert!(top_edge_1 != top_edge_2);
 
-    root1.pop_internal_level();
-    unsafe { root1.into_dying().deallocate_and_ascend() };
-    unsafe { root2.into_dying().deallocate_and_ascend() };
+    root1.pop_internal_level(Global);
+    unsafe { root1.into_dying().deallocate_and_ascend(Global) };
+    unsafe { root2.into_dying().deallocate_and_ascend(Global) };
 }
 
 #[test]
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(any(miri, randomized_layouts), ignore)] // We'd like to run Miri with layout randomization
 fn test_sizes() {
     assert_eq!(core::mem::size_of::<LeafNode<(), ()>>(), 16);
     assert_eq!(core::mem::size_of::<LeafNode<i64, i64>>(), 16 + CAPACITY * 2 * 8);

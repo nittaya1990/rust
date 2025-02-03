@@ -9,19 +9,21 @@ mod type_complexity;
 mod utils;
 mod vec_box;
 
+use clippy_config::Conf;
 use rustc_hir as hir;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
-    Body, FnDecl, FnRetTy, GenericArg, HirId, ImplItem, ImplItemKind, Item, ItemKind, Local, MutTy, QPath, TraitItem,
-    TraitItemKind, TyKind,
+    Body, FnDecl, FnRetTy, GenericArg, ImplItem, ImplItemKind, Item, ItemKind, LetStmt, MutTy, QPath, TraitFn,
+    TraitItem, TraitItemKind, TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::source_map::Span;
+use rustc_session::impl_lint_pass;
+use rustc_span::Span;
+use rustc_span::def_id::LocalDefId;
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for use of `Box<T>` where T is a collection such as Vec anywhere in the code.
+    /// Checks for usage of `Box<T>` where T is a collection such as Vec anywhere in the code.
     /// Check the [Box documentation](https://doc.rust-lang.org/std/boxed/index.html) for more information.
     ///
     /// ### Why is this bad?
@@ -51,7 +53,7 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for use of `Vec<Box<T>>` where T: Sized anywhere in the code.
+    /// Checks for usage of `Vec<Box<T>>` where T: Sized anywhere in the code.
     /// Check the [Box documentation](https://doc.rust-lang.org/std/boxed/index.html) for more information.
     ///
     /// ### Why is this bad?
@@ -63,7 +65,7 @@ declare_clippy_lint! {
     /// 1st comment).
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct X {
     ///     values: Vec<Box<i32>>,
     /// }
@@ -71,7 +73,7 @@ declare_clippy_lint! {
     ///
     /// Better:
     ///
-    /// ```rust
+    /// ```no_run
     /// struct X {
     ///     values: Vec<i32>,
     /// }
@@ -84,19 +86,19 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for use of `Option<Option<_>>` in function signatures and type
+    /// Checks for usage of `Option<Option<_>>` in function signatures and type
     /// definitions
     ///
     /// ### Why is this bad?
     /// `Option<_>` represents an optional value. `Option<Option<_>>`
-    /// represents an optional optional value which is logically the same thing as an optional
-    /// value but has an unneeded extra level of wrapping.
+    /// represents an optional value which itself wraps an optional. This is logically the
+    /// same thing as an optional value but has an unneeded extra level of wrapping.
     ///
     /// If you have a case where `Some(Some(_))`, `Some(None)` and `None` are distinct cases,
     /// consider a custom `enum` instead, with clear names for each case.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn get_data() -> Option<Option<u32>> {
     ///     None
     /// }
@@ -104,7 +106,7 @@ declare_clippy_lint! {
     ///
     /// Better:
     ///
-    /// ```rust
+    /// ```no_run
     /// pub enum Contents {
     ///     Data(Vec<u8>), // Was Some(Some(Vec<u8>))
     ///     NotYetFetched, // Was Some(None)
@@ -127,7 +129,7 @@ declare_clippy_lint! {
     /// `Vec` or a `VecDeque` (formerly called `RingBuf`).
     ///
     /// ### Why is this bad?
-    /// Gankro says:
+    /// Gankra says:
     ///
     /// > The TL;DR of `LinkedList` is that it's built on a massive amount of
     /// pointers and indirection.
@@ -151,7 +153,7 @@ declare_clippy_lint! {
     /// `LinkedList` makes sense are few and far between, but they can still happen.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::LinkedList;
     /// let x: LinkedList<usize> = LinkedList::new();
     /// ```
@@ -163,7 +165,7 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for use of `&Box<T>` anywhere in the code.
+    /// Checks for usage of `&Box<T>` anywhere in the code.
     /// Check the [Box documentation](https://doc.rust-lang.org/std/boxed/index.html) for more information.
     ///
     /// ### Why is this bad?
@@ -189,21 +191,21 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for use of redundant allocations anywhere in the code.
+    /// Checks for usage of redundant allocations anywhere in the code.
     ///
     /// ### Why is this bad?
     /// Expressions such as `Rc<&T>`, `Rc<Rc<T>>`, `Rc<Arc<T>>`, `Rc<Box<T>>`, `Arc<&T>`, `Arc<Rc<T>>`,
     /// `Arc<Arc<T>>`, `Arc<Box<T>>`, `Box<&T>`, `Box<Rc<T>>`, `Box<Arc<T>>`, `Box<Box<T>>`, add an unnecessary level of indirection.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::rc::Rc;
     /// fn foo(bar: Rc<&usize>) {}
     /// ```
     ///
     /// Better:
     ///
-    /// ```rust
+    /// ```no_run
     /// fn foo(bar: &usize) {}
     /// ```
     #[clippy::version = "1.44.0"]
@@ -216,7 +218,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `Rc<T>` and `Arc<T>` when `T` is a mutable buffer type such as `String` or `Vec`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Expressions such as `Rc<String>` usually have no advantage over `Rc<str>`, since
     /// it is larger and involves an extra level of indirection, and doesn't implement `Borrow<str>`.
     ///
@@ -257,10 +259,61 @@ declare_clippy_lint! {
     /// using a `type` definition to simplify them.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::rc::Rc;
-    /// struct Foo {
-    ///     inner: Rc<Vec<Vec<Box<(u32, u32, u32, u32)>>>>,
+    /// struct PointMatrixContainer {
+    ///     matrix: Rc<Vec<Vec<Box<(u32, u32, u32, u32)>>>>,
+    /// }
+    ///
+    /// fn main() {
+    ///     let point_matrix: Vec<Vec<Box<(u32, u32, u32, u32)>>> = vec![
+    ///         vec![
+    ///             Box::new((1, 2, 3, 4)),
+    ///             Box::new((5, 6, 7, 8)),
+    ///         ],
+    ///         vec![
+    ///             Box::new((9, 10, 11, 12)),
+    ///         ],
+    ///     ];
+    ///
+    ///     let shared_point_matrix: Rc<Vec<Vec<Box<(u32, u32, u32, u32)>>>> = Rc::new(point_matrix);
+    ///
+    ///     let container = PointMatrixContainer {
+    ///         matrix: shared_point_matrix,
+    ///     };
+    ///
+    ///     // ...
+    /// }
+    /// ```
+    /// Use instead:
+    /// ### Example
+    /// ```no_run
+    /// # use std::rc::Rc;
+    /// type PointMatrix = Vec<Vec<Box<(u32, u32, u32, u32)>>>;
+    /// type SharedPointMatrix = Rc<PointMatrix>;
+    ///
+    /// struct PointMatrixContainer {
+    ///     matrix: SharedPointMatrix,
+    /// }
+    ///
+    /// fn main() {
+    ///     let point_matrix: PointMatrix = vec![
+    ///         vec![
+    ///             Box::new((1, 2, 3, 4)),
+    ///             Box::new((5, 6, 7, 8)),
+    ///         ],
+    ///         vec![
+    ///             Box::new((9, 10, 11, 12)),
+    ///         ],
+    ///     ];
+    ///
+    ///     let shared_point_matrix: SharedPointMatrix = Rc::new(point_matrix);
+    ///
+    ///     let container = PointMatrixContainer {
+    ///         matrix: shared_point_matrix,
+    ///     };
+    ///
+    ///     // ...
     /// }
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -273,7 +326,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `Rc<Mutex<T>>`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// `Rc` is used in single thread and `Mutex` is used in multi thread.
     /// Consider using `Rc<RefCell<T>>` in single thread or `Arc<Mutex<T>>` in multi thread.
     ///
@@ -311,86 +364,88 @@ pub struct Types {
 impl_lint_pass!(Types => [BOX_COLLECTION, VEC_BOX, OPTION_OPTION, LINKEDLIST, BORROWED_BOX, REDUNDANT_ALLOCATION, RC_BUFFER, RC_MUTEX, TYPE_COMPLEXITY]);
 
 impl<'tcx> LateLintPass<'tcx> for Types {
-    fn check_fn(&mut self, cx: &LateContext<'_>, _: FnKind<'_>, decl: &FnDecl<'_>, _: &Body<'_>, _: Span, id: HirId) {
-        let is_in_trait_impl =
-            if let Some(hir::Node::Item(item)) = cx.tcx.hir().find_by_def_id(cx.tcx.hir().get_parent_item(id)) {
-                matches!(item.kind, ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }))
-            } else {
-                false
-            };
+    fn check_fn(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        fn_kind: FnKind<'_>,
+        decl: &FnDecl<'tcx>,
+        _: &Body<'_>,
+        _: Span,
+        def_id: LocalDefId,
+    ) {
+        let is_in_trait_impl = if let hir::Node::Item(item) = cx.tcx.hir_node_by_def_id(
+            cx.tcx
+                .hir()
+                .get_parent_item(cx.tcx.local_def_id_to_hir_id(def_id))
+                .def_id,
+        ) {
+            matches!(item.kind, ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }))
+        } else {
+            false
+        };
 
-        let is_exported = cx.access_levels.is_exported(cx.tcx.hir().local_def_id(id));
+        let is_exported = cx.effective_visibilities.is_exported(def_id);
 
-        self.check_fn_decl(
-            cx,
-            decl,
-            CheckTyContext {
-                is_in_trait_impl,
-                is_exported,
-                ..CheckTyContext::default()
-            },
-        );
+        self.check_fn_decl(cx, decl, CheckTyContext {
+            is_in_trait_impl,
+            in_body: matches!(fn_kind, FnKind::Closure),
+            is_exported,
+            ..CheckTyContext::default()
+        });
     }
 
-    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
-        let is_exported = cx.access_levels.is_exported(item.def_id);
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
+        let is_exported = cx.effective_visibilities.is_exported(item.owner_id.def_id);
 
         match item.kind {
-            ItemKind::Static(ty, _, _) | ItemKind::Const(ty, _) => self.check_ty(
-                cx,
-                ty,
-                CheckTyContext {
-                    is_exported,
-                    ..CheckTyContext::default()
-                },
-            ),
+            ItemKind::Static(ty, _, _) | ItemKind::Const(ty, _, _) => self.check_ty(cx, ty, CheckTyContext {
+                is_exported,
+                ..CheckTyContext::default()
+            }),
             // functions, enums, structs, impls and traits are covered
             _ => (),
         }
     }
 
-    fn check_impl_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx ImplItem<'_>) {
+    fn check_impl_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx ImplItem<'tcx>) {
         match item.kind {
             ImplItemKind::Const(ty, _) => {
-                let is_in_trait_impl = if let Some(hir::Node::Item(item)) =
-                    cx.tcx.hir().find_by_def_id(cx.tcx.hir().get_parent_item(item.hir_id()))
+                let is_in_trait_impl = if let hir::Node::Item(item) = cx
+                    .tcx
+                    .hir_node_by_def_id(cx.tcx.hir().get_parent_item(item.hir_id()).def_id)
                 {
                     matches!(item.kind, ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }))
                 } else {
                     false
                 };
 
-                self.check_ty(
-                    cx,
-                    ty,
-                    CheckTyContext {
-                        is_in_trait_impl,
-                        ..CheckTyContext::default()
-                    },
-                );
+                self.check_ty(cx, ty, CheckTyContext {
+                    is_in_trait_impl,
+                    ..CheckTyContext::default()
+                });
             },
             // Methods are covered by check_fn.
             // Type aliases are ignored because oftentimes it's impossible to
             // make type alias declaration in trait simpler, see #1013
-            ImplItemKind::Fn(..) | ImplItemKind::TyAlias(..) => (),
+            ImplItemKind::Fn(..) | ImplItemKind::Type(..) => (),
         }
     }
 
-    fn check_field_def(&mut self, cx: &LateContext<'_>, field: &hir::FieldDef<'_>) {
-        let is_exported = cx.access_levels.is_exported(cx.tcx.hir().local_def_id(field.hir_id));
+    fn check_field_def(&mut self, cx: &LateContext<'tcx>, field: &hir::FieldDef<'tcx>) {
+        if field.span.from_expansion() {
+            return;
+        }
 
-        self.check_ty(
-            cx,
-            field.ty,
-            CheckTyContext {
-                is_exported,
-                ..CheckTyContext::default()
-            },
-        );
+        let is_exported = cx.effective_visibilities.is_exported(field.def_id);
+
+        self.check_ty(cx, field.ty, CheckTyContext {
+            is_exported,
+            ..CheckTyContext::default()
+        });
     }
 
-    fn check_trait_item(&mut self, cx: &LateContext<'tcx>, item: &TraitItem<'_>) {
-        let is_exported = cx.access_levels.is_exported(item.def_id);
+    fn check_trait_item(&mut self, cx: &LateContext<'tcx>, item: &TraitItem<'tcx>) {
+        let is_exported = cx.effective_visibilities.is_exported(item.owner_id.def_id);
 
         let context = CheckTyContext {
             is_exported,
@@ -401,39 +456,41 @@ impl<'tcx> LateLintPass<'tcx> for Types {
             TraitItemKind::Const(ty, _) | TraitItemKind::Type(_, Some(ty)) => {
                 self.check_ty(cx, ty, context);
             },
-            TraitItemKind::Fn(ref sig, _) => self.check_fn_decl(cx, sig.decl, context),
+            TraitItemKind::Fn(ref sig, trait_method) => {
+                // Check only methods without body
+                // Methods with body are covered by check_fn.
+                if let TraitFn::Required(_) = trait_method {
+                    self.check_fn_decl(cx, sig.decl, context);
+                }
+            },
             TraitItemKind::Type(..) => (),
         }
     }
 
-    fn check_local(&mut self, cx: &LateContext<'_>, local: &Local<'_>) {
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &LetStmt<'tcx>) {
         if let Some(ty) = local.ty {
-            self.check_ty(
-                cx,
-                ty,
-                CheckTyContext {
-                    is_local: true,
-                    ..CheckTyContext::default()
-                },
-            );
+            self.check_ty(cx, ty, CheckTyContext {
+                in_body: true,
+                ..CheckTyContext::default()
+            });
         }
     }
 }
 
 impl Types {
-    pub fn new(vec_box_size_threshold: u64, type_complexity_threshold: u64, avoid_breaking_exported_api: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            vec_box_size_threshold,
-            type_complexity_threshold,
-            avoid_breaking_exported_api,
+            vec_box_size_threshold: conf.vec_box_size_threshold,
+            type_complexity_threshold: conf.type_complexity_threshold,
+            avoid_breaking_exported_api: conf.avoid_breaking_exported_api,
         }
     }
 
-    fn check_fn_decl(&mut self, cx: &LateContext<'_>, decl: &FnDecl<'_>, context: CheckTyContext) {
+    fn check_fn_decl<'tcx>(&mut self, cx: &LateContext<'tcx>, decl: &FnDecl<'tcx>, context: CheckTyContext) {
         // Ignore functions in trait implementations as they are usually forced by the trait definition.
         //
-        // FIXME: idially we would like to warn *if the compicated type can be simplified*, but it's hard to
-        // check.
+        // FIXME: ideally we would like to warn *if the complicated type can be simplified*, but it's hard
+        // to check.
         if context.is_in_trait_impl {
             return;
         }
@@ -451,7 +508,7 @@ impl Types {
     /// lint found.
     ///
     /// The parameter `is_local` distinguishes the context of the type.
-    fn check_ty(&mut self, cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, mut context: CheckTyContext) {
+    fn check_ty<'tcx>(&mut self, cx: &LateContext<'tcx>, hir_ty: &hir::Ty<'tcx>, mut context: CheckTyContext) {
         if hir_ty.span.from_expansion() {
             return;
         }
@@ -466,7 +523,7 @@ impl Types {
         }
 
         match hir_ty.kind {
-            TyKind::Path(ref qpath) if !context.is_local => {
+            TyKind::Path(ref qpath) if !context.in_body => {
                 let hir_id = hir_ty.hir_id;
                 let res = cx.qpath_res(qpath, hir_id);
                 if let Some(def_id) = res.opt_def_id() {
@@ -474,7 +531,7 @@ impl Types {
                         // All lints that are being checked in this block are guarded by
                         // the `avoid_breaking_exported_api` configuration. When adding a
                         // new lint, please also add the name to the configuration documentation
-                        // in `clippy_lints::utils::conf.rs`
+                        // in `clippy_config::conf`
 
                         let mut triggered = false;
                         triggered |= box_collection::check(cx, hir_ty, qpath, def_id);
@@ -503,7 +560,7 @@ impl Types {
                                     _ => None,
                                 })
                         }) {
-                            self.check_ty(cx, ty, context);
+                            self.check_ty(cx, ty.as_unambig_ty(), context);
                         }
                     },
                     QPath::Resolved(None, p) => {
@@ -517,7 +574,7 @@ impl Types {
                                     _ => None,
                                 })
                         }) {
-                            self.check_ty(cx, ty, context);
+                            self.check_ty(cx, ty.as_unambig_ty(), context);
                         }
                     },
                     QPath::TypeRelative(ty, seg) => {
@@ -528,14 +585,14 @@ impl Types {
                                 GenericArg::Type(ty) => Some(ty),
                                 _ => None,
                             }) {
-                                self.check_ty(cx, ty, context);
+                                self.check_ty(cx, ty.as_unambig_ty(), context);
                             }
                         }
                     },
                     QPath::LangItem(..) => {},
                 }
             },
-            TyKind::Rptr(ref lt, ref mut_ty) => {
+            TyKind::Ref(lt, ref mut_ty) => {
                 context.is_nested_call = true;
                 if !borrowed_box::check(cx, hir_ty, lt, mut_ty) {
                     self.check_ty(cx, mut_ty.ty, context);
@@ -562,12 +619,12 @@ impl Types {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
 #[derive(Clone, Copy, Default)]
 struct CheckTyContext {
     is_in_trait_impl: bool,
-    /// `true` for types on local variables.
-    is_local: bool,
+    /// `true` for types on local variables and in closure signatures.
+    in_body: bool,
     /// `true` for types that are part of the public API.
     is_exported: bool,
     is_nested_call: bool,

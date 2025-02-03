@@ -1,16 +1,12 @@
 use super::Builder;
 use crate::any::Any;
-use crate::mem;
 use crate::panic::panic_any;
-use crate::result;
-use crate::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{channel, Sender},
-    Arc, Barrier,
-};
+use crate::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::mpsc::{Sender, channel};
+use crate::sync::{Arc, Barrier};
 use crate::thread::{self, Scope, ThreadId};
-use crate::time::Duration;
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
+use crate::{mem, result};
 
 // !!! These tests are dangerous. If something is buggy, they will hang, !!!
 // !!! instead of exiting cleanly. This might wedge the buildbots.       !!!
@@ -35,6 +31,35 @@ fn test_named_thread() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(any(
+    // Note: musl didn't add pthread_getname_np until 1.2.3
+    all(target_os = "linux", target_env = "gnu"),
+    target_vendor = "apple",
+))]
+#[test]
+fn test_named_thread_truncation() {
+    use crate::ffi::CStr;
+
+    let long_name = crate::iter::once("test_named_thread_truncation")
+        .chain(crate::iter::repeat(" yada").take(100))
+        .collect::<String>();
+
+    let result = Builder::new().name(long_name.clone()).spawn(move || {
+        // Rust remembers the full thread name itself.
+        assert_eq!(thread::current().name(), Some(long_name.as_str()));
+
+        // But the system is limited -- make sure we successfully set a truncation.
+        let mut buf = vec![0u8; long_name.len() + 1];
+        unsafe {
+            libc::pthread_getname_np(libc::pthread_self(), buf.as_mut_ptr().cast(), buf.len());
+        }
+        let cstr = CStr::from_bytes_until_nul(&buf).unwrap();
+        assert!(cstr.to_bytes().len() > 0);
+        assert!(long_name.as_bytes().starts_with(cstr.to_bytes()));
+    });
+    result.unwrap().join().unwrap();
 }
 
 #[test]
@@ -127,7 +152,7 @@ where
 {
     let (tx, rx) = channel();
 
-    let x: Box<_> = box 1;
+    let x: Box<_> = Box::new(1);
     let x_in_parent = (&*x) as *const i32 as usize;
 
     spawnfn(Box::new(move || {
@@ -219,7 +244,7 @@ fn test_try_panic_any_message_owned_str() {
 #[test]
 fn test_try_panic_any_message_any() {
     match thread::spawn(move || {
-        panic_any(box 413u16 as Box<dyn Any + Send>);
+        panic_any(Box::new(413u16) as Box<dyn Any + Send>);
     })
     .join()
     {
@@ -241,6 +266,28 @@ fn test_try_panic_any_message_unit_struct() {
     match thread::spawn(move || panic_any(Juju)).join() {
         Err(ref e) if e.is::<Juju>() => {}
         Err(_) | Ok(()) => panic!(),
+    }
+}
+
+#[test]
+fn test_park_unpark_before() {
+    for _ in 0..10 {
+        thread::current().unpark();
+        thread::park();
+    }
+}
+
+#[test]
+fn test_park_unpark_called_other_thread() {
+    for _ in 0..10 {
+        let th = thread::current();
+
+        let _guard = thread::spawn(move || {
+            super::sleep(Duration::from_millis(50));
+            th.unpark();
+        });
+
+        thread::park();
     }
 }
 
@@ -315,4 +362,51 @@ fn test_scoped_threads_drop_result_before_join() {
         });
     });
     assert!(actually_finished.load(Ordering::Relaxed));
+}
+
+#[test]
+fn test_scoped_threads_nll() {
+    // this is mostly a *compilation test* for this exact function:
+    fn foo(x: &u8) {
+        thread::scope(|s| {
+            s.spawn(|| match x {
+                _ => (),
+            });
+        });
+    }
+    // let's also run it for good measure
+    let x = 42_u8;
+    foo(&x);
+}
+
+// Regression test for https://github.com/rust-lang/rust/issues/98498.
+#[test]
+#[cfg(miri)] // relies on Miri's data race detector
+fn scope_join_race() {
+    for _ in 0..100 {
+        let a_bool = AtomicBool::new(false);
+
+        thread::scope(|s| {
+            for _ in 0..5 {
+                s.spawn(|| a_bool.load(Ordering::Relaxed));
+            }
+
+            for _ in 0..5 {
+                s.spawn(|| a_bool.load(Ordering::Relaxed));
+            }
+        });
+    }
+}
+
+// Test that the smallest value for stack_size works on Windows.
+#[cfg(windows)]
+#[test]
+fn test_minimal_thread_stack() {
+    use crate::sync::atomic::AtomicU8;
+    static COUNT: AtomicU8 = AtomicU8::new(0);
+
+    let builder = thread::Builder::new().stack_size(1);
+    let before = builder.spawn(|| COUNT.fetch_add(1, Ordering::Relaxed)).unwrap().join().unwrap();
+    assert_eq!(before, 0);
+    assert_eq!(COUNT.load(Ordering::Relaxed), 1);
 }

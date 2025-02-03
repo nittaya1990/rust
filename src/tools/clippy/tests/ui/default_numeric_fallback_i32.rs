@@ -1,15 +1,18 @@
-// run-rustfix
-// aux-build:macro_rules.rs
+//@aux-build:proc_macros.rs
 
 #![warn(clippy::default_numeric_fallback)]
-#![allow(unused)]
-#![allow(clippy::never_loop)]
-#![allow(clippy::no_effect)]
-#![allow(clippy::unnecessary_operation)]
-#![allow(clippy::branches_sharing_code)]
+#![allow(
+    unused,
+    clippy::never_loop,
+    clippy::no_effect,
+    clippy::unnecessary_operation,
+    clippy::branches_sharing_code,
+    clippy::let_unit_value,
+    clippy::let_with_type_underscore
+)]
 
-#[macro_use]
-extern crate macro_rules;
+extern crate proc_macros;
+use proc_macros::{external, inline_macros};
 
 mod basic_expr {
     fn test() {
@@ -29,6 +32,8 @@ mod basic_expr {
         let x: [i32; 3] = [1, 2, 3];
         let x: (i32, i32) = if true { (1, 2) } else { (3, 4) };
         let x: _ = 1;
+        let x: u64 = 1;
+        const CONST_X: i8 = 1;
     }
 }
 
@@ -55,13 +60,19 @@ mod nested_local {
             // Should NOT lint this because this literal is bound to `_` of outer `Local`.
             2
         };
+
+        const CONST_X: i32 = {
+            // Should lint this because this literal is not bound to any types.
+            let y = 1;
+
+            // Should NOT lint this because this literal is bound to `_` of outer `Local`.
+            1
+        };
     }
 }
 
 mod function_def {
     fn ret_i32() -> i32 {
-        // Even though the output type is specified,
-        // this unsuffixed literal is linted to reduce heuristics and keep codebase simple.
         1
     }
 
@@ -133,7 +144,7 @@ mod enum_ctor {
 }
 
 mod method_calls {
-    struct StructForMethodCallTest {}
+    struct StructForMethodCallTest;
 
     impl StructForMethodCallTest {
         fn concrete_arg(&self, x: i32) {}
@@ -153,20 +164,94 @@ mod method_calls {
 }
 
 mod in_macro {
-    macro_rules! internal_macro {
-        () => {
-            let x = 22;
-        };
-    }
+    use super::*;
 
     // Should lint in internal macro.
+    #[inline_macros]
     fn internal() {
-        internal_macro!();
+        inline!(let x = 22;);
     }
 
     // Should NOT lint in external macro.
     fn external() {
-        default_numeric_fallback!();
+        external!(let x = 22;);
+    }
+}
+
+fn check_expect_suppression() {
+    #[expect(clippy::default_numeric_fallback)]
+    let x = 21;
+}
+
+mod type_already_inferred {
+    // Should NOT lint if bound to return type
+    fn ret_i32() -> i32 {
+        1
+    }
+
+    // Should NOT lint if bound to return type
+    fn ret_if_i32(b: bool) -> i32 {
+        if b { 100 } else { 0 }
+    }
+
+    // Should NOT lint if bound to return type
+    fn ret_i32_tuple() -> (i32, i32) {
+        (0, 1)
+    }
+
+    // Should NOT lint if bound to return type
+    fn ret_stmt(b: bool) -> (i32, i32) {
+        if b {
+            return (0, 1);
+        }
+        (0, 0)
+    }
+
+    #[allow(clippy::useless_vec)]
+    fn vec_macro() {
+        // Should NOT lint in `vec!` call if the type was already stated
+        let data_i32: Vec<i32> = vec![1, 2, 3];
+        let data_i32 = vec![1, 2, 3];
+    }
+}
+
+mod issue12159 {
+    #![allow(non_upper_case_globals, clippy::exhaustive_structs)]
+    pub struct Foo;
+
+    static F: i32 = 1;
+    impl Foo {
+        const LIFE_u8: u8 = 42;
+        const LIFE_i8: i8 = 42;
+        const LIFE_u16: u16 = 42;
+        const LIFE_i16: i16 = 42;
+        const LIFE_u32: u32 = 42;
+        const LIFE_i32: i32 = 42;
+        const LIFE_u64: u64 = 42;
+        const LIFE_i64: i64 = 42;
+        const LIFE_u128: u128 = 42;
+        const LIFE_i128: i128 = 42;
+        const LIFE_usize: usize = 42;
+        const LIFE_isize: isize = 42;
+        const LIFE_f32: f32 = 42.;
+        const LIFE_f64: f64 = 42.;
+
+        const fn consts() {
+            const LIFE_u8: u8 = 42;
+            const LIFE_i8: i8 = 42;
+            const LIFE_u16: u16 = 42;
+            const LIFE_i16: i16 = 42;
+            const LIFE_u32: u32 = 42;
+            const LIFE_i32: i32 = 42;
+            const LIFE_u64: u64 = 42;
+            const LIFE_i64: i64 = 42;
+            const LIFE_u128: u128 = 42;
+            const LIFE_i128: i128 = 42;
+            const LIFE_usize: usize = 42;
+            const LIFE_isize: isize = 42;
+            const LIFE_f32: f32 = 42.;
+            const LIFE_f64: f64 = 42.;
+        }
     }
 }
 

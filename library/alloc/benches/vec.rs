@@ -1,6 +1,7 @@
+use std::iter::repeat;
+
 use rand::RngCore;
-use std::iter::{repeat, FromIterator};
-use test::{black_box, Bencher};
+use test::{Bencher, black_box};
 
 #[bench]
 fn bench_new(b: &mut Bencher) {
@@ -476,7 +477,7 @@ fn bench_in_place_recycle(b: &mut Bencher) {
 #[bench]
 fn bench_in_place_zip_recycle(b: &mut Bencher) {
     let mut data = vec![0u8; 1000];
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::bench_rng();
     let mut subst = vec![0u8; 1000];
     rng.fill_bytes(&mut subst[..]);
 
@@ -495,7 +496,7 @@ fn bench_in_place_zip_recycle(b: &mut Bencher) {
 #[bench]
 fn bench_in_place_zip_iter_mut(b: &mut Bencher) {
     let mut data = vec![0u8; 256];
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::bench_rng();
     let mut subst = vec![0u8; 1000];
     rng.fill_bytes(&mut subst[..]);
 
@@ -546,6 +547,11 @@ fn bench_in_place_collect_droppable(b: &mut Bencher) {
     })
 }
 
+// node.js gives out of memory error to use with length 1_100_000
+#[cfg(target_os = "emscripten")]
+const LEN: usize = 4096;
+
+#[cfg(not(target_os = "emscripten"))]
 const LEN: usize = 16384;
 
 #[bench]
@@ -627,10 +633,10 @@ fn bench_map_regular(b: &mut Bencher) {
 fn bench_map_fast(b: &mut Bencher) {
     let data = black_box([(0, 0); LEN]);
     b.iter(|| {
-        let mut result = Vec::with_capacity(data.len());
+        let mut result: Vec<u32> = Vec::with_capacity(data.len());
         for i in 0..data.len() {
             unsafe {
-                *result.get_unchecked_mut(i) = data[i].0;
+                *result.as_mut_ptr().add(i) = data[i].0;
                 result.set_len(i);
             }
         }
@@ -658,13 +664,17 @@ fn random_sorted_fill(mut seed: u32, buf: &mut [u32]) {
     buf.sort();
 }
 
-fn bench_vec_dedup_old(b: &mut Bencher, sz: usize) {
+// Measures performance of slice dedup impl.
+// This was used to justify separate implementation of dedup for Vec.
+// This algorithm was used for Vecs prior to Rust 1.52.
+fn bench_dedup_slice_truncate(b: &mut Bencher, sz: usize) {
     let mut template = vec![0u32; sz];
     b.bytes = std::mem::size_of_val(template.as_slice()) as u64;
     random_sorted_fill(0x43, &mut template);
 
     let mut vec = template.clone();
     b.iter(|| {
+        let vec = black_box(&mut vec);
         let len = {
             let (dedup, _) = vec.partition_dedup();
             dedup.len()
@@ -672,59 +682,143 @@ fn bench_vec_dedup_old(b: &mut Bencher, sz: usize) {
         vec.truncate(len);
 
         black_box(vec.first());
+        let vec = black_box(vec);
         vec.clear();
         vec.extend_from_slice(&template);
     });
 }
 
-fn bench_vec_dedup_new(b: &mut Bencher, sz: usize) {
+// Measures performance of Vec::dedup on random data.
+fn bench_vec_dedup_random(b: &mut Bencher, sz: usize) {
     let mut template = vec![0u32; sz];
     b.bytes = std::mem::size_of_val(template.as_slice()) as u64;
     random_sorted_fill(0x43, &mut template);
 
     let mut vec = template.clone();
     b.iter(|| {
+        let vec = black_box(&mut vec);
         vec.dedup();
         black_box(vec.first());
+        let vec = black_box(vec);
+        vec.clear();
+        vec.extend_from_slice(&template);
+    });
+}
+
+// Measures performance of Vec::dedup when there is no items removed
+fn bench_vec_dedup_none(b: &mut Bencher, sz: usize) {
+    let mut template = vec![0u32; sz];
+    b.bytes = std::mem::size_of_val(template.as_slice()) as u64;
+    template.chunks_exact_mut(2).for_each(|w| {
+        w[0] = black_box(0);
+        w[1] = black_box(5);
+    });
+
+    let mut vec = template.clone();
+    b.iter(|| {
+        let vec = black_box(&mut vec);
+        vec.dedup();
+        black_box(vec.first());
+        // Unlike other benches of `dedup`
+        // this doesn't reinitialize vec
+        // because we measure how efficient dedup is
+        // when no memory written
+    });
+}
+
+// Measures performance of Vec::dedup when there is all items removed
+fn bench_vec_dedup_all(b: &mut Bencher, sz: usize) {
+    let mut template = vec![0u32; sz];
+    b.bytes = std::mem::size_of_val(template.as_slice()) as u64;
+    template.iter_mut().for_each(|w| {
+        *w = black_box(0);
+    });
+
+    let mut vec = template.clone();
+    b.iter(|| {
+        let vec = black_box(&mut vec);
+        vec.dedup();
+        black_box(vec.first());
+        let vec = black_box(vec);
         vec.clear();
         vec.extend_from_slice(&template);
     });
 }
 
 #[bench]
-fn bench_dedup_old_100(b: &mut Bencher) {
-    bench_vec_dedup_old(b, 100);
+fn bench_dedup_slice_truncate_100(b: &mut Bencher) {
+    bench_dedup_slice_truncate(b, 100);
 }
 #[bench]
-fn bench_dedup_new_100(b: &mut Bencher) {
-    bench_vec_dedup_new(b, 100);
-}
-
-#[bench]
-fn bench_dedup_old_1000(b: &mut Bencher) {
-    bench_vec_dedup_old(b, 1000);
-}
-#[bench]
-fn bench_dedup_new_1000(b: &mut Bencher) {
-    bench_vec_dedup_new(b, 1000);
+fn bench_dedup_random_100(b: &mut Bencher) {
+    bench_vec_dedup_random(b, 100);
 }
 
 #[bench]
-fn bench_dedup_old_10000(b: &mut Bencher) {
-    bench_vec_dedup_old(b, 10000);
-}
-#[bench]
-fn bench_dedup_new_10000(b: &mut Bencher) {
-    bench_vec_dedup_new(b, 10000);
+fn bench_dedup_none_100(b: &mut Bencher) {
+    bench_vec_dedup_none(b, 100);
 }
 
 #[bench]
-fn bench_dedup_old_100000(b: &mut Bencher) {
-    bench_vec_dedup_old(b, 100000);
+fn bench_dedup_all_100(b: &mut Bencher) {
+    bench_vec_dedup_all(b, 100);
+}
+
+#[bench]
+fn bench_dedup_slice_truncate_1000(b: &mut Bencher) {
+    bench_dedup_slice_truncate(b, 1000);
 }
 #[bench]
-fn bench_dedup_new_100000(b: &mut Bencher) {
-    bench_vec_dedup_new(b, 100000);
+fn bench_dedup_random_1000(b: &mut Bencher) {
+    bench_vec_dedup_random(b, 1000);
+}
+
+#[bench]
+fn bench_dedup_none_1000(b: &mut Bencher) {
+    bench_vec_dedup_none(b, 1000);
+}
+
+#[bench]
+fn bench_dedup_all_1000(b: &mut Bencher) {
+    bench_vec_dedup_all(b, 1000);
+}
+
+#[bench]
+fn bench_dedup_slice_truncate_10000(b: &mut Bencher) {
+    bench_dedup_slice_truncate(b, 10000);
+}
+#[bench]
+fn bench_dedup_random_10000(b: &mut Bencher) {
+    bench_vec_dedup_random(b, 10000);
+}
+
+#[bench]
+fn bench_dedup_none_10000(b: &mut Bencher) {
+    bench_vec_dedup_none(b, 10000);
+}
+
+#[bench]
+fn bench_dedup_all_10000(b: &mut Bencher) {
+    bench_vec_dedup_all(b, 10000);
+}
+
+#[bench]
+fn bench_dedup_slice_truncate_100000(b: &mut Bencher) {
+    bench_dedup_slice_truncate(b, 100000);
+}
+#[bench]
+fn bench_dedup_random_100000(b: &mut Bencher) {
+    bench_vec_dedup_random(b, 100000);
+}
+
+#[bench]
+fn bench_dedup_none_100000(b: &mut Bencher) {
+    bench_vec_dedup_none(b, 100000);
+}
+
+#[bench]
+fn bench_dedup_all_100000(b: &mut Bencher) {
+    bench_vec_dedup_all(b, 100000);
 }
 
 #[bench]
@@ -761,4 +855,24 @@ fn bench_retain_100000(b: &mut Bencher) {
 fn bench_retain_whole_100000(b: &mut Bencher) {
     let mut v = black_box(vec![826u32; 100000]);
     b.iter(|| v.retain(|x| *x == 826u32));
+}
+
+#[bench]
+fn bench_next_chunk(b: &mut Bencher) {
+    let v = vec![13u8; 2048];
+
+    b.iter(|| {
+        const CHUNK: usize = 8;
+
+        let mut sum = [0u32; CHUNK];
+        let mut iter = black_box(v.clone()).into_iter();
+
+        while let Ok(chunk) = iter.next_chunk::<CHUNK>() {
+            for i in 0..CHUNK {
+                sum[i] += chunk[i] as u32;
+            }
+        }
+
+        sum
+    })
 }

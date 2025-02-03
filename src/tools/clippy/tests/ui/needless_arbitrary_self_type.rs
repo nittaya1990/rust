@@ -1,5 +1,3 @@
-// run-rustfix
-
 #![warn(clippy::needless_arbitrary_self_type)]
 #![allow(unused_mut, clippy::needless_lifetimes)]
 
@@ -64,6 +62,11 @@ impl ValType {
     pub fn mut_ref_mut_ref_good(self: &&mut &mut Self) {
         unimplemented!();
     }
+}
+
+trait Foo<'r#struct> {
+    fn f1(self: &'r#struct Self) {}
+    fn f2(self: &'r#struct mut Self) {}
 }
 
 fn main() {}

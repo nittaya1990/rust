@@ -13,10 +13,7 @@ struct RustArchiveMember {
   Archive::Child Child;
 
   RustArchiveMember()
-      : Filename(nullptr), Name(nullptr),
-        Child(nullptr, nullptr, nullptr)
-  {
-  }
+      : Filename(nullptr), Name(nullptr), Child(nullptr, nullptr, nullptr) {}
   ~RustArchiveMember() {}
 };
 
@@ -27,11 +24,8 @@ struct RustArchiveIterator {
   std::unique_ptr<Error> Err;
 
   RustArchiveIterator(Archive::child_iterator Cur, Archive::child_iterator End,
-      std::unique_ptr<Error> Err)
-    : First(true),
-      Cur(Cur),
-      End(End),
-      Err(std::move(Err)) {}
+                      std::unique_ptr<Error> Err)
+      : First(true), Cur(Cur), End(End), Err(std::move(Err)) {}
 };
 
 enum class LLVMRustArchiveKind {
@@ -39,6 +33,7 @@ enum class LLVMRustArchiveKind {
   BSD,
   DARWIN,
   COFF,
+  AIX_BIG,
 };
 
 static Archive::Kind fromRust(LLVMRustArchiveKind Kind) {
@@ -51,6 +46,8 @@ static Archive::Kind fromRust(LLVMRustArchiveKind Kind) {
     return Archive::K_DARWIN;
   case LLVMRustArchiveKind::COFF:
     return Archive::K_COFF;
+  case LLVMRustArchiveKind::AIX_BIG:
+    return Archive::K_AIXBIG;
   default:
     report_fatal_error("Bad ArchiveKind.");
   }
@@ -63,8 +60,8 @@ typedef Archive::Child const *LLVMRustArchiveChildConstRef;
 typedef RustArchiveIterator *LLVMRustArchiveIteratorRef;
 
 extern "C" LLVMRustArchiveRef LLVMRustOpenArchive(char *Path) {
-  ErrorOr<std::unique_ptr<MemoryBuffer>> BufOr =
-      MemoryBuffer::getFile(Path, -1, false);
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufOr = MemoryBuffer::getFile(
+      Path, /*IsText*/ false, /*RequiresNullTerminator=*/false);
   if (!BufOr) {
     LLVMRustSetLastError(BufOr.getError().message().c_str());
     return nullptr;
@@ -143,8 +140,8 @@ extern "C" const char *
 LLVMRustArchiveChildName(LLVMRustArchiveChildConstRef Child, size_t *Size) {
   Expected<StringRef> NameOrErr = Child->getName();
   if (!NameOrErr) {
-    // rustc_codegen_llvm currently doesn't use this error string, but it might be
-    // useful in the future, and in the mean time this tells LLVM that the
+    // rustc_codegen_llvm currently doesn't use this error string, but it might
+    // be useful in the future, and in the meantime this tells LLVM that the
     // error was not ignored and that it shouldn't abort the process.
     LLVMRustSetLastError(toString(NameOrErr.takeError()).c_str());
     return nullptr;
@@ -152,19 +149,6 @@ LLVMRustArchiveChildName(LLVMRustArchiveChildConstRef Child, size_t *Size) {
   StringRef Name = NameOrErr.get();
   *Size = Name.size();
   return Name.data();
-}
-
-extern "C" const char *LLVMRustArchiveChildData(LLVMRustArchiveChildRef Child,
-                                                size_t *Size) {
-  StringRef Buf;
-  Expected<StringRef> BufOrErr = Child->getBuffer();
-  if (!BufOrErr) {
-    LLVMRustSetLastError(toString(BufOrErr.takeError()).c_str());
-    return nullptr;
-  }
-  Buf = BufOrErr.get();
-  *Size = Buf.size();
-  return Buf.data();
 }
 
 extern "C" LLVMRustArchiveMemberRef
@@ -182,10 +166,9 @@ extern "C" void LLVMRustArchiveMemberFree(LLVMRustArchiveMemberRef Member) {
   delete Member;
 }
 
-extern "C" LLVMRustResult
-LLVMRustWriteArchive(char *Dst, size_t NumMembers,
-                     const LLVMRustArchiveMemberRef *NewMembers,
-                     bool WriteSymbtab, LLVMRustArchiveKind RustKind) {
+extern "C" LLVMRustResult LLVMRustWriteArchive(
+    char *Dst, size_t NumMembers, const LLVMRustArchiveMemberRef *NewMembers,
+    bool WriteSymbtab, LLVMRustArchiveKind RustKind, bool isEC) {
 
   std::vector<NewArchiveMember> Members;
   auto Kind = fromRust(RustKind);
@@ -213,7 +196,10 @@ LLVMRustWriteArchive(char *Dst, size_t NumMembers,
     }
   }
 
-  auto Result = writeArchive(Dst, Members, WriteSymbtab, Kind, true, false);
+  auto SymtabMode = WriteSymbtab ? SymtabWritingMode::NormalSymtab
+                                 : SymtabWritingMode::NoSymtab;
+  auto Result =
+      writeArchive(Dst, Members, SymtabMode, Kind, true, false, nullptr, isEC);
   if (!Result)
     return LLVMRustResult::Success;
   LLVMRustSetLastError(toString(std::move(Result)).c_str());

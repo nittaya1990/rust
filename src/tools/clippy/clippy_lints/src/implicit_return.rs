@@ -1,36 +1,36 @@
-use clippy_utils::{
-    diagnostics::span_lint_and_sugg,
-    get_async_fn_body, is_async_fn,
-    source::{snippet_with_applicability, snippet_with_context, walk_span_to_context},
-    visitors::expr_visitor_no_bodies,
-};
+use clippy_utils::diagnostics::span_lint_hir_and_then;
+use clippy_utils::source::{snippet_with_applicability, snippet_with_context, walk_span_to_context};
+use clippy_utils::visitors::for_each_expr_without_closures;
+use clippy_utils::{get_async_fn_body, is_async_fn, is_from_proc_macro};
+use core::ops::ControlFlow;
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::{FnKind, Visitor};
+use rustc_hir::intravisit::FnKind;
 use rustc_hir::{Block, Body, Expr, ExprKind, FnDecl, FnRetTy, HirId};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
+use rustc_span::def_id::LocalDefId;
 use rustc_span::{Span, SyntaxContext};
 
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for missing return statements at the end of a block.
     ///
-    /// ### Why is this bad?
-    /// Actually omitting the return keyword is idiomatic Rust code. Programmers
-    /// coming from other languages might prefer the expressiveness of `return`. It's possible to miss
-    /// the last returning statement because the only difference is a missing `;`. Especially in bigger
-    /// code with multiple return paths having a `return` keyword makes it easier to find the
-    /// corresponding statements.
+    /// ### Why restrict this?
+    /// Omitting the return keyword whenever possible is idiomatic Rust code, but:
+    ///
+    /// * Programmers coming from other languages might prefer the expressiveness of `return`.
+    /// * It's possible to miss the last returning statement because the only difference is a missing `;`.
+    /// * Especially in bigger code with multiple return paths, having a `return` keyword makes it easier to find the
+    ///   corresponding statements.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(x: usize) -> usize {
     ///     x
     /// }
     /// ```
     /// add return
-    /// ```rust
+    /// ```no_run
     /// fn foo(x: usize) -> usize {
     ///     return x;
     /// }
@@ -43,31 +43,38 @@ declare_clippy_lint! {
 
 declare_lint_pass!(ImplicitReturn => [IMPLICIT_RETURN]);
 
-fn lint_return(cx: &LateContext<'_>, span: Span) {
-    let mut app = Applicability::MachineApplicable;
-    let snip = snippet_with_applicability(cx, span, "..", &mut app);
-    span_lint_and_sugg(
+fn lint_return(cx: &LateContext<'_>, emission_place: HirId, span: Span) {
+    span_lint_hir_and_then(
         cx,
         IMPLICIT_RETURN,
+        emission_place,
         span,
         "missing `return` statement",
-        "add `return` as shown",
-        format!("return {}", snip),
-        app,
+        |diag| {
+            let mut app = Applicability::MachineApplicable;
+            let snip = snippet_with_applicability(cx, span, "..", &mut app);
+            diag.span_suggestion_verbose(span, "add `return` as shown", format!("return {snip}"), app);
+        },
     );
 }
 
-fn lint_break(cx: &LateContext<'_>, break_span: Span, expr_span: Span) {
-    let mut app = Applicability::MachineApplicable;
-    let snip = snippet_with_context(cx, expr_span, break_span.ctxt(), "..", &mut app).0;
-    span_lint_and_sugg(
+fn lint_break(cx: &LateContext<'_>, emission_place: HirId, break_span: Span, expr_span: Span) {
+    span_lint_hir_and_then(
         cx,
         IMPLICIT_RETURN,
+        emission_place,
         break_span,
         "missing `return` statement",
-        "change `break` to `return` as shown",
-        format!("return {}", snip),
-        app,
+        |diag| {
+            let mut app = Applicability::MachineApplicable;
+            let snip = snippet_with_context(cx, expr_span, break_span.ctxt(), "..", &mut app).0;
+            diag.span_suggestion_verbose(
+                break_span,
+                "change `break` to `return` as shown",
+                format!("return {snip}"),
+                app,
+            );
+        },
     );
 }
 
@@ -145,14 +152,14 @@ fn lint_implicit_returns(
 
         ExprKind::Loop(block, ..) => {
             let mut add_return = false;
-            expr_visitor_no_bodies(|e| {
+            let _: Option<!> = for_each_expr_without_closures(block, |e| {
                 if let ExprKind::Break(dest, sub_expr) = e.kind {
                     if dest.target_id.ok() == Some(expr.hir_id) {
                         if call_site_span.is_none() && e.span.ctxt() == ctxt {
                             // At this point sub_expr can be `None` in async functions which either diverge, or return
                             // the unit type.
                             if let Some(sub_expr) = sub_expr {
-                                lint_break(cx, e.span, sub_expr.span);
+                                lint_break(cx, e.hir_id, e.span, sub_expr.span);
                             }
                         } else {
                             // the break expression is from a macro call, add a return to the loop
@@ -160,16 +167,15 @@ fn lint_implicit_returns(
                         }
                     }
                 }
-                true
-            })
-            .visit_block(block);
+                ControlFlow::Continue(())
+            });
             if add_return {
-                #[allow(clippy::option_if_let_else)]
+                #[expect(clippy::option_if_let_else)]
                 if let Some(span) = call_site_span {
-                    lint_return(cx, span);
+                    lint_return(cx, expr.hir_id, span);
                     LintLocation::Parent
                 } else {
-                    lint_return(cx, expr.span);
+                    lint_return(cx, expr.hir_id, expr.span);
                     LintLocation::Inner
                 }
             } else {
@@ -196,12 +202,12 @@ fn lint_implicit_returns(
 
         _ =>
         {
-            #[allow(clippy::option_if_let_else)]
+            #[expect(clippy::option_if_let_else)]
             if let Some(span) = call_site_span {
-                lint_return(cx, span);
+                lint_return(cx, expr.hir_id, span);
                 LintLocation::Parent
             } else {
-                lint_return(cx, expr.span);
+                lint_return(cx, expr.hir_id, expr.span);
                 LintLocation::Inner
             }
         },
@@ -216,16 +222,16 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
         decl: &'tcx FnDecl<'_>,
         body: &'tcx Body<'_>,
         span: Span,
-        _: HirId,
+        _: LocalDefId,
     ) {
         if (!matches!(kind, FnKind::Closure) && matches!(decl.output, FnRetTy::DefaultReturn(_)))
-            || span.ctxt() != body.value.span.ctxt()
-            || in_external_macro(cx.sess(), span)
+            || !span.eq_ctxt(body.value.span)
+            || span.in_external_macro(cx.sess().source_map())
         {
             return;
         }
 
-        let res_ty = cx.typeck_results().expr_ty(&body.value);
+        let res_ty = cx.typeck_results().expr_ty(body.value);
         if res_ty.is_unit() || res_ty.is_never() {
             return;
         }
@@ -236,8 +242,12 @@ impl<'tcx> LateLintPass<'tcx> for ImplicitReturn {
                 None => return,
             }
         } else {
-            &body.value
+            body.value
         };
+
+        if is_from_proc_macro(cx, expr) {
+            return;
+        }
         lint_implicit_returns(cx, expr, expr.span.ctxt(), None);
     }
 }

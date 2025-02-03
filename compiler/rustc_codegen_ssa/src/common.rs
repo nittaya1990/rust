@@ -1,18 +1,16 @@
 #![allow(non_camel_case_types)]
 
-use rustc_errors::struct_span_err;
-use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
-use rustc_middle::mir::interpret::ConstValue;
-use rustc_middle::ty::{self, layout::TyAndLayout, Ty, TyCtxt};
-use rustc_session::Session;
+use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::ty::{self, Instance, TyCtxt};
+use rustc_middle::{bug, mir, span_bug};
+use rustc_session::cstore::{DllCallingConvention, DllImport, PeImportNameType};
 use rustc_span::Span;
+use rustc_target::spec::Target;
 
-use crate::base;
-use crate::traits::BuilderMethods;
 use crate::traits::*;
 
+#[derive(Copy, Clone, Debug)]
 pub enum IntPredicate {
     IntEQ,
     IntNE,
@@ -26,6 +24,7 @@ pub enum IntPredicate {
     IntSLE,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum RealPredicate {
     RealPredicateFalse,
     RealOEQ,
@@ -45,6 +44,7 @@ pub enum RealPredicate {
     RealPredicateTrue,
 }
 
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum AtomicRmwBinOp {
     AtomicXchg,
     AtomicAdd,
@@ -59,17 +59,17 @@ pub enum AtomicRmwBinOp {
     AtomicUMin,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum AtomicOrdering {
-    NotAtomic,
     Unordered,
-    Monotonic,
-    // Consume,  // Not specified yet.
+    Relaxed,
     Acquire,
     Release,
     AcquireRelease,
     SequentiallyConsistent,
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum SynchronizationScope {
     SingleThread,
     CrossThread,
@@ -92,7 +92,6 @@ pub enum TypeKind {
     Pointer,
     Vector,
     Metadata,
-    X86_MMX,
     Token,
     ScalableVector,
     BFloat,
@@ -108,8 +107,9 @@ pub enum TypeKind {
 //            for now we content ourselves with providing a no-op HashStable
 //            implementation for CGUs.
 mod temp_stable_hash_impls {
-    use crate::ModuleCodegen;
     use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+
+    use crate::ModuleCodegen;
 
     impl<HCX, M> HashStable<HCX> for ModuleCodegen<M> {
         fn hash_stable(&self, _: &mut HCX, _: &mut StableHasher) {
@@ -118,55 +118,18 @@ mod temp_stable_hash_impls {
     }
 }
 
-pub fn langcall(tcx: TyCtxt<'_>, span: Option<Span>, msg: &str, li: LangItem) -> DefId {
-    tcx.lang_items().require(li).unwrap_or_else(|s| {
-        let msg = format!("{} {}", msg, s);
-        match span {
-            Some(span) => tcx.sess.span_fatal(span, &msg),
-            None => tcx.sess.fatal(&msg),
-        }
-    })
+pub(crate) fn build_langcall<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+    bx: &Bx,
+    span: Option<Span>,
+    li: LangItem,
+) -> (Bx::FnAbiOfResult, Bx::Value, Instance<'tcx>) {
+    let tcx = bx.tcx();
+    let def_id = tcx.require_lang_item(li, span);
+    let instance = ty::Instance::mono(tcx, def_id);
+    (bx.fn_abi_of_instance(instance, ty::List::empty()), bx.get_fn_addr(instance), instance)
 }
 
-// To avoid UB from LLVM, these two functions mask RHS with an
-// appropriate mask unconditionally (i.e., the fallback behavior for
-// all shifts). For 32- and 64-bit types, this matches the semantics
-// of Java. (See related discussion on #1877 and #10183.)
-
-pub fn build_unchecked_lshift<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
-    bx: &mut Bx,
-    lhs: Bx::Value,
-    rhs: Bx::Value,
-) -> Bx::Value {
-    let rhs = base::cast_shift_expr_rhs(bx, hir::BinOpKind::Shl, lhs, rhs);
-    // #1877, #10183: Ensure that input is always valid
-    let rhs = shift_mask_rhs(bx, rhs);
-    bx.shl(lhs, rhs)
-}
-
-pub fn build_unchecked_rshift<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
-    bx: &mut Bx,
-    lhs_t: Ty<'tcx>,
-    lhs: Bx::Value,
-    rhs: Bx::Value,
-) -> Bx::Value {
-    let rhs = base::cast_shift_expr_rhs(bx, hir::BinOpKind::Shr, lhs, rhs);
-    // #1877, #10183: Ensure that input is always valid
-    let rhs = shift_mask_rhs(bx, rhs);
-    let is_signed = lhs_t.is_signed();
-    if is_signed { bx.ashr(lhs, rhs) } else { bx.lshr(lhs, rhs) }
-}
-
-fn shift_mask_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
-    bx: &mut Bx,
-    rhs: Bx::Value,
-) -> Bx::Value {
-    let rhs_llty = bx.val_ty(rhs);
-    let shift_val = shift_mask_val(bx, rhs_llty, rhs_llty, false);
-    bx.and(rhs, shift_val)
-}
-
-pub fn shift_mask_val<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+pub(crate) fn shift_mask_val<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     llty: Bx::Type,
     mask_llty: Bx::Type,
@@ -192,20 +155,16 @@ pub fn shift_mask_val<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     }
 }
 
-pub fn span_invalid_monomorphization_error(a: &Session, b: Span, c: &str) {
-    struct_span_err!(a, b, E0511, "{}", c).emit();
-}
-
 pub fn asm_const_to_str<'tcx>(
     tcx: TyCtxt<'tcx>,
     sp: Span,
-    const_value: ConstValue<'tcx>,
+    const_value: mir::ConstValue<'tcx>,
     ty_and_layout: TyAndLayout<'tcx>,
 ) -> String {
-    let ConstValue::Scalar(scalar) = const_value else {
+    let mir::ConstValue::Scalar(scalar) = const_value else {
         span_bug!(sp, "expected Scalar for promoted asm const, but got {:#?}", const_value)
     };
-    let value = scalar.assert_bits(ty_and_layout.size);
+    let value = scalar.assert_scalar_int().to_bits(ty_and_layout.size);
     match ty_and_layout.ty.kind() {
         ty::Uint(_) => value.to_string(),
         ty::Int(int_ty) => match int_ty.normalize(tcx.sess.target.pointer_width) {
@@ -218,4 +177,71 @@ pub fn asm_const_to_str<'tcx>(
         },
         _ => span_bug!(sp, "asm const has bad type {}", ty_and_layout.ty),
     }
+}
+
+pub fn is_mingw_gnu_toolchain(target: &Target) -> bool {
+    target.vendor == "pc" && target.os == "windows" && target.env == "gnu" && target.abi.is_empty()
+}
+
+pub fn i686_decorated_name(
+    dll_import: &DllImport,
+    mingw: bool,
+    disable_name_mangling: bool,
+    force_fully_decorated: bool,
+) -> String {
+    let name = dll_import.name.as_str();
+
+    let (add_prefix, add_suffix) = match (force_fully_decorated, dll_import.import_name_type) {
+        // No prefix is a bit weird, in that LLVM/ar_archive_writer won't emit it, so we will
+        // ignore `force_fully_decorated` and always partially decorate it.
+        (_, Some(PeImportNameType::NoPrefix)) => (false, true),
+        (false, Some(PeImportNameType::Undecorated)) => (false, false),
+        _ => (true, true),
+    };
+
+    // Worst case: +1 for disable name mangling, +1 for prefix, +4 for suffix (@@__).
+    let mut decorated_name = String::with_capacity(name.len() + 6);
+
+    if disable_name_mangling {
+        // LLVM uses a binary 1 ('\x01') prefix to a name to indicate that mangling needs to be
+        // disabled.
+        decorated_name.push('\x01');
+    }
+
+    let prefix = if add_prefix && dll_import.is_fn {
+        match dll_import.calling_convention {
+            DllCallingConvention::C | DllCallingConvention::Vectorcall(_) => None,
+            DllCallingConvention::Stdcall(_) => (!mingw
+                || dll_import.import_name_type == Some(PeImportNameType::Decorated))
+            .then_some('_'),
+            DllCallingConvention::Fastcall(_) => Some('@'),
+        }
+    } else if !dll_import.is_fn && !mingw {
+        // For static variables, prefix with '_' on MSVC.
+        Some('_')
+    } else {
+        None
+    };
+    if let Some(prefix) = prefix {
+        decorated_name.push(prefix);
+    }
+
+    decorated_name.push_str(name);
+
+    if add_suffix && dll_import.is_fn {
+        use std::fmt::Write;
+
+        match dll_import.calling_convention {
+            DllCallingConvention::C => {}
+            DllCallingConvention::Stdcall(arg_list_size)
+            | DllCallingConvention::Fastcall(arg_list_size) => {
+                write!(&mut decorated_name, "@{arg_list_size}").unwrap();
+            }
+            DllCallingConvention::Vectorcall(arg_list_size) => {
+                write!(&mut decorated_name, "@@{arg_list_size}").unwrap();
+            }
+        }
+    }
+
+    decorated_name
 }

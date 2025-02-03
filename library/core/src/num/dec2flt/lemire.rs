@@ -6,7 +6,7 @@ use crate::num::dec2flt::table::{
     LARGEST_POWER_OF_FIVE, POWER_OF_FIVE_128, SMALLEST_POWER_OF_FIVE,
 };
 
-/// Compute a float using an extended-precision representation.
+/// Compute w * 10^q using an extended-precision float representation.
 ///
 /// Fast conversion of a the significant digits and decimal exponent
 /// a float to an extended representation with a binary float. This
@@ -76,7 +76,7 @@ pub fn compute_float<F: RawFloat>(q: i64, mut w: u64) -> BiasedFp {
         return BiasedFp { f: mantissa, e: power2 };
     }
     // Need to handle rounding ties. Normally, we need to round up,
-    // but if we fall right in between and and we have an even basis, we
+    // but if we fall right in between and we have an even basis, we
     // need to round down.
     //
     // This will only occur if:
@@ -118,10 +118,12 @@ pub fn compute_float<F: RawFloat>(q: i64, mut w: u64) -> BiasedFp {
 /// This uses a pre-computed integer approximation for
 /// log2(10), where 217706 / 2^16 is accurate for the
 /// entire range of non-finite decimal exponents.
+#[inline]
 fn power(q: i32) -> i32 {
     (q.wrapping_mul(152_170 + 65536) >> 16) + 63
 }
 
+#[inline]
 fn full_multiplication(a: u64, b: u64) -> (u64, u64) {
     let r = (a as u128) * (b as u128);
     (r as u64, (r >> 64) as u64)
@@ -155,7 +157,7 @@ fn compute_product_approx(q: i64, w: u64, precision: usize) -> (u64, u64) {
         // Need to do a second multiplication to get better precision
         // for the lower product. This will always be exact
         // where q is < 55, since 5^55 < 2^128. If this wraps,
-        // then we need to need to round up the hi product.
+        // then we need to round up the hi product.
         let (_, second_hi) = full_multiplication(w, hi5);
         first_lo = first_lo.wrapping_add(second_hi);
         if second_hi > first_lo {
